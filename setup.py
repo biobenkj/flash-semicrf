@@ -50,22 +50,26 @@ def get_cuda_extensions():
         print("Warning: Could not check CUDA availability, skipping CUDA build")
         return []
 
-    csrc_dir = Path(__file__).parent / "src" / "torch_semimarkov" / "_genbmm" / "csrc"
+    # Use relative paths from setup.py directory (required by setuptools)
+    csrc_rel = os.path.join("src", "torch_semimarkov", "_genbmm", "csrc")
+    csrc_abs = Path(__file__).parent / csrc_rel
 
-    if not csrc_dir.exists():
-        print(f"Warning: CUDA source directory not found at {csrc_dir}")
+    if not csrc_abs.exists():
+        print(f"Warning: CUDA source directory not found at {csrc_abs}")
         return []
 
+    # Relative paths for setuptools
     sources = [
-        str(csrc_dir / "matmul_cuda.cpp"),
-        str(csrc_dir / "matmul_cuda_kernel.cu"),
-        str(csrc_dir / "banded_cuda_kernel.cu"),
+        os.path.join(csrc_rel, "matmul_cuda.cpp"),
+        os.path.join(csrc_rel, "matmul_cuda_kernel.cu"),
+        os.path.join(csrc_rel, "banded_cuda_kernel.cu"),
     ]
 
-    # Check all source files exist
+    # Check all source files exist (using absolute paths for check)
     for src in sources:
-        if not Path(src).exists():
-            print(f"Warning: CUDA source file not found: {src}")
+        src_abs = Path(__file__).parent / src
+        if not src_abs.exists():
+            print(f"Warning: CUDA source file not found: {src_abs}")
             return []
 
     return [

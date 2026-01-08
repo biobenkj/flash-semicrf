@@ -7,7 +7,7 @@ name = "torch-semimarkov"
 version = "0.1.0"
 description = "Efficient Semi-Markov CRF Inference for PyTorch"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Benjamin K. Johnson", email = "ben.johnson@example.com"}
 ]
