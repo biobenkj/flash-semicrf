@@ -125,70 +125,107 @@ partition = semi_crf_triton_forward(edge, lengths)  # uses Triton automatically 
 
 ## Testing
 
-Verify all backends produce equivalent results:
+The test suite includes ~2,900 lines of tests across 15 test files:
 
 ```bash
-# Run full test suite
+# Run full test suite (CPU-only by default)
 pytest tests/ -v
 
-# Quick equivalence check
-python tests/test_backend_equivalence.py --device cuda --quick
-
-# All backends (smaller configs to avoid OOM)
-python tests/test_backend_equivalence.py --device cuda --configs small,medium
+# Run with coverage
+pytest tests/ --cov=torch_semimarkov --cov-report=term-missing
 ```
+
+### Test Coverage
+
+| Test File | Coverage |
+|-----------|----------|
+| `test_backend_equivalence.py` | All backends produce identical results |
+| `test_semimarkov_utils.py` | sum(), marginals(), to_parts()/from_parts() |
+| `test_hsmm.py` | Hidden semi-Markov model integration |
+| `test_numerical_gradients.py` | Gradient correctness via finite differences |
+| `test_error_handling.py` | Invalid inputs and edge cases |
+| `test_semimarkov_banded.py` | Banded backend operations |
+| `test_cpu_only.py` | CPU fallback behavior |
+| `test_partition_equivalence.py` | Streaming scan ring buffer correctness |
+| `test_banded_matrix.py` | BandedMatrix unit tests |
+| `test_semirings.py` | Semiring operations (Log, Max, Std, etc.) |
+| `test_blocktriangular.py` | Block-triangular matmul |
+| `test_banded_utils.py` | Bandwidth measurement, permutations |
+| `test_checkpoint_semiring.py` | Gradient checkpointing |
+| `test_helpers_cpu.py` | Base _Struct class |
+| `test_triton_scan.py` | Triton kernel fallback |
+
+Note: Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.
 
 ## Project Structure
 
 ```
 torch-semimarkov/
-├── docs/
-│   ├── api.md                  # API reference
-│   ├── backends.md             # Backend overview and Triton kernel
-│   ├── benchmarks.md           # Benchmark recipes
-│   ├── disclosure.md           # AI-assisted development disclosure
-│   └── parameter_guide.md      # T/K/C parameter guide
 ├── src/torch_semimarkov/
-│   ├── __init__.py              # Main exports
+│   ├── __init__.py              # Main exports (SemiMarkov, BandedMatrix, semirings)
 │   ├── semimarkov.py            # SemiMarkov class with DP algorithms
 │   │                            #   - _dp_standard (scalar linear scan)
-│   │                            #   - _dp_standard_vectorized (vectorized)
-│   │                            #   - _dp_scan_streaming (O(KC) memory)
-│   │                            #   - logpartition (binary tree)
-│   ├── helpers.py               # Base structured prediction class
+│   │                            #   - _dp_standard_vectorized (vectorized, 2-3x faster)
+│   │                            #   - _dp_scan_streaming (O(KC) memory, default)
+│   │                            #   - _dp_blocktriangular (structured sparsity)
+│   ├── helpers.py               # Base _Struct class for structured prediction
 │   ├── banded.py                # CPU BandedMatrix implementation
-│   ├── banded_utils.py          # Bandwidth measurement, permutations
+│   ├── banded_utils.py          # Bandwidth measurement, permutation utilities
 │   ├── blocktriangular.py       # Block-triangular matrix operations
-│   ├── triton_scan.py           # Triton fused streaming scan (optional)
+│   ├── triton_scan.py           # Triton fused streaming scan (optional GPU)
 │   ├── semirings/
-│   │   ├── __init__.py          # Semiring exports
-│   │   ├── semirings.py         # Log, Max, Standard, KMax, Entropy
+│   │   ├── semirings.py         # Log, Max, Std, KMax, Entropy, CrossEntropy
 │   │   └── checkpoint.py        # CheckpointSemiring, CheckpointShardSemiring
 │   └── _genbmm/                 # CUDA extension (optional)
-│       ├── __init__.py
 │       ├── genmul.py            # PyTorch autograd functions
 │       ├── sparse.py            # BandedMatrix with CUDA
-│       └── csrc/                # CUDA kernel sources
-│           ├── matmul_cuda.cpp
-│           ├── matmul_cuda_kernel.cu
-│           └── banded_cuda_kernel.cu
+│       └── csrc/                # C++/CUDA kernel sources
+├── tests/                       # ~2,900 LOC across 15 test files
+│   ├── conftest.py              # Pytest config (CPU-only enforcement)
+│   ├── test_backend_equivalence.py
+│   ├── test_semimarkov_utils.py
+│   ├── test_hsmm.py
+│   ├── test_numerical_gradients.py
+│   ├── test_error_handling.py
+│   ├── test_semimarkov_banded.py
+│   ├── test_cpu_only.py
+│   ├── test_partition_equivalence.py
+│   ├── test_banded_matrix.py
+│   ├── test_semirings.py
+│   ├── test_blocktriangular.py
+│   ├── test_banded_utils.py
+│   ├── test_checkpoint_semiring.py
+│   ├── test_helpers_cpu.py
+│   └── test_triton_scan.py
 ├── benchmarks/
 │   ├── benchmark_backends.py    # Multi-backend timing comparison
 │   ├── benchmark_grid.py        # Parameter sweep benchmarks
-│   ├── benchmark_memory_analysis.py  # Memory profiling
+│   ├── benchmark_memory_analysis.py
 │   └── plot_figures.py          # Paper figure generation
-├── tests/
-│   ├── test_backend_equivalence.py   # All-backend equivalence tests
-│   ├── test_partition_equivalence.py # Streaming scan tests
-│   ├── test_triton_scan.py           # Triton scan fallback tests
-│   ├── test_banded_matrix.py         # BandedMatrix unit tests
-│   ├── test_banded_utils.py          # Banded utilities tests
-│   ├── test_blocktriangular.py       # Block-triangular matmul tests
-│   ├── test_semirings.py             # Semiring unit tests
-│   └── test_semimarkov_utils.py      # SemiMarkov helpers tests
-├── pyproject.toml
+├── docs/
+│   ├── api.md                   # API reference
+│   ├── backends.md              # Backend overview and Triton kernel
+│   ├── benchmarks.md            # Benchmark recipes
+│   ├── parameter_guide.md       # T/K/C parameter guide
+│   └── disclosure.md            # AI-assisted development disclosure
+├── pyproject.toml               # Modern Python packaging
 └── setup.py                     # CUDA extension build
 ```
+
+## Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Streaming Scan** | ✅ Complete | O(KC) memory, default backend |
+| **Vectorized Scan** | ✅ Complete | O(TKC) memory, 2-3x faster |
+| **Binary Tree** | ✅ Complete | O(log N) depth, high memory for large KC |
+| **Block-Triangular** | ✅ Complete | Exploits duration constraint sparsity |
+| **Semirings** | ✅ Complete | Log, Max, Std, KMax, Entropy, CrossEntropy |
+| **Checkpoint Semiring** | ✅ Complete | Memory-efficient gradients |
+| **BandedMatrix (CPU)** | ✅ Complete | Lightweight prototyping |
+| **CUDA Extension** | ✅ Optional | Builds when nvcc available |
+| **Triton Kernel** | ✅ Optional | ~45x speedup on GPU |
+| **Test Suite** | ✅ Comprehensive | ~2,900 LOC, 15 test files |
 
 ## Citation
 
