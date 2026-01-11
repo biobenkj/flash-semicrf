@@ -26,7 +26,7 @@ class SemiMarkov(_Struct):
         lengths=None,
         force_grad=False,
         use_linear_scan=None,
-        use_vectorized=True,
+        use_vectorized=False,
         use_banded=False,
         banded_perm: str = "auto",
         banded_bw_ratio: float = 0.6,
@@ -40,9 +40,10 @@ class SemiMarkov(_Struct):
             force_grad: If True, force gradient computation even if not needed
             use_linear_scan: Algorithm selection
                 - None (default): Auto-select based on state space size (KC > 200 -> linear scan)
-                - True: Use O(N) linear scan - Lower memory O(TKC), recommended for most uses
+                - True: Use O(N) linear scan - Lower memory O(KC), recommended for most uses
                 - False: Use O(log N) binary tree - Warning: creates O((KC)^3) temporaries per matmul
-            use_vectorized: If True (default), use vectorized linear scan for 2-3x speedup
+            use_vectorized: If True, use vectorized linear scan (2-3x faster but O(TKC) memory).
+                Default is False (streaming scan with O(KC) memory).
             use_banded: If True, attempt banded path (prototype); falls back to linear scan for now.
             banded_perm: Permutation strategy for banded path ("auto", "none", "snake", "rcm").
             banded_bw_ratio: Threshold (fraction of dense width) to allow banded; above this uses dense.
@@ -80,36 +81,12 @@ class SemiMarkov(_Struct):
             if use_vectorized:
                 return self._dp_standard_vectorized(log_potentials, lengths, force_grad)
             else:
-                return self._dp_standard(log_potentials, lengths, force_grad)
+                return self._dp_scan_streaming(log_potentials, lengths, force_grad)
 
         # Binary tree algorithm: check and prepare potentials
         log_potentials, batch, N, K, C, lengths = self._check_potentials(log_potentials, lengths)
 
-        # Binary tree algorithm (original implementation below)
-        #
-        # MEMORY WARNING: The binary tree achieves O(log N) sequential depth but has
-        # significant memory overhead from log-semiring matrix multiplication.
-        #
-        # The semiring.matmul() for LogSemiring computes:
-        #   result[i,k] = logsumexp_j(A[i,j] + B[j,k])
-        #
-        # This is implemented via broadcasting:
-        #   A.unsqueeze(-1) + B.unsqueeze(-3)  # (KC,KC,1) + (1,KC,KC) -> (KC,KC,KC)
-        #
-        # This creates an O((KC)^3) temporary tensor for EACH matrix multiply.
-        # At the base tree level, we do ~T/2 such multiplies, creating massive
-        # memory pressure that often causes OOM before the O(log N) depth helps.
-        #
-        # To mitigate this, use CheckpointShardSemiring which splits the matmul
-        # into smaller chunks, trading time for memory:
-        #   from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
-        #   ShardedLogSemiring = CheckpointShardSemiring(LogSemiring, max_size=10000)
-        #   struct = SemiMarkov(ShardedLogSemiring)
-        #
-        # For most practical applications, the linear scan backends are recommended
-        # as they avoid this O((KC)^3) temporary issue entirely.
-        #
-        # Setup
+        # Binary tree algorithm - O((KC)^3) per matmul, use linear scan for large state spaces
         semiring = self.semiring
         ssize = semiring.size()
         log_potentials.requires_grad_(True)
@@ -746,7 +723,6 @@ class SemiMarkov(_Struct):
             if on[i][1] == 0:
                 labels[on[i][0], on[i][1]] = on[i][4]
             labels[on[i][0], on[i][1] + on[i][2]] = on[i][3]
-        # print(edge.nonzero(), labels)
         return labels, (C, K)
 
     # Adapters

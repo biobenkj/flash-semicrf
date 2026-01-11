@@ -420,7 +420,7 @@ def TempMax(alpha):
 
         @staticmethod
         def sum(xs, dim=-1):
-            pass
+            return torch.max(xs, dim=dim)[0]
 
         @staticmethod
         def sparse_sum(xs, dim=-1):

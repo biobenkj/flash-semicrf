@@ -8,14 +8,16 @@ class SemiMarkov(semiring):
         self,
         edge,                    # (batch, T-1, K, C, C) potentials
         lengths=None,            # (batch,) sequence lengths
-        use_linear_scan=True,    # Use O(T) linear scan (default: auto-select)
-        use_vectorized=True,     # Vectorize inner loops
+        use_linear_scan=None,    # Auto-select based on KC (>200 uses linear scan)
+        use_vectorized=False,    # Use vectorized scan (O(TKC) memory, 2-3x faster)
         use_banded=False,        # Use banded matrix operations
         banded_perm="auto",      # Permutation strategy
         banded_bw_ratio=0.6,     # Bandwidth threshold
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Compute log partition function and backward pointers.
+
+        Default uses streaming scan with O(KC) memory.
 
         Returns:
             v: (batch,) log partition values
@@ -30,7 +32,7 @@ class SemiMarkov(semiring):
         force_grad=False,
     ) -> Tuple[Tensor, List[Tensor], None]:
         """
-        Streaming scan with O(KC) DP state.
+        Streaming scan with O(KC) DP state (default).
         """
 ```
 
@@ -51,10 +53,11 @@ from torch_semimarkov.semirings.checkpoint import (
 )
 ```
 
-## Triton fused streaming scan
+## Triton fused streaming scan (up to 45x speedup)
 
 ```python
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
-partition = semi_crf_triton_forward(edge, lengths, use_triton=True)
+# Uses Triton automatically on CUDA, falls back to PyTorch on CPU
+partition = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
 ```

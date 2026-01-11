@@ -15,12 +15,12 @@ This library provides optimized implementations of Semi-Markov CRF inference alg
 > **Practical Semi-Markov CRF Inference for Genomic Sequence Annotation**
 > Benjamin K. Johnson (2026)
 
-**Key finding:** Memory, not time, is the binding constraint. Vectorized linear scan is universally applicable across all genomic parameter regimes.
+**Key finding:** Memory, not time, is the binding constraint. Streaming linear scan is universally applicable across all genomic parameter regimes.
 
 Highlights:
-- Vectorized linear scan (2-3x speedup) for general use
-- True streaming scan with O(KC) memory via ring buffer
-- Optional Triton fused streaming kernel for GPU acceleration
+- Streaming scan with O(KC) memory (default) - within a few percent of vectorized speed
+- Optional Triton fused kernel for up to 45x GPU speedup
+- Vectorized scan available when memory permits (O(TKC) memory, 2-3x faster than scalar)
 
 ## Why Semi-Markov CRFs?
 
@@ -98,25 +98,21 @@ edge = torch.randn(batch_size, seq_length - 1, max_duration, num_classes, num_cl
 lengths = torch.full((batch_size,), seq_length)
 
 # Forward pass (partition function)
-log_Z, _, _ = model.logpartition(
-    edge,
-    lengths=lengths,
-    use_linear_scan=True,      # O(T) linear scan
-    use_vectorized=True,       # Vectorized (2-3x speedup)
-)
+# Uses streaming scan by default: O(KC) memory, within a few percent of vectorized speed
+log_Z, _, _ = model.logpartition(edge, lengths=lengths)
 
 # Backward pass for gradients
 log_Z.sum().backward()
 ```
 
-### Triton Fused Streaming Kernel
+### Triton Fused Streaming Kernel (up to 45x speedup)
 
 ```python
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
 edge = edge.cuda()
 lengths = lengths.cuda()
-partition = semi_crf_triton_forward(edge, lengths, use_triton=True)
+partition = semi_crf_triton_forward(edge, lengths)  # uses Triton automatically on CUDA
 ```
 
 ## Documentation

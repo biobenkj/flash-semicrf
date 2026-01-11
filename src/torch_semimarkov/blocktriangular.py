@@ -321,32 +321,10 @@ def block_triang_matmul(
     """
     Block-triangular semiring matmul: E = C (x) D.
 
-    Args:
-        C_bt: Left block-triangular matrix
-        D_bt: Right block-triangular matrix
-        semiring: Semiring for operations
-        span: Maximum duration constraint (k1 + k3 <= span)
-        debug: If True, print debug information
+    Input matrices must have invalid blocks filled with semiring.zero.item()
+    (not 0.0) to prevent contamination in log-space arithmetic.
 
-    Important Implementation Notes:
-        - CRITICAL: Input matrices must have invalid blocks filled with semiring.zero.item()
-          (not 0.0) to prevent contamination in log-space arithmetic. In LogSemiring,
-          0.0 represents exp(0)=1.0, which incorrectly contributes to logsumexp operations.
-        - Semiring operations require convert/unconvert wrapping around matmul
-        - Use semiring.plus (not semiring.add) for accumulation
-
-    Performance Optimizations:
-        - **Structure caching**: CSR metadata (triplets, pointers) is cached per (K, span, device).
-          In training, where you call matmul repeatedly with the same structure but different
-          values, this provides 2-3x speedup by avoiding O(K^3) triplet rebuilding.
-        - **CSR-style sorted accumulation**: Triplets are sorted by output block index,
-          enabling vectorized reduction per block instead of per-triplet Python loops
-        - **Vectorized semiring.sum**: Uses GPU-accelerated logsumexp/max/sum operations
-        - **Minimal CUDA sync points**: Only num_e_blocks .item() calls instead of num_triplets
-        - For typical Semi-Markov regimes (K<=20, C<=6), these optimizations provide:
-          * 2-3x speedup from caching (for repeated calls with same K, span)
-          * ~70% reduction in CUDA sync overhead
-          * Vectorized GPU operations for all reductions
+    Structure is cached per (K, span, device) for repeated calls.
     """
     assert C_bt.K == D_bt.K, "K mismatch"
     assert C_bt.C == D_bt.C, "C mismatch"
