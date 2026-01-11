@@ -473,9 +473,7 @@ def plot_backend_comparison(df: pd.DataFrame, output_dir: Path):
     print(f"Saved {output_path}")
 
 
-def plot_absolute_metrics(
-    df: pd.DataFrame, output_dir: Path, T_values: Optional[list[int]] = None
-):
+def plot_absolute_metrics(df: pd.DataFrame, output_dir: Path, T_values: Optional[list[int]] = None):
     """
     Plot absolute time and memory vs state size (not ratios).
     Useful when baseline is missing or for overall picture.
