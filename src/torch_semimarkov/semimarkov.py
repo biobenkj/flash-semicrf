@@ -272,9 +272,7 @@ class SemiMarkov(_Struct):
 
         Optimizations over _dp_standard:
         1. Alpha update: Direct broadcasting instead of semiring.dot
-        2. Beta accumulation: Advanced indexing instead of list comprehension
-
-        Expected speedup: 2-3x while maintaining same memory profile.
+        2. Beta accumulation: Advanced indexing instead of list comprehension.
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -322,10 +320,7 @@ class SemiMarkov(_Struct):
         """
         True streaming O(N) scan that does NOT allocate O(T*K*C) alpha or O(T*C) beta.
 
-        Memory profile: O(K*C) DP state (ring buffer of last K betas)
-
-        This matches the paper's "memory is the constraint" narrative: the linear scan's
-        resident DP memory does not scale with sequence length T.
+        Memory profile: O(K*C) DP state (ring buffer of last K betas).
 
         Recurrence:
             beta[n, c] = logsumexp_{k=1..min(K-1,n), c_prev} (
@@ -521,6 +516,7 @@ class SemiMarkov(_Struct):
         self, edge, lengths=None, force_grad=False, banded_perm="auto", banded_bw_ratio=0.6
     ):
         """
+        PROTOTYPE AND NOT MEANT FOR PRODUCTION USE.
         Banded Semi-Markov binary tree forward pass.
 
         Uses BandedMatrix representations to exploit implicit sparsity from
@@ -736,7 +732,7 @@ class SemiMarkov(_Struct):
                       auxiliary state whose purpose is to induce a distribution over z_0.)
             transition_z_to_z: C X C (transition_z_to_z[i][j] = log P(z_{n+1}=j | z_n=i),
                                note that the order of z_{n+1} and z_n is different
-                               from `edges`.)
+                               from edges.)
             transition_z_to_l: C X K (transition_z_to_l[i][j] = P(l_n=j | z_n=i))
             emission_n_l_z: b x N x K x C
 
