@@ -64,6 +64,9 @@ Or using environment variable:
 TORCH_SEMIMARKOV_CUDA=1 pip install -e .
 ```
 
+Note: Building the CUDA extension requires a CUDA toolkit (nvcc) available via
+`CUDA_HOME`. If the toolkit is not found, the build is skipped.
+
 ### Optional Triton Kernel (GPU)
 
 The fused streaming kernel uses [Triton](https://github.com/openai/triton) and is optional:

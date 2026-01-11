@@ -32,20 +32,13 @@ def get_cuda_extensions():
         return []
 
     try:
-        from torch.utils.cpp_extension import CUDAExtension
+        from torch.utils.cpp_extension import CUDAExtension, CUDA_HOME
     except ImportError:
         print("Warning: torch.utils.cpp_extension not available, skipping CUDA build")
         return []
 
-    # Check CUDA availability
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            print("Warning: CUDA not available, skipping CUDA extension build")
-            return []
-    except Exception:
-        print("Warning: Could not check CUDA availability, skipping CUDA build")
+    if CUDA_HOME is None:
+        print("Warning: CUDA toolkit not found (CUDA_HOME unset), skipping CUDA build")
         return []
 
     # Use relative paths from setup.py directory (required by setuptools)
