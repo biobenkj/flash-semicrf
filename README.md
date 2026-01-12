@@ -20,7 +20,7 @@ Semi-Markov CRFs are powerful models for sequences with natural segment structur
 
 Existing implementations navigate this through various tradeoffs—bounding $D$, chunked processing, or filtering heuristics. This package takes a different approach:
 
-> **Key insight:** Streaming the linear scan collapses memory to $O(KC)$—independent of sequence length and duration.
+Streaming the linear scan collapses memory to $O(KC)$—independent of sequence length and duration.
 
 This makes Semi-Markov CRF inference practical for genome-scale annotation without architectural compromises.
 
@@ -34,7 +34,7 @@ This makes Semi-Markov CRF inference practical for genome-scale annotation witho
 
 ## Why Semi-Markov CRFs in genomics contexts?
 
-Many biological sequences have inherent *segment* structure like genes, exons, chromatin states, transposable elements, etc. where segment *duration* carries biological meaning. Linear-chain CRFs handle sequential dependencies well but lack explicit duration modeling, often requiring post-hoc grouping or producing biologically implausible outputs (single-base "exons," fragmentary annotations).
+Many biological sequences have inherent *segment* structurelike genes, exons, transcript isoforms, chromatin states, transposable elements, etc. where segment *duration* carries biological meaning. Linear-chain CRFs handle sequential dependencies well but lack explicit duration modeling, often requiring post-hoc grouping or producing biologically implausible outputs (single-base "exons," fragmentary annotations).
 
 Semi-Markov CRFs resolve this by modeling segments directly. The potential function scores an entire segment spanning positions $s$ to $e$:
 
@@ -47,6 +47,8 @@ This formulation provides:
 - **Valid segmentations by construction** — segments tile the sequence exactly, eliminating post-processing
 - **Explicit duration modeling** — encode priors like "exons are typically 50–300 bp"
 - **Segment-level posteriors** — enable calibration and principled uncertainty quantification over whole features, not just positions
+
+These properties also make Semi-Markov CRFs natural structured decoders for neural sequence encoders, adding output guarantees that per-position prediction heads typically don't provide.
 
 ## Installation
 
