@@ -1,3 +1,28 @@
+r"""Semiring implementations for structured prediction.
+
+This module provides semiring abstractions that enable different inference
+algorithms using the same underlying dynamic programming structure:
+
+- :class:`LogSemiring`: Log-space operations (logsumexp, +). Gradients give marginals.
+- :class:`MaxSemiring`: Max-plus operations for Viterbi. Gradients give argmax.
+- :class:`StdSemiring`: Standard counting semiring (+, *).
+- :func:`KMaxSemiring`: K-best structures.
+- :class:`EntropySemiring`: Entropy computation.
+- :class:`CrossEntropySemiring`: Cross-entropy between distributions.
+- :class:`KLDivergenceSemiring`: KL divergence computation.
+
+The semiring abstraction allows the same DP algorithm to compute different
+quantities by changing the semiring operations.
+
+Examples::
+
+    >>> from torch_semimarkov.semirings import LogSemiring, MaxSemiring
+    >>> # LogSemiring computes partition function, gradients give marginals
+    >>> model = SemiMarkov(LogSemiring)
+    >>> # MaxSemiring computes Viterbi score, gradients give argmax
+    >>> model = SemiMarkov(MaxSemiring)
+"""
+
 import torch
 
 # Try to import genbmm CUDA extension (optional)
@@ -31,40 +56,73 @@ def matmul(cls, a, b):
 
 
 class Semiring:
-    """
-    Base semiring class.
+    r"""Base semiring class for structured prediction algorithms.
 
-    Based on description in:
+    A semiring :math:`(K, \oplus, \otimes, \bar{0}, \bar{1})` provides:
 
-    * Semiring parsing :cite:`goodman1999semiring`
+    - A set K of values
+    - An addition operation :math:`\oplus` (commutative, associative)
+    - A multiplication operation :math:`\otimes` (associative, distributes over :math:`\oplus`)
+    - Zero element :math:`\bar{0}` (identity for :math:`\oplus`, annihilator for :math:`\otimes`)
+    - One element :math:`\bar{1}` (identity for :math:`\otimes`)
 
+    Subclasses must define:
+
+    - ``zero``: The zero element
+    - ``one``: The one element
+    - ``sum(xs, dim)``: The :math:`\oplus` operation (reduction)
+    - ``mul(a, b)``: The :math:`\otimes` operation (elementwise)
+
+    Based on semiring parsing framework from Goodman (1999).
+
+    Attributes:
+        zero (Tensor): The semiring zero element.
+        one (Tensor): The semiring one element.
     """
 
     @classmethod
     def matmul(cls, a, b):
-        "Generalized tensordot. Classes should override."
+        r"""matmul(a, b) -> Tensor
+
+        Generalized matrix multiplication using semiring operations.
+
+        Computes :math:`C_{ij} = \bigoplus_k A_{ik} \otimes B_{kj}`.
+        """
         return matmul(cls, a, b)
 
     @classmethod
     def size(cls):
-        "Additional *ssize* first dimension needed."
+        r"""size() -> int
+
+        Return the semiring size (extra first dimension for multi-valued semirings).
+        """
         return 1
 
     @classmethod
     def dot(cls, a, b):
-        "Dot product along last dim."
+        r"""dot(a, b) -> Tensor
+
+        Semiring dot product along last dimension.
+        """
         a = a.unsqueeze(-2)
         b = b.unsqueeze(-1)
         return cls.matmul(a, b).squeeze(-1).squeeze(-1)
 
     @staticmethod
     def fill(c, mask, v):
+        r"""fill(c, mask, v) -> Tensor
+
+        Fill tensor ``c`` with value ``v`` where ``mask`` is True.
+        """
         mask = mask.to(c.device)
         return torch.where(mask, v.type_as(c).view((-1,) + (1,) * (len(c.shape) - 1)), c)
 
     @classmethod
     def times(cls, *ls):
-        "Multiply a list of tensors together"
+        r"""times(*ls) -> Tensor
+
+        Multiply a sequence of tensors together using :math:`\otimes`.
+        """
         cur = ls[0]
         for item in ls[1:]:
             cur = cls.mul(cur, item)
@@ -72,21 +130,34 @@ class Semiring:
 
     @classmethod
     def convert(cls, potentials):
-        "Convert to semiring by adding an extra first dimension."
+        r"""convert(potentials) -> Tensor
+
+        Convert potentials to semiring representation (adds ssize dimension).
+        """
         return potentials.unsqueeze(0)
 
     @classmethod
     def unconvert(cls, potentials):
-        "Unconvert from semiring by removing extra first dimension."
+        r"""unconvert(potentials) -> Tensor
+
+        Convert from semiring representation (removes ssize dimension).
+        """
         return potentials.squeeze(0)
 
     @staticmethod
     def sum(xs, dim=-1):
-        "Sum over *dim* of tensor."
+        r"""sum(xs, dim=-1) -> Tensor
+
+        Semiring sum (:math:`\oplus`) reduction over dimension.
+        """
         raise NotImplementedError()
 
     @classmethod
     def plus(cls, a, b):
+        r"""plus(a, b) -> Tensor
+
+        Binary semiring addition: :math:`a \oplus b`.
+        """
         return cls.sum(torch.stack([a, b], dim=-1))
 
 
@@ -121,8 +192,17 @@ class _BaseLog(Semiring):
 
 
 class StdSemiring(_Base):
-    """
-    Implements the counting semiring (+, *, 0, 1).
+    r"""Standard counting semiring :math:`(\mathbb{R}, +, \times, 0, 1)`.
+
+    The standard semiring uses addition for :math:`\oplus` and multiplication
+    for :math:`\otimes`. Useful for counting paths or computing expectations.
+
+    Operations:
+
+    - :math:`\oplus`: ``torch.sum``
+    - :math:`\otimes`: ``torch.mul``
+    - :math:`\bar{0}`: ``0.0``
+    - :math:`\bar{1}`: ``1.0``
     """
 
     @staticmethod
@@ -131,8 +211,6 @@ class StdSemiring(_Base):
 
     @classmethod
     def matmul(cls, a, b):
-        "Dot product along last dim"
-
         if has_genbmm and isinstance(a, GenbmmBandedMatrix):
             return b.multiply(a.transpose())
         if has_local_banded and isinstance(a, local_banded.BandedMatrix):
@@ -143,10 +221,23 @@ class StdSemiring(_Base):
 
 
 class LogSemiring(_BaseLog):
-    """
-    Implements the log-space semiring (logsumexp, +, -inf, 0).
+    r"""Log-space semiring :math:`(\mathbb{R} \cup \{-\infty\}, \text{logsumexp}, +, -\infty, 0)`.
 
-    Gradients give marginals.
+    The log semiring operates in log-space for numerical stability. Used for
+    computing partition functions. **Gradients give posterior marginals.**
+
+    Operations:
+
+    - :math:`\oplus`: ``torch.logsumexp``
+    - :math:`\otimes`: ``+`` (addition in log-space = multiplication in probability space)
+    - :math:`\bar{0}`: ``-inf``
+    - :math:`\bar{1}`: ``0.0``
+
+    Examples::
+
+        >>> model = SemiMarkov(LogSemiring)
+        >>> log_Z, _ = model.logpartition(edge)  # Partition function
+        >>> marginals = model.marginals(edge)    # Posterior marginals via autograd
     """
 
     @classmethod
@@ -161,10 +252,23 @@ class LogSemiring(_BaseLog):
 
 
 class MaxSemiring(_BaseLog):
-    """
-    Implements the max semiring (max, +, -inf, 0).
+    r"""Max-plus semiring :math:`(\mathbb{R} \cup \{-\infty\}, \max, +, -\infty, 0)`.
 
-    Gradients give argmax.
+    The max semiring finds the highest-scoring structure (Viterbi algorithm).
+    **Gradients give the argmax structure.**
+
+    Operations:
+
+    - :math:`\oplus`: ``torch.max``
+    - :math:`\otimes`: ``+``
+    - :math:`\bar{0}`: ``-inf``
+    - :math:`\bar{1}`: ``0.0``
+
+    Examples::
+
+        >>> model = SemiMarkov(MaxSemiring)
+        >>> viterbi_score, _ = model.logpartition(edge)  # Best path score
+        >>> best_path = model.marginals(edge)            # Argmax via autograd
     """
 
     @classmethod
@@ -188,7 +292,25 @@ class MaxSemiring(_BaseLog):
 
 
 def KMaxSemiring(k):
-    "Implements the k-max semiring (kmax, +, [-inf, -inf..], [0, -inf, ...])."
+    r"""KMaxSemiring(k) -> class
+
+    Create a K-max semiring for finding the k-best structures.
+
+    The K-max semiring tracks the top-k scores at each step, enabling
+    extraction of the k-best segmentations.
+
+    Args:
+        k (int): Number of best structures to track.
+
+    Returns:
+        class: A semiring class configured for k-best computation.
+
+    Examples::
+
+        >>> KMax3 = KMaxSemiring(3)
+        >>> model = SemiMarkov(KMax3)
+        >>> top3_scores, _ = model.logpartition(edge)
+    """
 
     class KMaxSemiring(_BaseLog):
 
@@ -251,19 +373,18 @@ def KMaxSemiring(k):
 
 
 class KLDivergenceSemiring(Semiring):
-    """
-    Implements an KL-divergence semiring.
+    r"""KL-divergence expectation semiring.
 
-    Computes both the log-values of two distributions and the running KL divergence between two distributions.
+    Computes the KL divergence :math:`D_{KL}(P \| Q)` between two distributions
+    P and Q alongside their log partition functions.
 
-    Based on descriptions in:
+    The semiring tracks three values:
 
-    * Parameter estimation for probabilistic finite-state
-      transducers :cite:`eisner2002parameter`
-    * First-and second-order expectation semirings with applications to
-      minimumrisk training on translation forests :cite:`li2009first`
-    * Sample Selection for Statistical Grammar Induction :cite:`hwa2000samplesf`
+    1. Log-partition of distribution P
+    2. Log-partition of distribution Q
+    3. Running KL divergence
 
+    Based on expectation semiring framework from Eisner (2002) and Li & Eisner (2009).
     """
 
     zero = torch.tensor([-1e5, -1e5, 0.0])
@@ -312,16 +433,18 @@ class KLDivergenceSemiring(Semiring):
 
 
 class CrossEntropySemiring(Semiring):
-    """
-    Implements an cross-entropy expectation semiring.
+    r"""Cross-entropy expectation semiring.
 
-    Computes both the log-values of two distributions and the running cross entropy between two distributions.
+    Computes the cross-entropy :math:`H(P, Q) = -\sum_x P(x) \log Q(x)` between
+    two distributions P and Q alongside their log partition functions.
 
-    Based on descriptions in:
+    The semiring tracks three values:
 
-    * Parameter estimation for probabilistic finite-state transducers :cite:`eisner2002parameter`
-    * First-and second-order expectation semirings with applications to minimum-risk training on translation forests :cite:`li2009first`
-    * Sample Selection for Statistical Grammar Induction :cite:`hwa2000samplesf`
+    1. Log-partition of distribution P
+    2. Log-partition of distribution Q
+    3. Running cross-entropy
+
+    Based on expectation semiring framework from Eisner (2002) and Li & Eisner (2009).
     """
 
     zero = torch.tensor([-1e5, -1e5, 0.0])
@@ -364,16 +487,18 @@ class CrossEntropySemiring(Semiring):
 
 
 class EntropySemiring(Semiring):
-    """
-    Implements an entropy expectation semiring.
+    r"""Entropy expectation semiring.
 
-    Computes both the log-values and the running distributional entropy.
+    Computes the Shannon entropy :math:`H(P) = -\sum_x P(x) \log P(x)` of the
+    distribution alongside its log partition function.
 
-    Based on descriptions in:
+    The semiring tracks two values:
 
-    * Parameter estimation for probabilistic finite-state transducers :cite:`eisner2002parameter`
-    * First-and second-order expectation semirings with applications to minimum-risk training on translation forests :cite:`li2009first`
-    * Sample Selection for Statistical Grammar Induction :cite:`hwa2000samplesf`
+    1. Log-partition of the distribution
+    2. Running entropy
+
+    Useful for active learning, uncertainty quantification, and regularization.
+    Based on expectation semiring framework from Eisner (2002) and Li & Eisner (2009).
     """
 
     zero = torch.tensor([-1e5, 0.0])

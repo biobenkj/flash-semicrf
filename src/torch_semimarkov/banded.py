@@ -1,10 +1,13 @@
-"""
-Lightweight banded matrix helpers (CPU/PyTorch only).
+r"""Lightweight banded matrix helpers (CPU/PyTorch only).
 
-This mirrors the public interface of genbmm.BandedMatrix enough to let us
-prototype a banded Semi-Markov path without requiring the genbmm CUDA
-extension. The implementation is intentionally simple and slower than the
-CUDA kernels; it is meant for correctness scaffolding and future wiring.
+This module provides a pure-PyTorch implementation of banded matrix operations
+that mirrors the public interface of ``genbmm.BandedMatrix``. It enables
+prototyping banded Semi-Markov algorithms without requiring the genbmm CUDA
+extension.
+
+.. note::
+    This implementation is intentionally simple and slower than CUDA kernels.
+    For production GPU workloads, use the genbmm CUDA extension when available.
 """
 
 from __future__ import annotations
@@ -16,6 +19,34 @@ import torch
 
 @dataclass
 class BandedMatrix:
+    r"""Banded matrix representation for memory-efficient sparse operations.
+
+    Stores only the non-zero diagonals of a banded matrix in a compact format.
+    Supports log-semiring and max-semiring matrix multiplication.
+
+    Args:
+        data (Tensor): Banded data of shape :math:`(\text{batch}, n, \text{lu}+\text{ld}+1)`.
+        lu (int): Number of upper diagonals (above main diagonal).
+        ld (int): Number of lower diagonals (below main diagonal).
+        fill (float, optional): Fill value for out-of-band elements. Default: ``0.0``
+
+    Attributes:
+        width (int): Total bandwidth (lu + ld + 1).
+
+    Examples::
+
+        >>> # Create banded matrix from dense
+        >>> dense = torch.randn(2, 10, 10)
+        >>> banded = BandedMatrix.from_dense(dense, lu=2, ld=2)
+        >>> banded.data.shape
+        torch.Size([2, 10, 5])
+        >>> # Convert back to dense
+        >>> reconstructed = banded.to_dense()
+
+    See Also:
+        :func:`bandedlogbmm`: Convenience function for log-semiring banded matmul
+    """
+
     data: torch.Tensor  # shape: (batch, n, lu+ld+1)
     lu: int
     ld: int
@@ -31,8 +62,19 @@ class BandedMatrix:
 
     @classmethod
     def from_dense(cls, dense: torch.Tensor, lu: int, ld: int, fill: float = 0.0):
-        """
+        r"""from_dense(dense, lu, ld, fill=0.0) -> BandedMatrix
+
         Extract a banded view from a dense square matrix.
+
+        Args:
+            dense (Tensor): Dense matrix of shape :math:`(\text{batch}, n, n)`.
+            lu (int): Number of upper diagonals to extract.
+            ld (int): Number of lower diagonals to extract.
+            fill (float, optional): Fill value for padding. Default: ``0.0``
+
+        Returns:
+            BandedMatrix: Banded representation with data shape
+            :math:`(\text{batch}, n, \text{lu}+\text{ld}+1)`.
         """
         assert dense.dim() == 3, "Expected (batch, n, n) dense input"
         batch, n, _ = dense.shape
@@ -53,7 +95,13 @@ class BandedMatrix:
         return cls(band, lu, ld, fill)
 
     def to_dense(self) -> torch.Tensor:
-        """Expand to dense square matrix (batch, n, n)."""
+        r"""to_dense() -> Tensor
+
+        Expand banded representation to dense square matrix.
+
+        Returns:
+            Tensor: Dense matrix of shape :math:`(\text{batch}, n, n)`.
+        """
         batch, n, _ = self.data.shape
         dense = torch.full((batch, n, n), self.fill, device=self.data.device, dtype=self.data.dtype)
         for diag_offset in range(-self.ld, self.lu + 1):
@@ -71,7 +119,15 @@ class BandedMatrix:
         return dense
 
     def transpose(self) -> BandedMatrix:
-        """Band-aware transpose (swap upper/lower bandwidths)."""
+        r"""transpose() -> BandedMatrix
+
+        Band-aware matrix transpose.
+
+        Swaps upper and lower bandwidths while transposing the underlying data.
+
+        Returns:
+            BandedMatrix: Transposed banded matrix with ``lu`` and ``ld`` swapped.
+        """
         batch, n, _ = self.data.shape
         new_lu, new_ld = self.ld, self.lu
         new_width = new_lu + new_ld + 1
@@ -185,18 +241,69 @@ class BandedMatrix:
         return BandedMatrix(out_data, lu_out, ld_out, self.fill)
 
     def multiply(self, other: BandedMatrix) -> BandedMatrix:
-        """Standard (sum-product) banded matmul."""
+        r"""multiply(other) -> BandedMatrix
+
+        Standard (sum-product) banded matrix multiplication.
+
+        Args:
+            other (BandedMatrix): Right operand with compatible dimensions.
+
+        Returns:
+            BandedMatrix: Product with bandwidth ``lu_out = lu1 + lu2``, ``ld_out = ld1 + ld2``.
+        """
         return self._multiply_template(other, reduce_fn=lambda x, dim: torch.sum(x, dim=dim))
 
     def multiply_log(self, other: BandedMatrix) -> BandedMatrix:
-        """Log-semiring banded matmul (logsumexp)."""
+        r"""multiply_log(other) -> BandedMatrix
+
+        Log-semiring banded matrix multiplication using logsumexp.
+
+        Computes :math:`C_{ij} = \log \sum_k \exp(A_{ik} + B_{kj})` efficiently
+        using the banded structure.
+
+        Args:
+            other (BandedMatrix): Right operand with compatible dimensions.
+
+        Returns:
+            BandedMatrix: Product in log-space.
+        """
         return self._multiply_template(other, reduce_fn=lambda x, dim: torch.logsumexp(x, dim=dim))
 
     def multiply_max(self, other: BandedMatrix) -> BandedMatrix:
-        """Max-semiring banded matmul (Viterbi)."""
+        r"""multiply_max(other) -> BandedMatrix
+
+        Max-semiring banded matrix multiplication (Viterbi).
+
+        Computes :math:`C_{ij} = \max_k (A_{ik} + B_{kj})` efficiently
+        using the banded structure.
+
+        Args:
+            other (BandedMatrix): Right operand with compatible dimensions.
+
+        Returns:
+            BandedMatrix: Max-product result.
+        """
         return self._multiply_template(other, reduce_fn=lambda x, dim: torch.max(x, dim=dim)[0])
 
 
-# simple factory to mirror genbmm API surface
 def bandedlogbmm(a, a_lu, a_ld, b, b_lu, b_ld, o_lu, o_ld):
+    r"""bandedlogbmm(a, a_lu, a_ld, b, b_lu, b_ld, o_lu, o_ld) -> Tensor
+
+    Log-semiring banded batch matrix multiplication.
+
+    Convenience function mirroring the genbmm API surface for drop-in compatibility.
+
+    Args:
+        a (Tensor): Left operand banded data of shape :math:`(\text{batch}, n, a\_lu + a\_ld + 1)`.
+        a_lu (int): Upper bandwidth of ``a``.
+        a_ld (int): Lower bandwidth of ``a``.
+        b (Tensor): Right operand banded data.
+        b_lu (int): Upper bandwidth of ``b``.
+        b_ld (int): Lower bandwidth of ``b``.
+        o_lu (int): Expected output upper bandwidth (unused, for API compatibility).
+        o_ld (int): Expected output lower bandwidth (unused, for API compatibility).
+
+    Returns:
+        Tensor: Banded data of the log-semiring product.
+    """
     return BandedMatrix(a, a_lu, a_ld).multiply_log(BandedMatrix(b, b_lu, b_ld)).data

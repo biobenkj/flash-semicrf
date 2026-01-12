@@ -1,9 +1,16 @@
-"""
-Block-triangular representation for Semi-Markov duration blocks.
+r"""Block-triangular representation for Semi-Markov duration blocks.
 
-Stores a K x K grid of C x C blocks but only materializes those that satisfy
-k1 + k2 <= span (and optional duration mask). This is intended for
-experimentation; correctness first, optimise later.
+This module provides a sparse block representation that exploits the duration
+constraint :math:`k_1 + k_2 \leq \text{span}` in Semi-Markov binary tree algorithms.
+
+Instead of materializing full :math:`(K \cdot C, K \cdot C)` matrices, only the
+:math:`\frac{K(K+1)}{2} \cdot C \cdot C` blocks satisfying the constraint are stored.
+This significantly reduces memory for mid-level tree nodes.
+
+.. note::
+    This module is intended for experimentation and correctness validation.
+    Structure metadata is cached per ``(K, span, duration_mask_key, device)`` for
+    efficient repeated calls with the same configuration.
 """
 
 from __future__ import annotations
@@ -21,17 +28,30 @@ _STRUCTURE_CACHE = {}
 
 @dataclass
 class BlockTriangularMatrix:
-    """
-    Block-triangular matrix over duration states.
+    r"""Block-triangular matrix over duration states.
 
-    values: [B, num_blocks, C, C]
-    block_indices: [num_blocks, 2] with entries (k1, k2)
-    K: number of duration states
-    C: number of labels
+    Stores a sparse representation of :math:`(K \cdot C, K \cdot C)` matrices where
+    only blocks :math:`(k_1, k_2)` satisfying the duration constraint are materialized.
 
-    duration_mask_key: optional hashable representation of the duration mask
-    used when building this matrix (if any). This is used only for structure
-    caching; the actual sparsity pattern is encoded in `block_indices`.
+    Args:
+        values (Tensor): Block values of shape :math:`(B, \text{num\_blocks}, C, C)`.
+        block_indices (Tensor): Block coordinates of shape :math:`(\text{num\_blocks}, 2)`
+            where each row is :math:`(k_1, k_2)`.
+        K (int): Number of duration states.
+        C (int): Number of labels/classes.
+        duration_mask_key (tuple, optional): Hashable key for the duration mask used
+            during construction. Used for structure caching. Default: ``None``
+
+    Attributes:
+        device: Device of the values tensor.
+        batch_size (int): Batch dimension size.
+
+    Examples::
+
+        >>> dense = torch.randn(2, 12, 12)  # K=4, C=3
+        >>> bt = BlockTriangularMatrix.from_dense(dense, K=4, C=3, span=4)
+        >>> bt.values.shape
+        torch.Size([2, 10, 3, 3])  # Only 10 blocks satisfy k1+k2 <= 4
     """
 
     values: torch.Tensor
@@ -57,8 +77,23 @@ class BlockTriangularMatrix:
         span: int,
         duration_mask: Optional[torch.Tensor] = None,
     ) -> BlockTriangularMatrix:
-        """
-        Compress a dense [B, N, N] tensor (N = K*C) into block-triangular form.
+        r"""from_dense(dense, K, C, span, duration_mask=None) -> BlockTriangularMatrix
+
+        Compress a dense matrix into block-triangular form.
+
+        Extracts only blocks :math:`(k_1, k_2)` where :math:`k_1 + k_2 \leq \text{span}`
+        (and optionally passing the duration mask).
+
+        Args:
+            dense (Tensor): Dense matrix of shape :math:`(B, N, N)` where :math:`N = K \cdot C`.
+            K (int): Number of duration states.
+            C (int): Number of labels/classes.
+            span (int): Maximum span length for the duration constraint.
+            duration_mask (Tensor, optional): Boolean mask of shape :math:`(K, K)` for
+                additional block filtering. Default: ``None``
+
+        Returns:
+            BlockTriangularMatrix: Sparse block representation.
         """
         B, N, N2 = dense.shape
         assert N == N2 == K * C, f"Expected N = K*C, got N={N}, K*C={K*C}"
@@ -103,15 +138,20 @@ class BlockTriangularMatrix:
         )
 
     def to_dense(self, semiring=None) -> torch.Tensor:
-        """
-        Expand back to dense [B, N, N]. Use for testing/debugging.
+        r"""to_dense(semiring=None) -> Tensor
 
-        Notes:
-            - Invalid / absent blocks (those not listed in `block_indices`) are
-              filled with 0.0 by default.
-            - If you plan to feed the dense tensor back into semiring
-              operations (e.g., log-space), pass `semiring` so invalid blocks
-              are initialized with `semiring.zero.item()` instead.
+        Expand back to dense matrix.
+
+        Args:
+            semiring (optional): If provided, absent blocks are filled with
+                ``semiring.zero.item()``. Otherwise filled with ``0.0``.
+
+        Returns:
+            Tensor: Dense matrix of shape :math:`(B, N, N)` where :math:`N = K \cdot C`.
+
+        .. note::
+            For log-space operations, pass the semiring to ensure absent blocks
+            are filled with ``-inf`` instead of ``0.0``.
         """
         B = self.values.shape[0]
         N = self.K * self.C
@@ -318,13 +358,33 @@ def block_triang_matmul(
     span: int,
     debug: bool = False,
 ) -> BlockTriangularMatrix:
-    """
-    Block-triangular semiring matmul: E = C (x) D.
+    r"""block_triang_matmul(C_bt, D_bt, semiring, span, debug=False) -> BlockTriangularMatrix
 
-    Input matrices must have invalid blocks filled with semiring.zero.item()
-    (not 0.0) to prevent contamination in log-space arithmetic.
+    Block-triangular semiring matrix multiplication.
 
-    Structure is cached per (K, span, device) for repeated calls.
+    Computes :math:`E = C \otimes D` where :math:`\otimes` denotes semiring matrix
+    multiplication, exploiting the block-triangular sparsity pattern.
+
+    .. math::
+        E_{k_1, k_3} = \bigoplus_{k_2} C_{k_1, k_2} \otimes D_{k_2, k_3}
+
+    Args:
+        C_bt (BlockTriangularMatrix): Left operand.
+        D_bt (BlockTriangularMatrix): Right operand.
+        semiring: Semiring defining the algebraic operations.
+        span (int): Maximum span length for output constraint.
+        debug (bool, optional): Print debug information. Default: ``False``
+
+    Returns:
+        BlockTriangularMatrix: Product matrix with blocks satisfying :math:`k_1 + k_3 \leq \text{span}`.
+
+    .. warning::
+        Input matrices must have invalid blocks filled with ``semiring.zero.item()``
+        (not ``0.0``) to prevent contamination in log-space arithmetic.
+
+    .. note::
+        Structure metadata is cached per ``(K, span, duration_mask_key, device)`` for
+        efficient repeated calls with the same configuration.
     """
     assert C_bt.K == D_bt.K, "K mismatch"
     assert C_bt.C == D_bt.C, "C mismatch"
@@ -486,23 +546,26 @@ def block_triang_matmul(
 
 
 def clear_structure_cache():
-    """
-    Clear the structure cache.
+    r"""clear_structure_cache()
 
-    Useful for testing or when you want to free memory after processing
-    many different (K, span) configurations.
+    Clear the structure metadata cache.
+
+    Call this to free memory after processing many different ``(K, span)``
+    configurations, or to ensure fresh structure computation in tests.
     """
     _STRUCTURE_CACHE.clear()
 
 
 def get_structure_cache_info() -> dict:
-    """
+    r"""get_structure_cache_info() -> dict
+
     Get information about the structure cache.
 
     Returns:
-        dict with keys:
-            - 'size': number of cached configurations
-            - 'keys': list of (K, span, mask_key, device) tuples
+        dict: Dictionary with keys:
+
+        - **size** (int): Number of cached configurations.
+        - **keys** (list): List of ``(K, span, mask_key, device)`` cache keys.
     """
     return {
         "size": len(_STRUCTURE_CACHE),

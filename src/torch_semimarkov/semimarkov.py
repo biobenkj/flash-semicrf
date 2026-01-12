@@ -5,8 +5,48 @@ from .helpers import _Struct
 
 
 class SemiMarkov(_Struct):
-    """
-    edge : b x N x K x C x C semimarkov potentials
+    r"""Semi-Markov CRF inference for structured sequence prediction.
+
+    Implements efficient forward algorithms for Semi-Markov Conditional Random
+    Fields with explicit duration modeling. Supports multiple backends with
+    different memory/speed tradeoffs.
+
+    Args:
+        semiring: Semiring class defining the algebra for inference.
+            Common choices: :class:`~torch_semimarkov.semirings.LogSemiring` (default),
+            :class:`~torch_semimarkov.semirings.MaxSemiring` (Viterbi).
+
+    .. note::
+        The default algorithm is streaming linear scan with O(KC) memory,
+        which is universally applicable across all genomic parameter regimes.
+        For 2-3x speedup when memory permits, use ``use_vectorized=True``.
+
+    Input format:
+        Edge potentials have shape :math:`(\text{batch}, N-1, K, C, C)` where:
+
+        - :math:`N` is the sequence length
+        - :math:`K` is the maximum segment duration
+        - :math:`C` is the number of labels/classes
+        - ``edge[b, n, k, c2, c1]`` is the log-potential for transitioning from
+          label ``c1`` to label ``c2`` with duration ``k`` at position ``n``
+
+    Examples::
+
+        >>> import torch
+        >>> from torch_semimarkov import SemiMarkov
+        >>> from torch_semimarkov.semirings import LogSemiring
+        >>> model = SemiMarkov(LogSemiring)
+        >>> # batch=2, seq_len=100, max_dur=8, num_labels=4
+        >>> edge = torch.randn(2, 99, 8, 4, 4)
+        >>> lengths = torch.tensor([100, 100])
+        >>> log_Z, potentials = model.logpartition(edge, lengths=lengths)
+        >>> log_Z.shape
+        torch.Size([2])
+
+    See Also:
+        :meth:`logpartition`: Compute log partition function
+        :meth:`marginals`: Compute posterior marginals
+        :func:`hsmm`: Convert HSMM parameters to edge potentials
     """
 
     def _check_potentials(self, edge, lengths=None):
@@ -31,33 +71,54 @@ class SemiMarkov(_Struct):
         banded_perm: str = "auto",
         banded_bw_ratio: float = 0.6,
     ):
-        """
-        Compute log partition function (forward algorithm).
+        r"""logpartition(log_potentials, lengths=None, force_grad=False, use_linear_scan=None, use_vectorized=False, use_banded=False) -> Tuple[Tensor, List[Tensor]]
+
+        Compute the log partition function using the forward algorithm.
+
+        The partition function :math:`Z(x) = \sum_y \exp(\phi(x, y))` sums over
+        all valid segmentations. This method returns :math:`\log Z(x)`.
 
         Args:
-            log_potentials: (batch, N-1, K, C, C) edge potentials in log-space
-            lengths: (batch,) sequence lengths
-            force_grad: If True, force gradient computation even if not needed
-            use_linear_scan: Algorithm selection
-                - None (default): Auto-select based on state space size (KC > 200 -> linear scan)
-                - True: Use O(N) linear scan - Lower memory O(KC), recommended for most uses
-                - False: Use O(log N) binary tree - Warning: creates O((KC)^3) temporaries per matmul
-            use_vectorized: If True, use vectorized linear scan (2-3x faster but O(TKC) memory).
-                Default is False (streaming scan with O(KC) memory).
-            use_banded: If True, attempt banded path (prototype); falls back to linear scan for now.
-            banded_perm: Permutation strategy for banded path ("auto", "none", "snake", "rcm").
-            banded_bw_ratio: Threshold (fraction of dense width) to allow banded; above this uses dense.
+            log_potentials (Tensor): Edge potentials of shape
+                :math:`(\text{batch}, N-1, K, C, C)` in log-space.
+            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
+                Default: ``None`` (assumes all sequences have length N).
+            force_grad (bool, optional): If ``True``, force gradient computation even
+                when not needed. Default: ``False``
+            use_linear_scan (bool, optional): Algorithm selection:
+
+                - ``None`` (default): Auto-select based on state space size
+                  (KC > 200 triggers linear scan)
+                - ``True``: Use O(N) linear scan with O(KC) memory
+                - ``False``: Use O(log N) binary tree (warning: O((KC)³) memory per matmul)
+
+            use_vectorized (bool, optional): If ``True``, use vectorized linear scan
+                (2-3x faster but O(TKC) memory). Default: ``False`` (streaming with O(KC) memory)
+            use_banded (bool, optional): If ``True``, attempt banded matrix path (prototype).
+                Default: ``False``
 
         Returns:
-            v: Log partition function Z(x)
-            potentials: List of tensors for gradient computation
+            Tuple[Tensor, List[Tensor]]: A tuple containing:
 
-        Note:
-            The binary tree algorithm (use_linear_scan=False) has O(log N) sequential depth
-            but creates O((KC)^3) temporary tensors per matrix multiply due to log-semiring
-            broadcast semantics. For state spaces KC > 50-100, this typically causes OOM
-            before the depth advantage helps. Use linear scan (default) for practical applications.
-            If you must use the tree, consider CheckpointShardSemiring to reduce peak memory.
+            - **log_Z** (Tensor): Log partition function of shape :math:`(\text{batch},)`
+            - **potentials** (List[Tensor]): List containing the input potentials for gradient computation
+
+        .. warning::
+            The binary tree algorithm (``use_linear_scan=False``) has O(log N) sequential
+            depth but creates O((KC)³) temporary tensors per matrix multiply. For state
+            spaces KC > 50-100, this typically causes OOM. Use linear scan for practical
+            applications or :class:`~torch_semimarkov.semirings.CheckpointShardSemiring`
+            to reduce peak memory.
+
+        Examples::
+
+            >>> model = SemiMarkov(LogSemiring)
+            >>> edge = torch.randn(4, 99, 8, 6, 6)
+            >>> lengths = torch.full((4,), 100)
+            >>> # Default: streaming scan with O(KC) memory
+            >>> log_Z, _ = model.logpartition(edge, lengths=lengths)
+            >>> # Faster but more memory: vectorized scan
+            >>> log_Z, _ = model.logpartition(edge, lengths=lengths, use_vectorized=True)
         """
         # Auto-select algorithm if not specified (before _check_potentials to get dimensions)
         if use_linear_scan is None:
@@ -145,11 +206,24 @@ class SemiMarkov(_Struct):
         return v, [log_potentials]
 
     def _dp_standard(self, edge, lengths=None, force_grad=False):
-        """
+        r"""_dp_standard(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], List[Tensor]]
+
         Standard O(N) linear scan dynamic programming for Semi-Markov CRF.
 
-        This is the original (non-vectorized) implementation that uses list
-        comprehensions. Kept for backward compatibility and as reference.
+        This is the reference implementation using list comprehensions. Kept for
+        backward compatibility and correctness validation.
+
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+            force_grad (bool, optional): Force gradient computation. Default: ``False``
+
+        Returns:
+            Tuple[Tensor, List[Tensor], List[Tensor]]: (log_Z, [edge], beta tables)
+
+        .. note::
+            For production use, prefer :meth:`_dp_scan_streaming` (O(KC) memory)
+            or :meth:`_dp_standard_vectorized` (2-3x faster).
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -183,11 +257,21 @@ class SemiMarkov(_Struct):
         return v, [edge], beta
 
     def _dp_blocktriangular(self, edge, lengths=None, force_grad=False):
-        """
-        Binary-tree DP that composes charts using block-triangular matmul.
+        r"""_dp_blocktriangular(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
 
-        Uses the duration constraint k1 + k2 <= span_length to sparsify the
-        (K*C, K*C) matrices via BlockTriangularMatrix at each tree level.
+        Binary-tree DP using block-triangular matrix multiplication.
+
+        Exploits the duration constraint :math:`k_1 + k_2 \leq \text{span}` to sparsify
+        the :math:`(K \cdot C, K \cdot C)` matrices via :class:`BlockTriangularMatrix`
+        at each tree level.
+
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+            force_grad (bool, optional): Force gradient computation. Default: ``False``
+
+        Returns:
+            Tuple[Tensor, List[Tensor], None]: (log_Z, [edge], None)
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -267,12 +351,26 @@ class SemiMarkov(_Struct):
         return v, [edge], None
 
     def _dp_standard_vectorized(self, edge, lengths=None, force_grad=False):
-        """
-        Vectorized O(N) linear scan dynamic programming for Semi-Markov CRF.
+        r"""_dp_standard_vectorized(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], List[Tensor]]
 
-        Optimizations over _dp_standard:
-        1. Alpha update: Direct broadcasting instead of semiring.dot
-        2. Beta accumulation: Advanced indexing instead of list comprehension.
+        Vectorized O(N) linear scan with O(TKC) memory.
+
+        Provides 2-3x speedup over :meth:`_dp_standard` through:
+
+        1. Direct broadcasting instead of :meth:`semiring.dot` for alpha updates
+        2. Advanced indexing instead of list comprehension for beta accumulation
+
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+            force_grad (bool, optional): Force gradient computation. Default: ``False``
+
+        Returns:
+            Tuple[Tensor, List[Tensor], List[Tensor]]: (log_Z, [edge], beta tables)
+
+        .. note::
+            Memory usage is O(TKC) for full alpha/beta tables. For memory-constrained
+            settings, use :meth:`_dp_scan_streaming` with O(KC) memory instead.
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -317,22 +415,30 @@ class SemiMarkov(_Struct):
         return v, [edge], beta
 
     def _dp_scan_streaming(self, edge, lengths=None, force_grad=False):
-        """
-        True streaming O(N) scan that does NOT allocate O(T*K*C) alpha or O(T*C) beta.
+        r"""_dp_scan_streaming(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
 
-        Memory profile: O(K*C) DP state (ring buffer of last K betas).
+        Streaming O(N) scan with O(KC) memory. **This is the default algorithm.**
 
-        Recurrence:
-            beta[n, c] = logsumexp_{k=1..min(K-1,n), c_prev} (
-                beta[n-k, c_prev] + edge[n-k, k, c, c_prev]
-            )
+        Uses a ring buffer of the last K beta values instead of storing all T betas.
+        Alpha values are computed inline and consumed immediately without storage.
 
-        We only need beta[n-1], beta[n-2], ..., beta[n-K+1] to compute beta[n],
-        so we keep a ring buffer of the last K betas instead of all T betas.
-        Alpha is not stored at all - it's computed inline and consumed immediately.
+        .. math::
+            \beta[n, c] = \text{logsumexp}_{k=1}^{\min(K-1,n)} \sum_{c'} \left(
+                \beta[n-k, c'] + \text{edge}[n-k, k, c, c']
+            \right)
 
-        Implementation uses a head pointer with modular indexing to avoid O(K*C)
-        buffer shifts each timestep.
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+            force_grad (bool, optional): Force gradient computation. Default: ``False``
+
+        Returns:
+            Tuple[Tensor, List[Tensor], None]: (log_Z, [edge], None)
+
+        .. note::
+            Memory is O(KC) for the ring buffer, independent of sequence length T.
+            This makes it universally applicable across all genomic parameter regimes.
+            Performance is within a few percent of the vectorized implementation.
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -665,17 +771,30 @@ class SemiMarkov(_Struct):
 
     @staticmethod
     def to_parts(sequence, extra, lengths=None):
-        """
-        Convert a sequence representation to edges
+        r"""to_parts(sequence, extra, lengths=None) -> Tensor
 
-        Parameters:
-            sequence : b x N  long tensors in [-1, 0, C-1]
-            extra : number of states
-            lengths: b long tensor of N values
+        Convert a sequence label representation to edge potentials.
+
+        Args:
+            sequence (Tensor): Label sequence of shape :math:`(\text{batch}, N)` with
+                values in ``[-1, 0, ..., C-1]``. Value ``-1`` indicates continuation
+                of the previous segment (no label boundary).
+            extra (tuple): Tuple of ``(C, K)`` where C is number of labels and K is
+                maximum duration.
+            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
+                Default: ``None``
 
         Returns:
-            edge : b x (N-1) x K x C x C semimarkov potentials
-                        (t x z_t x z_{t-1})
+            Tensor: Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)` where
+            ``edge[b, n, k, c2, c1] = 1`` if there is a transition from label ``c1``
+            to label ``c2`` with duration ``k`` at position ``n``.
+
+        Examples::
+
+            >>> # Sequence with labels [0, -1, 1, -1, -1, 2]
+            >>> # means: label 0 (dur 2), label 1 (dur 3), label 2 (dur 1)
+            >>> seq = torch.tensor([[0, -1, 1, -1, -1, 2]])
+            >>> edge = SemiMarkov.to_parts(seq, (3, 4))
         """
         C, K = extra
         batch, N = sequence.shape
@@ -700,16 +819,26 @@ class SemiMarkov(_Struct):
 
     @staticmethod
     def from_parts(edge):
-        """
-        Convert a edges to a sequence representation.
+        r"""from_parts(edge) -> Tuple[Tensor, Tuple[int, int]]
 
-        Parameters:
-            edge : b x (N-1) x K x C x C semimarkov potentials
-                    (t x z_t x z_{t-1})
+        Convert edge potentials to a sequence label representation.
+
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+                Should contain binary indicators (0 or 1) marking segment boundaries.
 
         Returns:
-            sequence : b x N  long tensors in [-1, 0, C-1]
+            Tuple[Tensor, Tuple[int, int]]: A tuple containing:
 
+            - **sequence** (Tensor): Label sequence of shape :math:`(\text{batch}, N)` with
+              values in ``[-1, 0, ..., C-1]``. Value ``-1`` indicates continuation.
+            - **extra** (tuple): Tuple of ``(C, K)`` for reconstructing edge shape.
+
+        Examples::
+
+            >>> edge = torch.zeros(1, 5, 4, 3, 3)
+            >>> edge[0, 0, 2, 1, 0] = 1  # transition 0->1 at pos 0, dur 2
+            >>> seq, (C, K) = SemiMarkov.from_parts(edge)
         """
         batch, N_1, K, C, _ = edge.shape
         N = N_1 + 1
@@ -721,27 +850,47 @@ class SemiMarkov(_Struct):
             labels[on[i][0], on[i][1] + on[i][2]] = on[i][3]
         return labels, (C, K)
 
-    # Adapters
     @staticmethod
     def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
-        """
-        Convert HSMM log-probs to edge scores.
+        r"""hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z) -> Tensor
 
-        Parameters:
-            init_z_1: C or b x C (init_z[i] = log P(z_{-1}=i), note that z_{-1} is an
-                      auxiliary state whose purpose is to induce a distribution over z_0.)
-            transition_z_to_z: C X C (transition_z_to_z[i][j] = log P(z_{n+1}=j | z_n=i),
-                               note that the order of z_{n+1} and z_n is different
-                               from edges.)
-            transition_z_to_l: C X K (transition_z_to_l[i][j] = P(l_n=j | z_n=i))
-            emission_n_l_z: b x N x K x C
+        Convert Hidden Semi-Markov Model parameters to edge potentials.
+
+        This adapter transforms standard HSMM parameterization (initial distribution,
+        transition matrix, duration distribution, emissions) into the edge potential
+        format expected by :meth:`logpartition`.
+
+        Args:
+            init_z_1 (Tensor): Initial state log-probabilities of shape :math:`(C,)` or
+                :math:`(\text{batch}, C)`. Represents :math:`\log P(z_{-1}=i)` where
+                :math:`z_{-1}` is an auxiliary state inducing the distribution over :math:`z_0`.
+            transition_z_to_z (Tensor): State transition log-probabilities of shape
+                :math:`(C, C)` where ``transition_z_to_z[i, j]`` = :math:`\log P(z_{n+1}=j | z_n=i)`.
+            transition_z_to_l (Tensor): Duration log-probabilities of shape :math:`(C, K)`
+                where ``transition_z_to_l[i, j]`` = :math:`\log P(l_n=j | z_n=i)`.
+            emission_n_l_z (Tensor): Emission log-probabilities of shape
+                :math:`(\text{batch}, N, K, C)` where ``emission[b, n, k, c]`` =
+                :math:`\log P(x_{n:n+k} | z_n=c, l_n=k)`.
 
         Returns:
-            edges: b x (N-1) x K x C x C, where edges[b, n, k, c2, c1]
-                   = log P(z_n=c2 | z_{n-1}=c1) + log P(l_n=k | z_n=c2)
-                     + log P(x_{n:n+l_n} | z_n=c2, l_n=k), if n>0
-                   = log P(z_n=c2 | z_{n-1}=c1) + log P(l_n=k | z_n=c2)
-                     + log P(x_{n:n+l_n} | z_n=c2, l_n=k) + log P(z_{-1}), if n=0
+            Tensor: Edge potentials of shape :math:`(\text{batch}, N, K, C, C)` where:
+
+            .. math::
+                \text{edge}[b, n, k, c_2, c_1] = \log P(z_n=c_2 | z_{n-1}=c_1)
+                + \log P(l_n=k | z_n=c_2) + \log P(x_{n:n+k} | z_n=c_2, l_n=k)
+
+            with the initial state distribution added at position 0.
+
+        Examples::
+
+            >>> C, K, N, batch = 4, 8, 100, 2
+            >>> init = torch.log_softmax(torch.randn(C), dim=-1)
+            >>> trans_z = torch.log_softmax(torch.randn(C, C), dim=-1)
+            >>> trans_l = torch.log_softmax(torch.randn(C, K), dim=-1)
+            >>> emission = torch.randn(batch, N, K, C)
+            >>> edge = SemiMarkov.hsmm(init, trans_z, trans_l, emission)
+            >>> edge.shape
+            torch.Size([2, 100, 8, 4, 4])
         """
         batch, N, K, C = emission_n_l_z.shape
         edges = torch.zeros(batch, N, K, C, C).type_as(emission_n_l_z)

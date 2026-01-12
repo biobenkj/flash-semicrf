@@ -6,6 +6,21 @@ from .semirings import LogSemiring
 
 
 class Chart:
+    r"""Dynamic programming chart for structured prediction algorithms.
+
+    Provides a tensor wrapper with automatic semiring initialization and
+    gradient tracking for use in DP algorithms.
+
+    Args:
+        size (tuple): Shape of the chart (excluding semiring dimension).
+        potentials (Tensor): Reference tensor for dtype and device.
+        semiring: Semiring class defining the algebraic operations.
+
+    Attributes:
+        data (Tensor): The chart tensor of shape :math:`(\text{ssize},) + \text{size}`.
+        grad (Tensor): Gradient accumulator tensor (same shape as data).
+    """
+
     def __init__(self, size, potentials, semiring):
         c = torch.zeros(
             *((semiring.size(),) + size), dtype=potentials.dtype, device=potentials.device
@@ -25,6 +40,23 @@ class Chart:
 
 
 class _Struct:
+    r"""Base class for structured prediction models.
+
+    Provides common infrastructure for dynamic programming algorithms over
+    structured output spaces, including chart allocation, marginal computation
+    via autograd, and semiring abstraction.
+
+    Args:
+        semiring: Semiring class defining the algebraic operations for inference.
+            Default: :class:`~torch_semimarkov.semirings.LogSemiring`
+
+    Attributes:
+        semiring: The semiring used for inference operations.
+
+    See Also:
+        :class:`~torch_semimarkov.SemiMarkov`: Semi-Markov CRF implementation
+    """
+
     def __init__(self, semiring=LogSemiring):
         self.semiring = semiring
 
@@ -64,17 +96,23 @@ class _Struct:
         return chart
 
     def sum(self, logpotentials, lengths=None, _raw=False, **kwargs):
-        """
-        Compute the (semiring) sum over all structures model.
+        r"""sum(logpotentials, lengths=None, _raw=False, **kwargs) -> Tensor
 
-        Parameters:
-            logpotentials : generic params (see class)
-            lengths: None or b long tensor mask
-            _raw (bool) : return the unconverted semiring
-            **kwargs: Additional arguments passed to logpartition (e.g., use_linear_scan)
+        Compute the semiring sum over all valid structures.
+
+        For :class:`LogSemiring`, this returns the log partition function.
+        For :class:`MaxSemiring`, this returns the Viterbi score.
+
+        Args:
+            logpotentials (Tensor): Model potentials (structure-specific shape).
+            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
+                Default: ``None``
+            _raw (bool, optional): If ``True``, return unconverted semiring values.
+                Default: ``False``
+            **kwargs: Additional arguments passed to :meth:`logpartition`.
 
         Returns:
-            v: b tensor of total sum
+            Tensor: Semiring sum of shape :math:`(\text{batch},)`.
         """
         v = self.logpartition(logpotentials, lengths, **kwargs)[0]
         if _raw:
@@ -82,17 +120,32 @@ class _Struct:
         return self.semiring.unconvert(v)
 
     def marginals(self, logpotentials, lengths=None, _raw=False, **kwargs):
-        """
-        Compute the marginals of a structured model.
+        r"""marginals(logpotentials, lengths=None, _raw=False, **kwargs) -> Tensor
 
-        Parameters:
-            logpotentials : generic params (see class)
-            lengths: None or b long tensor mask
-            **kwargs: Additional arguments passed to logpartition (e.g., use_linear_scan)
+        Compute posterior marginals via automatic differentiation.
+
+        The marginal of each potential is computed as the gradient of the log
+        partition function with respect to that potential, which equals the
+        posterior probability under the model.
+
+        Args:
+            logpotentials (Tensor): Model potentials (structure-specific shape).
+            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
+                Default: ``None``
+            _raw (bool, optional): If ``True``, return raw semiring marginals.
+                Default: ``False``
+            **kwargs: Additional arguments passed to :meth:`logpartition`.
 
         Returns:
-            marginals: b x (N-1) x C x C table
+            Tensor: Marginal probabilities with same shape as ``logpotentials``.
 
+        Examples::
+
+            >>> model = SemiMarkov(LogSemiring)
+            >>> edge = torch.randn(2, 99, 8, 4, 4)
+            >>> marginals = model.marginals(edge)
+            >>> marginals.shape
+            torch.Size([2, 99, 8, 4, 4])
         """
         v, edges = self.logpartition(logpotentials, lengths=lengths, force_grad=True, **kwargs)
         if _raw:

@@ -1,8 +1,14 @@
-"""
-Utilities for banded Semi-Markov experiments:
-- Measure effective bandwidth
-- Simple duration permutations (snake)
-- Optional Reverse Cuthill-McKee (RCM) ordering when SciPy is available
+r"""Utilities for banded Semi-Markov experiments.
+
+This module provides tools for analyzing and optimizing banded matrix structures:
+
+- Bandwidth measurement for sparsity analysis
+- State permutation strategies (snake ordering, RCM)
+- Permutation application utilities
+
+.. note::
+    Reverse Cuthill-McKee ordering requires SciPy to be installed. The module
+    gracefully falls back to identity permutations when SciPy is unavailable.
 """
 
 from __future__ import annotations
@@ -29,12 +35,30 @@ def measure_effective_bandwidth(
     adj: torch.Tensor,
     fill_value: Optional[float] = None,
 ) -> int:
-    """
-    Compute the maximum |i-j| where adjacency is non-fill.
+    r"""measure_effective_bandwidth(adj, fill_value=None) -> int
 
-    Works on:
-    - Dense square torch.Tensor (batchless). If 3D, operates per batch and returns max across batch.
-    - BandedMatrix (returns max(lu, ld)).
+    Compute the effective bandwidth of an adjacency matrix.
+
+    The effective bandwidth is :math:`\max_{(i,j): A_{ij} \neq \text{fill}} |i - j|`,
+    i.e., the maximum distance from the diagonal of any non-fill entry.
+
+    Args:
+        adj (Tensor or BandedMatrix): Adjacency matrix of shape :math:`(n, n)` or
+            :math:`(\text{batch}, n, n)`. For BandedMatrix, returns ``max(lu, ld)``.
+        fill_value (float, optional): Value representing empty/non-edges.
+            Default: ``None`` (auto-detected from inf values or 0).
+
+    Returns:
+        int: Maximum distance from diagonal of any non-fill entry.
+
+    Examples::
+
+        >>> adj = torch.eye(5)
+        >>> measure_effective_bandwidth(adj)
+        0
+        >>> adj[0, 4] = 1  # Add off-diagonal entry
+        >>> measure_effective_bandwidth(adj)
+        4
     """
     if BandedMatrix is not None and isinstance(adj, BandedMatrix):
         return max(adj.lu, adj.ld)
@@ -68,9 +92,26 @@ def measure_effective_bandwidth(
 
 
 def snake_ordering(K: int, C: int) -> torch.Tensor:
-    """
-    Simple low-high interleaving over durations (k), then labels (c) in ascending order.
-    Returns a permutation over flattened states (k-major: idx = k*C + c).
+    r"""snake_ordering(K, C) -> Tensor
+
+    Generate a snake ordering permutation for duration-label state space.
+
+    Creates a low-high interleaving over durations, keeping labels in ascending
+    order within each duration. This often reduces bandwidth for Semi-Markov
+    structures where adjacent durations have similar transition patterns.
+
+    Args:
+        K (int): Number of durations.
+        C (int): Number of labels/classes.
+
+    Returns:
+        Tensor: Permutation tensor of shape :math:`(K \cdot C,)` with dtype ``torch.long``.
+
+    Examples::
+
+        >>> perm = snake_ordering(4, 2)
+        >>> perm  # Interleaves durations: 0, 3, 1, 2
+        tensor([0, 1, 6, 7, 2, 3, 4, 5])
     """
     ks = []
     low, high = 0, K - 1
@@ -91,10 +132,27 @@ def snake_ordering(K: int, C: int) -> torch.Tensor:
 
 
 def rcm_ordering_from_adjacency(adj: torch.Tensor) -> tuple[torch.Tensor, bool]:
-    """
-    Reverse Cuthill-McKee ordering for a square dense adjacency.
+    r"""rcm_ordering_from_adjacency(adj) -> Tuple[Tensor, bool]
 
-    Returns (perm, used_scipy). If SciPy is unavailable, returns identity and False.
+    Compute Reverse Cuthill-McKee ordering to minimize bandwidth.
+
+    RCM is a graph-based permutation algorithm that reorders vertices to
+    minimize the bandwidth of the adjacency matrix. The input is symmetrized
+    before computing the ordering.
+
+    Args:
+        adj (Tensor): Square adjacency matrix of shape :math:`(n, n)`.
+
+    Returns:
+        Tuple[Tensor, bool]: A tuple containing:
+
+        - **perm** (Tensor): Permutation tensor of shape :math:`(n,)`.
+        - **used_scipy** (bool): ``True`` if SciPy was used, ``False`` if
+          SciPy was unavailable (returns identity permutation).
+
+    .. note::
+        Requires SciPy for the actual RCM computation. Falls back to identity
+        permutation when SciPy is not installed.
     """
     if not _has_scipy:
         n = adj.size(0)
@@ -113,7 +171,26 @@ def rcm_ordering_from_adjacency(adj: torch.Tensor) -> tuple[torch.Tensor, bool]:
 
 
 def apply_permutation(potentials: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    """
-    Permute flattened state dimension of potentials shaped (..., K*C, K*C).
+    r"""apply_permutation(potentials, perm) -> Tensor
+
+    Apply a permutation to both dimensions of a matrix.
+
+    Permutes the last two dimensions of the input tensor using the same
+    permutation, maintaining matrix structure.
+
+    Args:
+        potentials (Tensor): Input tensor of shape :math:`(..., K \cdot C, K \cdot C)`.
+        perm (Tensor): Permutation indices of shape :math:`(K \cdot C,)`.
+
+    Returns:
+        Tensor: Permuted tensor with same shape as input.
+
+    Examples::
+
+        >>> mat = torch.randn(2, 8, 8)
+        >>> perm = snake_ordering(4, 2)
+        >>> permuted = apply_permutation(mat, perm)
+        >>> permuted.shape
+        torch.Size([2, 8, 8])
     """
     return potentials.index_select(-1, perm).index_select(-2, perm)

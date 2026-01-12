@@ -1,3 +1,23 @@
+r"""Gradient checkpointing wrappers for memory-efficient semiring operations.
+
+This module provides semiring wrappers that trade compute for memory by
+recomputing forward passes during backward (gradient checkpointing). Essential
+for running binary tree algorithms on large state spaces without OOM.
+
+Two strategies are provided:
+
+- :func:`CheckpointSemiring`: Basic checkpointing for matrix multiplications
+- :func:`CheckpointShardSemiring`: Sharded checkpointing for very large matrices
+
+Examples::
+
+    >>> from torch_semimarkov.semirings import LogSemiring
+    >>> from torch_semimarkov.semirings.checkpoint import CheckpointSemiring
+    >>> # Wrap LogSemiring with checkpointing for memory-efficient gradients
+    >>> CheckpointedLog = CheckpointSemiring(LogSemiring, min_size=1000)
+    >>> model = SemiMarkov(CheckpointedLog)
+"""
+
 import torch
 
 has_genbmm = False
@@ -11,10 +31,12 @@ except ImportError:
 
 
 def broadcast_size(a, b):
+    r"""Compute the broadcasted tensor size."""
     return torch.tensor([max(i, j) for i, j in zip(a.shape, b.shape)]).prod()
 
 
 def matmul_size(a, b):
+    r"""Compute the output shape of matrix multiplication."""
     size = [max(i, j) for i, j in zip(a.shape[:-2], b.shape[:-2])]
     size.append(a.shape[-2])
     size.append(b.shape[-1])
@@ -22,6 +44,28 @@ def matmul_size(a, b):
 
 
 def CheckpointSemiring(cls, min_size=0):
+    r"""CheckpointSemiring(cls, min_size=0) -> class
+
+    Wrap a semiring with gradient checkpointing for memory-efficient backward.
+
+    During backward, the forward computation is recomputed instead of storing
+    intermediate activations. This trades 2x compute for reduced memory.
+
+    Args:
+        cls: Base semiring class to wrap (e.g., :class:`LogSemiring`).
+        min_size (int, optional): Minimum tensor size to trigger checkpointing.
+            Smaller tensors use standard backward. Default: ``0``
+
+    Returns:
+        class: A wrapped semiring class with checkpointed matmul.
+
+    Examples::
+
+        >>> CheckpointedLog = CheckpointSemiring(LogSemiring, min_size=1000)
+        >>> model = SemiMarkov(CheckpointedLog)
+        >>> # Now binary tree uses less memory (but ~2x slower)
+        >>> log_Z, _ = model.logpartition(edge, use_linear_scan=False)
+    """
     class _Check(torch.autograd.Function):
         @staticmethod
         def forward(ctx, a, b):
@@ -70,6 +114,34 @@ def CheckpointSemiring(cls, min_size=0):
 
 
 def CheckpointShardSemiring(cls, max_size, min_size=0):
+    r"""CheckpointShardSemiring(cls, max_size, min_size=0) -> class
+
+    Wrap a semiring with sharded gradient checkpointing for very large matrices.
+
+    For matrices too large to fit in memory even with basic checkpointing, this
+    wrapper splits the computation into shards that are processed sequentially.
+    Each shard is checkpointed independently.
+
+    Args:
+        cls: Base semiring class to wrap (e.g., :class:`LogSemiring`).
+        max_size (int): Maximum number of elements per shard. Smaller values
+            reduce peak memory but increase overhead.
+        min_size (int, optional): Minimum tensor size to trigger sharding.
+            Smaller tensors use standard checkpointing. Default: ``0``
+
+    Returns:
+        class: A wrapped semiring class with sharded checkpointed matmul.
+
+    Examples::
+
+        >>> # For very large KC state spaces
+        >>> ShardedLog = CheckpointShardSemiring(LogSemiring, max_size=100000)
+        >>> model = SemiMarkov(ShardedLog)
+
+    .. warning::
+        Sharded checkpointing has significant overhead. Only use when necessary
+        to avoid OOM on the binary tree algorithm with large state spaces.
+    """
     class _Check(torch.autograd.Function):
         @staticmethod
         def forward(ctx, a, b):
