@@ -95,12 +95,27 @@ log_Z.sum().backward()
 
 ### Triton Fused Kernel (up to 45x speedup)
 
+The Triton kernel uses a hybrid approach for optimal performance:
+
+- **Inference** (`requires_grad=False`): Hand-written Triton kernel for maximum speed
+- **Training** (`requires_grad=True`): `torch.compile` for efficient automatic backward pass
+
 ```python
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
 edge = edge.cuda()
 lengths = lengths.cuda()
+
+# Inference: uses fast hand-written Triton kernel
 partition = semi_crf_triton_forward(edge, lengths)
+
+# Training: uses torch.compile for efficient backward
+edge_train = edge.requires_grad_(True)
+partition = semi_crf_triton_forward(edge_train, lengths)
+partition.sum().backward()
+
+# Viterbi decoding (max semiring)
+viterbi_score = semi_crf_triton_forward(edge, lengths, semiring="max")
 ```
 
 ## Documentation
@@ -134,7 +149,7 @@ Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.
 | **Checkpoint Semiring** | Memory-efficient gradients |
 | **BandedMatrix (CPU)** | Prototype and not a recommended backend |
 | **CUDA Extension** | Builds when nvcc available |
-| **Triton Kernel** | ~45x speedup on GPU |
+| **Triton Kernel** | ~45x speedup on GPU, Log/Max semirings, hybrid inference/training |
 
 ## Acknowledgments
 

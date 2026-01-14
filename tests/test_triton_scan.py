@@ -151,3 +151,67 @@ def test_invalid_semiring_raises():
 
     with pytest.raises(ValueError, match="semiring must be"):
         semi_crf_forward_pytorch(edge, lengths, semiring="tropical")
+
+
+# =============================================================================
+# Hybrid Approach Tests
+# =============================================================================
+
+
+def test_hybrid_inference_vs_training_paths():
+    """Test that inference (no grad) and training (with grad) paths give same results."""
+    torch.manual_seed(789)
+    batch, T, K, C = 2, 8, 4, 3
+    edge = torch.randn(batch, T - 1, K, C, C)
+    lengths = torch.full((batch,), T, dtype=torch.long)
+
+    # Inference path (no requires_grad)
+    inference_result = semi_crf_triton_forward(edge, lengths)
+
+    # Training path (with requires_grad)
+    edge_train = edge.clone().requires_grad_(True)
+    training_result = semi_crf_triton_forward(edge_train, lengths)
+
+    # Results should match
+    assert torch.allclose(inference_result, training_result, atol=1e-6)
+
+
+def test_use_compile_false_fallback():
+    """Test that use_compile=False falls back to gradient checkpointing."""
+    torch.manual_seed(321)
+    batch, T, K, C = 2, 6, 4, 3
+    edge = torch.randn(batch, T - 1, K, C, C, requires_grad=True)
+    lengths = torch.full((batch,), T, dtype=torch.long)
+
+    # Test with use_compile=False (should use gradient checkpointing fallback)
+    out = semi_crf_triton_forward(edge, lengths, use_compile=False)
+    ref = semi_crf_forward_pytorch(edge.detach(), lengths)
+
+    assert torch.allclose(out, ref, atol=1e-6)
+
+    # Verify gradients work
+    out.sum().backward()
+    assert edge.grad is not None
+    assert torch.isfinite(edge.grad).all()
+
+
+def test_hybrid_gradients_match_pytorch():
+    """Test that gradients from hybrid approach match pure PyTorch reference."""
+    torch.manual_seed(555)
+    batch, T, K, C = 2, 6, 3, 2
+    edge_ref = torch.randn(batch, T - 1, K, C, C, requires_grad=True)
+    edge_test = edge_ref.detach().clone().requires_grad_(True)
+    lengths = torch.full((batch,), T, dtype=torch.long)
+
+    # Reference gradients (pure PyTorch)
+    out_ref = semi_crf_forward_pytorch(edge_ref, lengths)
+    out_ref.sum().backward()
+
+    # Test gradients (via hybrid triton forward, use_compile=False to avoid torch.compile overhead in test)
+    out_test = semi_crf_triton_forward(edge_test, lengths, use_compile=False)
+    out_test.sum().backward()
+
+    # Gradients should match
+    assert torch.allclose(
+        edge_ref.grad, edge_test.grad, atol=1e-5
+    ), f"max grad diff: {(edge_ref.grad - edge_test.grad).abs().max()}"

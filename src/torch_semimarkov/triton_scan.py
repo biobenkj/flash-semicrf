@@ -4,27 +4,42 @@ This module provides optimized implementations of the streaming forward scan
 for Semi-Markov CRFs. The key optimization is fusing the O(N) loop into
 a single GPU kernel, keeping the :math:`K \times C` frontier in fast memory.
 
-Two implementations are provided:
+Three execution paths are provided, automatically selected based on context:
 
-1. **PyTorch reference** (CPU/GPU): Always available, used for testing and as fallback
-2. **Triton kernel** (GPU only): Requires triton package, ~45x faster when feasible
+1. **Hand-written Triton kernel** (GPU inference): Maximum performance (~45x faster),
+   used when ``requires_grad=False`` and CUDA is available.
+2. **torch.compile** (GPU training): Uses ``torch.compile`` to generate optimized
+   Triton kernels for both forward AND backward passes automatically.
+3. **PyTorch reference** (CPU/fallback): Pure PyTorch implementation, always available.
 
-The Triton kernel uses a fused scan that:
+The hand-written Triton kernel uses a fused scan that:
 
 - Processes one batch element per thread block
 - Maintains the ring buffer in L1/L2 cache
 - Avoids Python loop overhead entirely
 
+Both ``"log"`` (logsumexp for partition function) and ``"max"`` (Viterbi for best
+path score) semirings are supported.
+
 .. note::
-    The Triton kernel is automatically used when available and the input is on CUDA.
-    Falls back to PyTorch implementation on CPU or when Triton is not installed.
+    The hybrid approach gives optimal performance for both inference and training:
+    blazing fast inference with the hand-tuned kernel, and efficient training with
+    automatic backward pass generation via ``torch.compile``.
 
 Examples::
 
     >>> from torch_semimarkov.triton_scan import semi_crf_triton_forward
+    >>> import torch
+    >>> # GPU inference: uses fast hand-written Triton kernel
     >>> edge = torch.randn(4, 99, 8, 6, 6).cuda()
     >>> lengths = torch.full((4,), 100).cuda()
     >>> partition = semi_crf_triton_forward(edge, lengths)
+    >>> # GPU training: uses torch.compile for efficient backward
+    >>> edge_train = edge.requires_grad_(True)
+    >>> partition = semi_crf_triton_forward(edge_train, lengths)
+    >>> partition.sum().backward()
+    >>> # Viterbi (max semiring) for best path score
+    >>> viterbi = semi_crf_triton_forward(edge, lengths, semiring="max")
 """
 
 import torch
@@ -458,16 +473,23 @@ if HAS_TRITON:
         return p
 
     def launch_triton_kernel(edge, lengths, semiring="log"):
-        """
-        Launch the Triton kernel with proper buffer allocation.
+        r"""launch_triton_kernel(edge, lengths, semiring="log") -> Tensor
+
+        Launch the hand-written Triton kernel with proper buffer allocation.
+
+        This is the fast inference path that uses hand-tuned Triton kernels for
+        maximum performance. Called internally by :func:`semi_crf_triton_forward`
+        when ``requires_grad=False`` and CUDA is available.
 
         Args:
-            edge: (batch, N-1, K, C, C) contiguous CUDA tensor
-            lengths: (batch,) CUDA tensor
-            semiring: "log" for logsumexp (partition function) or "max" for Viterbi
+            edge (Tensor): Log potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+                Must be a contiguous CUDA tensor.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            semiring (str, optional): Semiring to use. Either ``"log"`` for logsumexp
+                (partition function) or ``"max"`` for Viterbi. Default: ``"log"``
 
         Returns:
-            partition: (batch,) log partition function or Viterbi score
+            Tensor: Log partition function or Viterbi score of shape :math:`(\text{batch},)`.
         """
         batch, N_1, K, C, _ = edge.shape
         N = N_1 + 1
@@ -515,16 +537,74 @@ if HAS_TRITON:
 
 
 # =============================================================================
-# Autograd Function
+# Compiled PyTorch for Training (torch.compile)
+# =============================================================================
+
+# Lazily compiled version of the forward function for training
+# torch.compile generates optimized Triton kernels for both forward AND backward
+_compiled_forward_log = None
+_compiled_forward_max = None
+
+
+def _get_compiled_forward(semiring="log"):
+    r"""_get_compiled_forward(semiring="log") -> Callable
+
+    Get or create the compiled forward function for training.
+
+    Uses :func:`torch.compile` to generate optimized Triton kernels that include
+    automatic backward pass generation. Lazily initialized to avoid compilation
+    overhead at import time.
+
+    Args:
+        semiring (str, optional): Semiring to use. Either ``"log"`` or ``"max"``.
+            Default: ``"log"``
+
+    Returns:
+        Callable: A compiled function that takes ``(edge, lengths)`` and returns
+            the partition function or Viterbi score.
+
+    .. note::
+        The first call triggers JIT compilation which may take several seconds.
+        Subsequent calls reuse the cached compiled function.
+    """
+    global _compiled_forward_log, _compiled_forward_max
+
+    if semiring == "log":
+        if _compiled_forward_log is None:
+            _compiled_forward_log = torch.compile(
+                lambda edge, lengths: semi_crf_forward_pytorch(edge, lengths, semiring="log"),
+                mode="reduce-overhead",
+                fullgraph=True,
+            )
+        return _compiled_forward_log
+    else:  # max
+        if _compiled_forward_max is None:
+            _compiled_forward_max = torch.compile(
+                lambda edge, lengths: semi_crf_forward_pytorch(edge, lengths, semiring="max"),
+                mode="reduce-overhead",
+                fullgraph=True,
+            )
+        return _compiled_forward_max
+
+
+# =============================================================================
+# Autograd Function (for inference-only Triton path)
 # =============================================================================
 
 
 class SemiCRFTritonForward(torch.autograd.Function):
     r"""Autograd function with gradient checkpointing for Semi-CRF forward.
 
-    This custom autograd function enables using the fast Triton kernel for forward
-    computation while supporting gradients via checkpointing (recomputing forward
-    during backward).
+    This custom autograd function is used as a fallback when ``torch.compile`` is
+    disabled (``use_compile=False``) or unavailable. It enables using the fast
+    Triton kernel for forward computation while supporting gradients via
+    checkpointing (recomputing forward during backward).
+
+    .. note::
+        For training on GPU, the default ``torch.compile`` path in
+        :func:`semi_crf_triton_forward` is preferred as it generates efficient
+        backward kernels automatically. This class is used for CPU training or
+        when ``use_compile=False``.
 
     Forward:
         Uses Triton kernel when available and on CUDA, otherwise PyTorch fallback.
@@ -570,26 +650,44 @@ class SemiCRFTritonForward(torch.autograd.Function):
         return grad_edge, None, None, None
 
 
-def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semiring="log"):
-    r"""semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semiring="log") -> Tensor
+def semi_crf_triton_forward(
+    edge, lengths, use_triton=True, validate=False, semiring="log", use_compile=True
+):
+    r"""semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semiring="log", use_compile=True) -> Tensor
 
     Compute Semi-Markov CRF forward scan with optional GPU acceleration.
 
-    Main entry point for the fused streaming scan. Uses the Triton kernel when
-    available and applicable (CUDA input), otherwise falls back to the optimized
-    PyTorch implementation.
+    Main entry point for the fused streaming scan. Uses a hybrid approach for
+    optimal performance in both inference and training:
+
+    - **Inference** (no gradients): Uses the hand-written Triton kernel for maximum
+      speed (~45x faster than naive PyTorch).
+    - **Training** (with gradients): Uses ``torch.compile`` on the PyTorch
+      implementation, which generates optimized Triton kernels for both forward
+      AND backward passes automatically.
+
+    This hybrid approach gives you the best of both worlds: blazing fast inference
+    with the hand-tuned kernel, and efficient training with automatic backward
+    pass generation.
+
+    See :class:`~torch_semimarkov.SemiMarkov` for the full Semi-Markov CRF model
+    with additional functionality like marginals and sampling.
 
     Args:
         edge (Tensor): Log potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-        use_triton (bool, optional): If ``True``, use Triton kernel when possible.
-            Default: ``True``
+        use_triton (bool, optional): If ``True``, use Triton kernel for inference
+            when possible. Default: ``True``
         validate (bool, optional): If ``True``, use float64 PyTorch implementation
             for high-precision debugging. Useful for validating numerical accuracy.
             Returns result in original dtype. Default: ``False``
         semiring (str, optional): Semiring to use for computation. Either ``"log"``
             (logsumexp for partition function) or ``"max"`` (Viterbi/max-plus for
             best path score). Default: ``"log"``
+        use_compile (bool, optional): If ``True``, use ``torch.compile`` for training
+            (when gradients are needed). This generates efficient Triton kernels for
+            backward pass automatically. Set to ``False`` to use gradient checkpointing
+            with PyTorch autograd instead. Default: ``True``
 
     Returns:
         Tensor: Log partition function (log semiring) or Viterbi score (max semiring)
@@ -601,14 +699,19 @@ def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semi
         >>> lengths = torch.full((4,), 100)
         >>> # CPU: uses PyTorch fallback
         >>> partition_cpu = semi_crf_triton_forward(edge, lengths)
-        >>> # GPU: uses Triton kernel if available
+        >>> # GPU inference (no grad): uses fast hand-written Triton kernel
         >>> partition_gpu = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+        >>> # GPU training (with grad): uses torch.compile for efficient backward
+        >>> edge_train = edge.cuda().requires_grad_(True)
+        >>> partition_train = semi_crf_triton_forward(edge_train, lengths.cuda())
+        >>> partition_train.sum().backward()  # efficient compiled backward
         >>> # Viterbi (max semiring) for best path score
         >>> viterbi_score = semi_crf_triton_forward(edge, lengths, semiring="max")
 
     .. note::
-        Gradients are computed via checkpointing: the forward pass is recomputed
-        during backward using the PyTorch implementation for proper autograd support.
+        The first training call with ``use_compile=True`` will incur a one-time
+        compilation overhead as ``torch.compile`` traces and optimizes the graph.
+        Subsequent calls reuse the cached compiled kernel.
     """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
@@ -619,4 +722,19 @@ def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semi
         partition = semi_crf_forward_pytorch(edge.double(), lengths, semiring=semiring)
         return partition.to(orig_dtype)
 
-    return SemiCRFTritonForward.apply(edge, lengths, use_triton, semiring)
+    # Hybrid routing based on whether gradients are needed
+    if edge.requires_grad:
+        # Training path: use torch.compile for efficient backward pass
+        if use_compile and edge.is_cuda:
+            compiled_fn = _get_compiled_forward(semiring)
+            return compiled_fn(edge, lengths)
+        else:
+            # Fallback: gradient checkpointing (recomputes forward during backward)
+            return SemiCRFTritonForward.apply(edge, lengths, use_triton, semiring)
+    else:
+        # Inference path: use fast hand-written Triton kernel
+        if HAS_TRITON and use_triton and edge.is_cuda:
+            return launch_triton_kernel(edge, lengths, semiring=semiring)
+        else:
+            # CPU fallback
+            return semi_crf_forward_pytorch(edge, lengths, semiring=semiring)

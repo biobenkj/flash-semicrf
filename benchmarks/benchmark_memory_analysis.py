@@ -49,7 +49,11 @@ SEMIRING_MAP = {
 }
 
 # Backends that only work with LogSemiring (due to hardcoded logsumexp)
-LOG_SEMIRING_ONLY_BACKENDS = {"triton", "triton_pytorch"}
+LOG_SEMIRING_ONLY_BACKENDS: set[str] = set()
+
+# Backends that only support a subset of semirings
+# triton/triton_pytorch support Log and Max, but not Entropy
+TRITON_SUPPORTED_SEMIRINGS = {"Log", "Max"}
 
 
 @dataclass
@@ -194,7 +198,7 @@ def estimate_memory_breakdown(T: int, K: int, C: int, B: int, backend: str) -> d
         workspace_bytes = B * KC * KC * float_bytes  # dense conversion overhead
         autograd_bytes = B * N * KC * KC * float_bytes
 
-    elif backend in ("triton", "triton_pytorch"):
+    elif backend in ("triton", "triton_pytorch", "triton_checkpointing"):
         # Triton scan uses O(K*C) ring buffer, same as streaming scan
         # triton: Fused GPU kernel with ring buffer in L1/L2
         # triton_pytorch: Reference PyTorch implementation (same algorithm)
@@ -270,6 +274,7 @@ def run_single_benchmark(
     repeats: int = 5,
     semiring_name: str = "Log",
     phase: str = "both",
+    use_compile: bool = True,
 ) -> BenchmarkResult:
     """Run a single benchmark configuration.
 
@@ -283,6 +288,8 @@ def run_single_benchmark(
         repeats: Number of repetitions for timing
         semiring_name: Semiring to use ("Log", "Max", "Entropy")
         phase: "forward" (forward only), "backward" (backward only), or "both"
+        use_compile: If True, use torch.compile for triton training backward pass.
+            If False, use gradient checkpointing. Default: True
     """
 
     KC = K * C
@@ -315,14 +322,46 @@ def run_single_benchmark(
         peak_allocated = 0
         peak_reserved = 0
 
-        def run_backend_forward(edge_input, struct_to_use):
-            """Run forward pass for the specified backend, returning partition value."""
+        # Map semiring name to triton semiring string
+        triton_semiring = semiring_name.lower()  # "Log" -> "log", "Max" -> "max"
+
+        def run_backend_forward(edge_input, struct_to_use, use_compile=True):
+            """Run forward pass for the specified backend, returning partition value.
+
+            For triton backends, the execution path depends on edge_input.requires_grad:
+            - requires_grad=False (inference): Hand-written Triton kernel (~45x speedup)
+            - requires_grad=True + use_compile=True: torch.compile for efficient backward
+            - requires_grad=True + use_compile=False: Gradient checkpointing (recomputes forward)
+            """
             if backend == "triton":
-                # Triton-accelerated scan (LogSemiring only)
-                return semi_crf_triton_forward(edge_input, lengths, use_triton=True)
+                # Triton-accelerated scan (supports Log and Max semirings)
+                # Hybrid routing: hand-written kernel for inference, torch.compile for training
+                return semi_crf_triton_forward(
+                    edge_input,
+                    lengths,
+                    use_triton=True,
+                    semiring=triton_semiring,
+                    use_compile=use_compile,
+                )
             elif backend == "triton_pytorch":
-                # PyTorch reference for Triton (LogSemiring only)
-                return semi_crf_triton_forward(edge_input, lengths, use_triton=False)
+                # PyTorch reference for Triton (supports Log and Max semirings)
+                return semi_crf_triton_forward(
+                    edge_input,
+                    lengths,
+                    use_triton=False,
+                    semiring=triton_semiring,
+                    use_compile=use_compile,
+                )
+            elif backend == "triton_checkpointing":
+                # Triton with gradient checkpointing (old approach, for comparison)
+                # Always uses use_compile=False to force checkpointing path
+                return semi_crf_triton_forward(
+                    edge_input,
+                    lengths,
+                    use_triton=True,
+                    semiring=triton_semiring,
+                    use_compile=False,
+                )
             elif backend == "binary_tree":
                 v, _ = struct_to_use.logpartition(
                     edge_input, lengths=lengths, use_linear_scan=False
@@ -371,10 +410,11 @@ def run_single_benchmark(
 
         # Warmup run (not recorded) to stabilize CUDA state
         # IMPORTANT: Run the exact same computation as the timed run for accurate warmup
+        # For triton with torch.compile, this triggers the JIT compilation
         if device.type == "cuda":
             edge_warmup = edge.clone().detach().requires_grad_(True)
             try:
-                v_warm = run_backend_forward(edge_warmup, struct)
+                v_warm = run_backend_forward(edge_warmup, struct, use_compile=use_compile)
                 # Warmup backward pass too if we're timing backward
                 if phase in ("backward", "both"):
                     v_warm.sum().backward()
@@ -402,14 +442,14 @@ def run_single_benchmark(
             if phase == "forward":
                 # Forward only - no backward pass
                 t0 = time.perf_counter()
-                v = run_backend_forward(edge_run, struct)
+                v = run_backend_forward(edge_run, struct, use_compile=use_compile)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 loss = None
             elif phase == "backward":
                 # Run forward (untimed), then time backward only
-                v = run_backend_forward(edge_run, struct)
+                v = run_backend_forward(edge_run, struct, use_compile=use_compile)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 t0 = time.perf_counter()
@@ -421,7 +461,7 @@ def run_single_benchmark(
             else:  # phase == "both"
                 # Time forward + backward together (original behavior)
                 t0 = time.perf_counter()
-                v = run_backend_forward(edge_run, struct)
+                v = run_backend_forward(edge_run, struct, use_compile=use_compile)
                 loss = v.sum()
                 loss.backward()
                 if device.type == "cuda":
@@ -527,8 +567,10 @@ def main():
             "Comma-separated list of backends. Options: "
             "linear_scan, linear_scan_vectorized, linear_scan_streaming, "
             "binary_tree, binary_tree_sharded, block_triangular, "
-            "triton (GPU Triton kernel), triton_pytorch (PyTorch reference). "
-            "Note: triton/triton_pytorch only work with Log semiring."
+            "triton (GPU Triton kernel with torch.compile for training), "
+            "triton_pytorch (PyTorch reference), "
+            "triton_checkpointing (Triton with gradient checkpointing, for comparison). "
+            "Note: triton backends support Log and Max semirings."
         ),
     )
     parser.add_argument(
@@ -537,7 +579,7 @@ def main():
         default="Log",
         help=(
             "Comma-separated list of semirings. Options: Log, Max, Entropy. "
-            "Note: triton/triton_pytorch backends only support Log semiring."
+            "Note: triton/triton_pytorch backends support Log and Max semirings."
         ),
     )
     parser.add_argument(
@@ -549,6 +591,22 @@ def main():
             "forward (forward pass only), backward (backward pass only), "
             "both (forward + backward together). Default: both"
         ),
+    )
+    parser.add_argument(
+        "--use-compile",
+        action="store_true",
+        default=True,
+        help=(
+            "Use torch.compile for triton training backward pass (default). "
+            "This generates optimized kernels for both forward and backward. "
+            "Disable with --no-use-compile to use gradient checkpointing instead."
+        ),
+    )
+    parser.add_argument(
+        "--no-use-compile",
+        dest="use_compile",
+        action="store_false",
+        help="Disable torch.compile for triton (use gradient checkpointing instead).",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
     parser.add_argument(
@@ -585,9 +643,9 @@ def main():
             print(f"WARNING: Unknown phase '{p}', available: {valid_phases}")
 
     # Check Triton availability if needed
-    if any(b in ("triton", "triton_pytorch") for b in backends):
+    if any(b in ("triton", "triton_pytorch", "triton_checkpointing") for b in backends):
         if not HAS_TRITON:
-            print("WARNING: Triton not available, triton backend will use PyTorch fallback")
+            print("WARNING: Triton not available, triton backends will use PyTorch fallback")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,6 +671,7 @@ def main():
     print(f"Semirings: {semirings}")
     print(f"Phases: {phases}")
     print(f"Repeats: {args.repeats}")
+    print(f"Triton use_compile: {args.use_compile}")
     print("-" * 80)
 
     for T in T_list:
@@ -649,6 +708,37 @@ def main():
                                         peak_reserved_gb=float("nan"),
                                         status="not_supported",
                                         error_msg=f"{backend} only supports Log semiring",
+                                    )
+                                )
+                                continue
+
+                            # Check triton backend semiring compatibility (Log, Max only)
+                            if (
+                                backend in ("triton", "triton_pytorch", "triton_checkpointing")
+                                and semiring_name not in TRITON_SUPPORTED_SEMIRINGS
+                            ):
+                                print(
+                                    f"[{completed}/{total_configs}] SKIP T={T}, K={K}, C={C}, {backend}/{semiring_name}/{phase}: "
+                                    f"{backend} only supports Log/Max semirings"
+                                )
+                                results.append(
+                                    BenchmarkResult(
+                                        T=T,
+                                        K=K,
+                                        C=C,
+                                        B=args.B,
+                                        KC=KC,
+                                        backend=backend,
+                                        semiring=semiring_name,
+                                        phase=phase,
+                                        time_ms_median=float("nan"),
+                                        time_ms_iqr_low=float("nan"),
+                                        time_ms_iqr_high=float("nan"),
+                                        time_per_position_ms=float("nan"),
+                                        peak_allocated_gb=float("nan"),
+                                        peak_reserved_gb=float("nan"),
+                                        status="not_supported",
+                                        error_msg=f"{backend} only supports Log/Max semirings",
                                     )
                                 )
                                 continue
@@ -706,6 +796,7 @@ def main():
                                 args.repeats,
                                 semiring_name=semiring_name,
                                 phase=phase,
+                                use_compile=args.use_compile,
                             )
                             results.append(result)
 

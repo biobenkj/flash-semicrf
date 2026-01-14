@@ -27,7 +27,7 @@ python benchmarks/benchmark_memory_analysis.py \
     --backends triton,triton_pytorch,linear_scan_streaming
 ```
 
-Note: Triton backends only support `Log` semiring (hardcoded logsumexp operations).
+Note: Triton backends support `Log` and `Max` semirings.
 
 ## Phase-Separated Timing
 
@@ -63,7 +63,7 @@ python benchmarks/benchmark_memory_analysis.py \
     --C 3,6
 ```
 
-Note: `triton` and `triton_pytorch` backends only support `Log` semiring.
+Note: `triton` and `triton_pytorch` backends support `Log` and `Max` semirings.
 
 ## Full Benchmark Suite
 
@@ -95,8 +95,9 @@ python benchmarks/benchmark_memory_analysis.py \
 | `binary_tree` | O(log N) parallel tree | O((KC)^3) | All |
 | `binary_tree_sharded` | Sharded tree (checkpointed) | Reduced | All |
 | `block_triangular` | Block-sparse tree | O(N*KC^2) | All |
-| `triton` | Fused Triton GPU kernel | O(KC) | Log only |
-| `triton_pytorch` | PyTorch reference for Triton | O(KC) | Log only |
+| `triton` | Fused Triton GPU kernel (torch.compile for training) | O(KC) | Log, Max |
+| `triton_pytorch` | PyTorch reference for Triton | O(KC) | Log, Max |
+| `triton_checkpointing` | Triton with gradient checkpointing (old approach) | O(KC) | Log, Max |
 
 ### Semirings
 
@@ -113,6 +114,19 @@ python benchmarks/benchmark_memory_analysis.py \
 | `forward` | Time forward pass only |
 | `backward` | Time backward pass only |
 | `both` | Time forward + backward together (default) |
+
+### Triton Options
+
+| Option | Description |
+|--------|-------------|
+| `--use-compile` | Use torch.compile for triton training (default) |
+| `--no-use-compile` | Use gradient checkpointing instead of torch.compile |
+
+The `triton` backend uses a hybrid approach:
+- **Inference** (`--phases forward`): Hand-written Triton kernel (~45x faster)
+- **Training** (`--phases backward,both`): `torch.compile` for efficient backward by default
+
+Use `triton_checkpointing` backend or `--no-use-compile` to compare against the older gradient checkpointing approach.
 
 ## Output Files
 

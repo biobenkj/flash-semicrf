@@ -61,6 +61,49 @@ from torch_semimarkov.semirings.checkpoint import (
 ```python
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
-# Uses Triton automatically on CUDA, falls back to PyTorch on CPU
-partition = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+def semi_crf_triton_forward(
+    edge,                # (batch, T-1, K, C, C) potentials
+    lengths,             # (batch,) sequence lengths
+    use_triton=True,     # Use Triton kernel for inference
+    validate=False,      # Use float64 PyTorch for validation
+    semiring="log",      # "log" (partition) or "max" (Viterbi)
+    use_compile=True,    # Use torch.compile for training
+) -> Tensor:
+    """
+    Compute Semi-Markov CRF forward scan with hybrid optimization.
+
+    Uses a hybrid approach for optimal performance:
+    - Inference (requires_grad=False): Hand-written Triton kernel (~45x faster)
+    - Training (requires_grad=True): torch.compile for efficient backward
+
+    Returns:
+        partition: (batch,) log partition function or Viterbi score
+    """
 ```
+
+**Hybrid routing:**
+
+| Context | Execution Path |
+|---------|----------------|
+| `requires_grad=False` + CUDA | Hand-written Triton kernel |
+| `requires_grad=True` + CUDA | `torch.compile` (automatic backward) |
+| CPU or Triton unavailable | PyTorch reference |
+
+**Example usage:**
+
+```python
+from torch_semimarkov.triton_scan import semi_crf_triton_forward
+
+# GPU inference: fast hand-written Triton kernel
+partition = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+
+# GPU training: torch.compile for efficient backward
+edge_train = edge.cuda().requires_grad_(True)
+partition = semi_crf_triton_forward(edge_train, lengths.cuda())
+partition.sum().backward()
+
+# Viterbi score (max semiring)
+viterbi = semi_crf_triton_forward(edge.cuda(), lengths.cuda(), semiring="max")
+```
+
+See [Backends and Triton kernel](backends.md) for detailed behavior and options.

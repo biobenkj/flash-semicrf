@@ -591,20 +591,37 @@ def extract_segments(labels):
 
 ## Performance tips
 
-1. **Use the Triton kernel for inference** when on GPU:
+1. **Use the Triton kernel** for both inference and training on GPU:
    ```python
    from torch_semimarkov.triton_scan import semi_crf_triton_forward
-   # Up to 45x faster than PyTorch
+
+   # Inference: uses fast hand-written Triton kernel (~45x speedup)
    log_Z = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+
+   # Training: uses torch.compile for efficient backward
+   edge_train = edge.cuda().requires_grad_(True)
+   log_Z = semi_crf_triton_forward(edge_train, lengths.cuda())
+   log_Z.sum().backward()
+
+   # Viterbi decoding (max semiring)
+   viterbi = semi_crf_triton_forward(edge.cuda(), lengths.cuda(), semiring="max")
    ```
+
+   The kernel automatically routes to the optimal path:
+   - **Inference** (`requires_grad=False`): Hand-written Triton kernel
+   - **Training** (`requires_grad=True`): `torch.compile` for automatic backward
 
 2. **Choose K carefully**: Memory and compute scale with K. Use empirical
    quantiles (p95/p99) of segment lengths rather than maximum.
 
-3. **Vectorized scan for training**: When memory permits, use
+3. **Vectorized scan for training**: When not using Triton, use
    `use_vectorized=True` for 2-3x speedup during training.
 
 4. **Batch similar lengths together** to minimize padding waste.
+
+5. **First training call overhead**: The first call with `requires_grad=True`
+   incurs a one-time `torch.compile` overhead (a few seconds). Subsequent
+   calls reuse the cached compiled kernel.
 
 ## Memory considerations
 
