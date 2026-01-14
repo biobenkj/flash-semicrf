@@ -215,3 +215,84 @@ def test_hybrid_gradients_match_pytorch():
     assert torch.allclose(
         edge_ref.grad, edge_test.grad, atol=1e-5
     ), f"max grad diff: {(edge_ref.grad - edge_test.grad).abs().max()}"
+
+
+# =============================================================================
+# CUDA-specific Tests (requires GPU)
+# =============================================================================
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_log_kernel_cuda():
+    """Test that log semiring Triton kernel works on CUDA."""
+    from torch_semimarkov.triton_scan import HAS_TRITON
+
+    if not HAS_TRITON:
+        pytest.skip("Triton not available")
+
+    torch.manual_seed(111)
+    batch, T, K, C = 4, 20, 5, 4
+    edge = torch.randn(batch, T - 1, K, C, C, device="cuda")
+    lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
+
+    # This should use the Triton kernel (no grad = inference path)
+    result = semi_crf_triton_forward(edge, lengths, semiring="log")
+
+    # Compare with CPU reference
+    ref = semi_crf_triton_forward(edge.cpu(), lengths.cpu(), semiring="log")
+
+    assert torch.allclose(result.cpu(), ref, atol=1e-5), (
+        f"CUDA/CPU mismatch: max diff {(result.cpu() - ref).abs().max()}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_max_kernel_cuda():
+    """Test that max semiring Triton kernel works on CUDA."""
+    from torch_semimarkov.triton_scan import HAS_TRITON
+
+    if not HAS_TRITON:
+        pytest.skip("Triton not available")
+
+    torch.manual_seed(222)
+    batch, T, K, C = 4, 20, 5, 4
+    edge = torch.randn(batch, T - 1, K, C, C, device="cuda")
+    lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
+
+    # This should use the Triton max kernel (no grad = inference path)
+    result = semi_crf_triton_forward(edge, lengths, semiring="max")
+
+    # Compare with CPU reference
+    ref = semi_crf_triton_forward(edge.cpu(), lengths.cpu(), semiring="max")
+
+    assert torch.allclose(result.cpu(), ref, atol=1e-5), (
+        f"CUDA/CPU mismatch: max diff {(result.cpu() - ref).abs().max()}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_both_semirings_cuda_sequential():
+    """Test both semirings sequentially on CUDA to catch state issues."""
+    from torch_semimarkov.triton_scan import HAS_TRITON
+
+    if not HAS_TRITON:
+        pytest.skip("Triton not available")
+
+    torch.manual_seed(333)
+    batch, T, K, C = 4, 20, 5, 4
+    edge = torch.randn(batch, T - 1, K, C, C, device="cuda")
+    lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
+
+    # Run log first, then max (mimics benchmark order)
+    result_log = semi_crf_triton_forward(edge, lengths, semiring="log")
+    result_max = semi_crf_triton_forward(edge, lengths, semiring="max")
+
+    # Compare with CPU references
+    ref_log = semi_crf_triton_forward(edge.cpu(), lengths.cpu(), semiring="log")
+    ref_max = semi_crf_triton_forward(edge.cpu(), lengths.cpu(), semiring="max")
+
+    assert torch.allclose(result_log.cpu(), ref_log, atol=1e-5), "Log mismatch"
+    assert torch.allclose(result_max.cpu(), ref_max, atol=1e-5), "Max mismatch"
+
+    # Max should be <= Log for same inputs
+    assert (result_max <= result_log + 1e-5).all(), "Max should be <= Log"

@@ -70,6 +70,9 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
     but with pure PyTorch operations. Used as the reference implementation for correctness
     validation and as fallback when Triton is not available.
 
+    This implementation uses pure tensor operations (no ``.item()`` calls) to be compatible
+    with ``torch.compile(fullgraph=True)`` for efficient training.
+
     .. math::
         \beta[n, c] = \text{logsumexp}_{k=1}^{\min(K-1,n)} \sum_{c'} \left(
             \beta[n-k, c'] + \text{edge}[n-k, k, c, c']
@@ -87,7 +90,7 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
 
     .. note::
         This implementation supports gradient computation via autograd and works
-        on both CPU and GPU.
+        on both CPU and GPU. It is torch.compile compatible.
     """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
@@ -98,36 +101,35 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
 
     NEG_INF = -1e9
 
-    # Ring buffer as list of tensors to avoid in-place updates
-    # This allows proper gradient tracking
+    # Ring buffer as tensor: (ring_len, batch, C)
+    # Using tensor with index_select for torch.compile compatibility (no .item() calls)
     ring_len = K
-    initial_beta = torch.zeros((batch, C), device=device, dtype=dtype)
-    beta_ring = [initial_beta] + [
-        torch.full((batch, C), NEG_INF, device=device, dtype=dtype) for _ in range(ring_len - 1)
-    ]
+    beta_ring = torch.full((ring_len, batch, C), NEG_INF, device=device, dtype=dtype)
+    beta_ring[0] = 0.0  # initial_beta = zeros
     head = 0
 
-    # Duration indices (reused each iteration)
-    dur_full = torch.arange(1, K, device=device)
+    # Duration indices (reused each iteration) - shape: (K-1,)
+    dur_arange = torch.arange(1, K, device=device, dtype=torch.long)
 
     # Final beta storage (captured at each batch's sequence end)
     final_beta = torch.full((batch, C), NEG_INF, device=device, dtype=dtype)
 
     # Handle length=1: partition = logsumexp(0, 0, ..., 0) = log(C)
     mask_len1 = (lengths == 1).view(batch, 1)
-    final_beta = torch.where(mask_len1, initial_beta, final_beta)
+    final_beta = torch.where(mask_len1, beta_ring[0], final_beta)
 
     # Main scan loop
     for n in range(1, N):
         # Number of valid durations at this position
         k_eff = min(K - 1, n)
-        dur = dur_full[:k_eff]  # [1, 2, ..., k_eff]
-        start = n - dur  # positions where segments start
+        dur = dur_arange[:k_eff]  # [1, 2, ..., k_eff] as tensor
+        start = n - dur  # positions where segments start (tensor)
 
-        # Get previous betas from ring buffer
+        # Get previous betas from ring buffer using tensor indexing
         # ring_idx[i] = (head - (dur[i] - 1)) % ring_len
-        ring_idx = [(head - (d.item() - 1)) % ring_len for d in dur]
-        beta_prev = torch.stack([beta_ring[i] for i in ring_idx], dim=1)  # (batch, k_eff, C)
+        ring_idx = (head - (dur - 1)) % ring_len  # tensor of shape (k_eff,)
+        beta_prev = beta_ring.index_select(0, ring_idx)  # (k_eff, batch, C)
+        beta_prev = beta_prev.permute(1, 0, 2)  # (batch, k_eff, C)
 
         # Get edge potentials
         edge_slice = edge[:, start, dur, :, :]  # (batch, k_eff, C, C)
@@ -138,21 +140,26 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
                 beta_prev.unsqueeze(-2) + edge_slice, dim=-1
             )  # (batch, k_eff, C)
         else:  # max semiring
-            scores = torch.max(beta_prev.unsqueeze(-2) + edge_slice, dim=-1)[0]  # (batch, k_eff, C)
+            scores = torch.max(beta_prev.unsqueeze(-2) + edge_slice, dim=-1)[0]
 
         # Second reduction: over duration dimension
         if semiring == "log":
             beta_n = torch.logsumexp(scores, dim=1)  # (batch, C)
         else:  # max semiring
-            beta_n = torch.max(scores, dim=1)[0]  # (batch, C)
+            beta_n = torch.max(scores, dim=1)[0]
 
         # Capture final beta for sequences ending at this position
         mask_end = (lengths == (n + 1)).view(batch, 1)
         final_beta = torch.where(mask_end, beta_n, final_beta)
 
-        # Update ring buffer (replace entry, don't modify in-place)
+        # Update ring buffer using scatter to avoid in-place modification issues
+        # Create new ring buffer with updated entry
         head = (head + 1) % ring_len
-        beta_ring[head] = beta_n
+        # Use index tensor for scatter
+        head_idx = torch.tensor([head], device=device, dtype=torch.long)
+        # Expand beta_n to match ring buffer shape for scatter
+        beta_n_expanded = beta_n.unsqueeze(0)  # (1, batch, C)
+        beta_ring = beta_ring.scatter(0, head_idx.view(1, 1, 1).expand(1, batch, C), beta_n_expanded)
 
     # Final partition: reduction over labels
     if semiring == "log":
@@ -497,8 +504,15 @@ if HAS_TRITON:
         # Pad C to next power of 2 (Triton requirement for tl.arange)
         C_PAD = _next_power_of_2(C)
 
-        # Ensure contiguous
+        # Ensure inputs are contiguous CUDA tensors
         edge = edge.contiguous()
+        lengths = lengths.contiguous()
+
+        # Verify CUDA tensors (helps debug "cpu tensor" errors)
+        if not edge.is_cuda:
+            raise ValueError(f"edge must be a CUDA tensor, got device={edge.device}")
+        if not lengths.is_cuda:
+            raise ValueError(f"lengths must be a CUDA tensor, got device={lengths.device}")
 
         # Allocate ring buffer with padded C (small, will be L2 cached)
         ring_buffer = torch.empty((batch, K, C_PAD), device=edge.device, dtype=edge.dtype)
