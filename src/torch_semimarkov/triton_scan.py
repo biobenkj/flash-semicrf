@@ -46,8 +46,8 @@ except ImportError:
 # =============================================================================
 
 
-def semi_crf_forward_pytorch(edge, lengths):
-    r"""semi_crf_forward_pytorch(edge, lengths) -> Tensor
+def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
+    r"""semi_crf_forward_pytorch(edge, lengths, semiring="log") -> Tensor
 
     Reference PyTorch implementation of the streaming forward scan.
 
@@ -63,14 +63,19 @@ def semi_crf_forward_pytorch(edge, lengths):
     Args:
         edge (Tensor): Log potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+        semiring (str, optional): Semiring to use for computation. Either ``"log"``
+            (logsumexp, default) or ``"max"`` (Viterbi/max-plus). Default: ``"log"``
 
     Returns:
-        Tensor: Log partition function of shape :math:`(\text{batch},)`.
+        Tensor: Log partition function (log semiring) or Viterbi score (max semiring)
+            of shape :math:`(\text{batch},)`.
 
     .. note::
         This implementation supports gradient computation via autograd and works
         on both CPU and GPU.
     """
+    if semiring not in ("log", "max"):
+        raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
     batch, N_1, K, C, _ = edge.shape
     N = N_1 + 1
     device = edge.device
@@ -112,11 +117,17 @@ def semi_crf_forward_pytorch(edge, lengths):
         # Get edge potentials
         edge_slice = edge[:, start, dur, :, :]  # (batch, k_eff, C, C)
 
-        # First logsumexp: over c_prev (source labels)
-        scores = torch.logsumexp(beta_prev.unsqueeze(-2) + edge_slice, dim=-1)  # (batch, k_eff, C)
+        # First reduction: over c_prev (source labels)
+        if semiring == "log":
+            scores = torch.logsumexp(beta_prev.unsqueeze(-2) + edge_slice, dim=-1)  # (batch, k_eff, C)
+        else:  # max semiring
+            scores = torch.max(beta_prev.unsqueeze(-2) + edge_slice, dim=-1)[0]  # (batch, k_eff, C)
 
-        # Second logsumexp: over duration dimension
-        beta_n = torch.logsumexp(scores, dim=1)  # (batch, C)
+        # Second reduction: over duration dimension
+        if semiring == "log":
+            beta_n = torch.logsumexp(scores, dim=1)  # (batch, C)
+        else:  # max semiring
+            beta_n = torch.max(scores, dim=1)[0]  # (batch, C)
 
         # Capture final beta for sequences ending at this position
         mask_end = (lengths == (n + 1)).view(batch, 1)
@@ -126,8 +137,11 @@ def semi_crf_forward_pytorch(edge, lengths):
         head = (head + 1) % ring_len
         beta_ring[head] = beta_n
 
-    # Final partition: logsumexp over labels
-    partition = torch.logsumexp(final_beta, dim=-1)
+    # Final partition: reduction over labels
+    if semiring == "log":
+        partition = torch.logsumexp(final_beta, dim=-1)
+    else:  # max semiring
+        partition = torch.max(final_beta, dim=-1)[0]
     return partition
 
 
@@ -287,6 +301,147 @@ if HAS_TRITON:
         # Store result (partition is a scalar)
         tl.store(out_ptr + batch_idx, partition)
 
+    @triton.jit
+    def semi_crf_scan_kernel_max(
+        # Inputs
+        edge_ptr,  # (batch, N-1, K, C, C) - edge potentials
+        ring_ptr,  # (batch, K, C_PAD) - ring buffer (read/write)
+        out_ptr,  # (batch,) - output partition
+        lengths_ptr,  # (batch,) - sequence lengths
+        # Dimensions
+        batch_size,
+        N: tl.constexpr,  # max sequence length
+        K: tl.constexpr,  # max duration
+        C: tl.constexpr,  # actual num labels
+        C_PAD: tl.constexpr,  # padded num labels (power of 2)
+        # Strides for edge tensor
+        stride_eb,
+        stride_en,
+        stride_ek,
+        stride_ec1,
+        stride_ec2,
+        # Strides for ring buffer (uses C_PAD)
+        stride_rb,
+        stride_rk,
+        stride_rc,
+    ):
+        """
+        Fused Semi-Markov CRF forward scan using max semiring (Viterbi).
+
+        Same structure as semi_crf_scan_kernel but uses max instead of logsumexp.
+        This computes the Viterbi score (best path score) instead of log partition.
+
+        Ring buffer layout: ring[batch, k, c_pad]
+        - k=0 is head (most recent beta)
+        - k=1..K-1 are older betas
+        - We rotate head pointer instead of shifting data
+        """
+        NEG_INF: tl.constexpr = -1e9  # Match PyTorch reference
+
+        # Batch index (one program per batch element)
+        batch_idx = tl.program_id(0)
+        if batch_idx >= batch_size:
+            return
+
+        # 1D indices for labels (padded to power of 2)
+        c_idx = tl.arange(0, C_PAD)
+        c_mask = c_idx < C  # mask for valid label indices
+
+        # 2D indices for [C_PAD, C_PAD] edge block loads
+        c_dst = tl.arange(0, C_PAD)[:, None]  # [C_PAD, 1]
+        c_src = tl.arange(0, C_PAD)[None, :]  # [1, C_PAD]
+        c_mask_2d = (c_dst < C) & (c_src < C)  # [C_PAD, C_PAD]
+
+        # Load sequence length
+        seq_len = tl.load(lengths_ptr + batch_idx)
+
+        # Base pointers
+        edge_base = edge_ptr + batch_idx * stride_eb
+        ring_base = ring_ptr + batch_idx * stride_rb
+
+        # Initialize ring buffer: slot 0 = 0.0, rest = NEG_INF
+        for k_init in tl.static_range(0, K):
+            val = 0.0 if k_init == 0 else NEG_INF
+            ring_offset = ring_base + k_init * stride_rk + c_idx * stride_rc
+            tl.store(ring_offset, tl.where(c_mask, val, NEG_INF), mask=c_mask)
+
+        # Track final beta for each batch - shape [C_PAD]
+        final_beta = tl.where(c_mask, 0.0, NEG_INF).to(tl.float32)
+
+        # Main loop over sequence positions
+        for n in tl.range(1, N):
+            # Use mask instead of break (Triton doesn't support break)
+            active = n < seq_len
+
+            # Accumulate new_beta = max over (k, c_prev) - shape [C_PAD]
+            new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+
+            # Loop over durations k = 1, 2, ..., K-1
+            for k in tl.range(1, K):
+                # Skip if duration exceeds position
+                k_valid = (k <= n) & (k <= K - 1)
+
+                start_pos = n - k
+
+                # Ring index for beta[n-k]: (n-k) % K
+                ring_k_idx = (n - k) % K
+
+                # Load beta_prev for ALL labels [C_PAD] from ring buffer
+                beta_prev_all = tl.load(
+                    ring_base + ring_k_idx * stride_rk + c_idx * stride_rc,
+                    mask=active & k_valid & c_mask,
+                    other=NEG_INF,
+                )  # shape [C_PAD]
+
+                # Load entire [C_PAD, C_PAD] edge block for this (start_pos, k)
+                # Only load valid [C, C] portion
+                edge_offset_2d = (
+                    edge_base
+                    + start_pos * stride_en
+                    + k * stride_ek
+                    + c_dst * stride_ec1
+                    + c_src * stride_ec2
+                )  # [C_PAD, C_PAD]
+
+                edge_block = tl.load(
+                    edge_offset_2d, mask=active & k_valid & c_mask_2d, other=NEG_INF
+                )  # [C_PAD, C_PAD]
+
+                # Compute scores: scores[c, cp] = beta_prev[cp] + edge[c, cp]
+                scores = beta_prev_all[None, :] + edge_block  # [C_PAD, C_PAD]
+
+                # Mask out invalid source labels before reduction
+                scores = tl.where(c_mask_2d, scores, NEG_INF)
+
+                # Max over source labels (axis=1) - Viterbi instead of logsumexp
+                score_for_k = tl.max(scores, axis=1)  # [C_PAD]
+
+                # Mask invalid durations and invalid destination labels
+                score_for_k = tl.where(k_valid & c_mask, score_for_k, NEG_INF)
+
+                # Accumulate this duration into new_beta via max
+                new_beta = tl.maximum(new_beta, score_for_k)
+
+            # Store new_beta to ring buffer at current head position
+            new_head = n % K
+            new_beta_masked = tl.where(active & c_mask, new_beta, NEG_INF)
+            tl.store(
+                ring_base + new_head * stride_rk + c_idx * stride_rc,
+                new_beta_masked,
+                mask=active & c_mask,
+            )
+
+            # Capture final beta at sequence end
+            is_final = n == seq_len - 1
+            final_beta = tl.where(is_final & c_mask, new_beta_masked, final_beta)
+
+        # Final reduction: max over labels (only valid ones)
+        final_beta_masked = tl.where(c_mask, final_beta, NEG_INF)
+        partition = tl.max(final_beta_masked, axis=0)
+
+        # Store result (partition is a scalar)
+        tl.store(out_ptr + batch_idx, partition)
+
     def _next_power_of_2(n):
         """Return the smallest power of 2 >= n."""
         if n <= 0:
@@ -300,16 +455,17 @@ if HAS_TRITON:
             p *= 2
         return p
 
-    def launch_triton_kernel(edge, lengths):
+    def launch_triton_kernel(edge, lengths, semiring="log"):
         """
         Launch the Triton kernel with proper buffer allocation.
 
         Args:
             edge: (batch, N-1, K, C, C) contiguous CUDA tensor
             lengths: (batch,) CUDA tensor
+            semiring: "log" for logsumexp (partition function) or "max" for Viterbi
 
         Returns:
-            partition: (batch,) log partition function
+            partition: (batch,) log partition function or Viterbi score
         """
         batch, N_1, K, C, _ = edge.shape
         N = N_1 + 1
@@ -330,9 +486,10 @@ if HAS_TRITON:
         stride_eb, stride_en, stride_ek, stride_ec1, stride_ec2 = edge.stride()
         stride_rb, stride_rk, stride_rc = ring_buffer.stride()
 
-        # Launch kernel
+        # Launch kernel - select based on semiring
         grid = (batch,)
-        semi_crf_scan_kernel[grid](
+        kernel = semi_crf_scan_kernel if semiring == "log" else semi_crf_scan_kernel_max
+        kernel[grid](
             edge,
             ring_buffer,
             partition,
@@ -376,29 +533,31 @@ class SemiCRFTritonForward(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, edge, lengths, use_triton=True):
+    def forward(ctx, edge, lengths, use_triton=True, semiring="log"):
         # Check if Triton kernel is applicable
         use_triton_kernel = HAS_TRITON and use_triton and edge.is_cuda
 
         if use_triton_kernel:
-            partition = launch_triton_kernel(edge, lengths)
+            partition = launch_triton_kernel(edge, lengths, semiring=semiring)
         else:
-            partition = semi_crf_forward_pytorch(edge.detach(), lengths)
+            partition = semi_crf_forward_pytorch(edge.detach(), lengths, semiring=semiring)
 
         ctx.save_for_backward(edge, lengths)
         ctx.use_triton = use_triton_kernel
+        ctx.semiring = semiring
 
         return partition
 
     @staticmethod
     def backward(ctx, grad_output):
         edge, lengths = ctx.saved_tensors
+        semiring = ctx.semiring
 
         # Recompute forward with gradients (checkpointing)
         edge_grad = edge.detach().requires_grad_(True)
 
         with torch.enable_grad():
-            partition = semi_crf_forward_pytorch(edge_grad, lengths)
+            partition = semi_crf_forward_pytorch(edge_grad, lengths, semiring=semiring)
 
             # Use grad_outputs to weight the gradients
             # This computes: sum_b(grad_output[b] * d(partition[b])/d(edge_grad))
@@ -406,11 +565,11 @@ class SemiCRFTritonForward(torch.autograd.Function):
                 outputs=partition, inputs=edge_grad, grad_outputs=grad_output, create_graph=False
             )[0]
 
-        return grad_edge, None, None
+        return grad_edge, None, None, None
 
 
-def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False):
-    r"""semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False) -> Tensor
+def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semiring="log"):
+    r"""semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False, semiring="log") -> Tensor
 
     Compute Semi-Markov CRF forward scan with optional GPU acceleration.
 
@@ -426,9 +585,13 @@ def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False):
         validate (bool, optional): If ``True``, use float64 PyTorch implementation
             for high-precision debugging. Useful for validating numerical accuracy.
             Returns result in original dtype. Default: ``False``
+        semiring (str, optional): Semiring to use for computation. Either ``"log"``
+            (logsumexp for partition function) or ``"max"`` (Viterbi/max-plus for
+            best path score). Default: ``"log"``
 
     Returns:
-        Tensor: Log partition function of shape :math:`(\text{batch},)`.
+        Tensor: Log partition function (log semiring) or Viterbi score (max semiring)
+            of shape :math:`(\text{batch},)`.
 
     Examples::
 
@@ -438,15 +601,20 @@ def semi_crf_triton_forward(edge, lengths, use_triton=True, validate=False):
         >>> partition_cpu = semi_crf_triton_forward(edge, lengths)
         >>> # GPU: uses Triton kernel if available
         >>> partition_gpu = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+        >>> # Viterbi (max semiring) for best path score
+        >>> viterbi_score = semi_crf_triton_forward(edge, lengths, semiring="max")
 
     .. note::
         Gradients are computed via checkpointing: the forward pass is recomputed
         during backward using the PyTorch implementation for proper autograd support.
     """
+    if semiring not in ("log", "max"):
+        raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
+
     if validate:
         # Use float64 for high-precision validation
         orig_dtype = edge.dtype
-        partition = semi_crf_forward_pytorch(edge.double(), lengths)
+        partition = semi_crf_forward_pytorch(edge.double(), lengths, semiring=semiring)
         return partition.to(orig_dtype)
 
-    return SemiCRFTritonForward.apply(edge, lengths, use_triton)
+    return SemiCRFTritonForward.apply(edge, lengths, use_triton, semiring)
