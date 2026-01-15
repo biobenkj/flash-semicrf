@@ -112,16 +112,16 @@ For consistency with the O(KC) memory goal, Option A is recommended. The 2x comp
 ## Implementation Plan
 
 ### Phase 1: PyTorch Reference Backward
-- [ ] Implement standalone backward function in PyTorch
-- [ ] Verify gradient correctness against `torch.autograd.gradcheck`
+- [x] Implement standalone backward function in PyTorch
+- [x] Verify gradient correctness against `torch.autograd.gradcheck`
 - [ ] Benchmark memory usage and timing
-- [ ] Document the exact computation pattern
+- [x] Document the exact computation pattern
 
 ### Phase 2: Triton Backward Kernel (Single Block)
-- [ ] Port backward recurrence to Triton
-- [ ] Implement reverse-direction ring buffer
-- [ ] Handle boundary conditions (β initialization)
-- [ ] Test on small shapes (T≤256, KC≤64)
+- [x] Port backward recurrence to Triton
+- [x] Implement reverse-direction ring buffer
+- [x] Handle boundary conditions (β initialization)
+- [ ] Test on CUDA (pending HPC validation)
 
 ### Phase 3: Fused Forward-Backward Kernel
 - [ ] Combine forward recomputation with backward in single kernel
@@ -239,16 +239,16 @@ def semi_crf_backward_kernel(
 ## Files to Create/Modify
 
 ```
-torch_semimarkov/
+src/torch_semimarkov/
 ├── triton_scan.py              # Existing forward kernel
-├── triton_backward.py          # NEW: Backward kernel
-└── triton_autograd.py          # NEW: autograd.Function wrapper
+├── triton_backward.py          # NEW: Backward kernel (Phase 1 ✓)
+└── triton_autograd.py          # NEW: autograd.Function wrapper (future)
 
 tests/
-└── test_triton_backward.py     # NEW: Backward tests
+└── test_triton_backward.py     # NEW: Backward tests (Phase 1 ✓)
 
 benchmarks/
-└── benchmark_triton_backward.py # NEW: Backward benchmarks
+└── benchmark_triton_backward.py # NEW: Backward benchmarks (future)
 ```
 
 ---
@@ -279,8 +279,14 @@ benchmarks/
 | Date | Status | Notes |
 |------|--------|-------|
 | 2025-01-14 | Planning | Created roadmap document |
-| | | |
+| 2025-01-15 | Phase 1 | Implemented PyTorch reference backward in `triton_backward.py` |
+| | | Created `test_triton_backward.py` with 21 tests (all passing) |
+| | | Verified gradients with `torch.autograd.gradcheck` |
+| 2025-01-15 | Phase 2 | Implemented Triton backward kernel with β ring buffer |
+| | | Added `semi_crf_backward_kernel` with fused β + gradient computation |
+| | | Added 6 CUDA-specific tests (pending HPC validation) |
+| | | Note: Using O(TC) α storage initially; checkpointing planned for Phase 3+ |
 
 ---
 
-*Last updated: 2025-01-14*
+*Last updated: 2025-01-15*
