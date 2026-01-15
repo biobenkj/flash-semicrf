@@ -4,10 +4,22 @@ from __future__ import annotations
 
 import gc
 import os
+import signal
 from pathlib import Path
 
 import torch
 import torch._inductor.config as inductor_config
+
+
+class CompileTimeoutError(Exception):
+    """Raised when compilation exceeds timeout."""
+
+    pass
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for compilation timeout."""
+    raise CompileTimeoutError("Compilation timed out")
 
 # Semirings supported by triton backends
 TRITON_SUPPORTED_SEMIRINGS = {"Log", "Max"}
@@ -89,12 +101,24 @@ def precompile_canonical_shapes(
     backends: list[str],
     semirings: list[str],
     use_compile: bool = True,
-) -> None:
+    timeout_seconds: int = 120,
+) -> list[tuple[int, int, int]]:
     """
     Pre-compile kernels for all canonical shapes before timing.
 
     This separates compilation time from benchmark timing, giving more
     accurate runtime measurements and avoiding compilation during timed runs.
+
+    Args:
+        canonical_shapes: List of (T, K, C) shapes to precompile
+        device: CUDA device to compile for
+        backends: List of backend names
+        semirings: List of semiring names
+        use_compile: Whether to use torch.compile
+        timeout_seconds: Max seconds per shape before skipping (0 = no timeout)
+
+    Returns:
+        List of shapes that were successfully compiled (excludes timed-out shapes)
     """
     from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
@@ -102,12 +126,12 @@ def precompile_canonical_shapes(
     active_triton_backends = [b for b in backends if b in triton_backends]
 
     if not active_triton_backends or not use_compile:
-        return
+        return list(canonical_shapes)
 
     # Triton/torch.compile for GPU only - skip if on CPU
     if device.type != "cuda":
         print(f"\nSkipping pre-compilation (device={device}, not CUDA)")
-        return
+        return list(canonical_shapes)
 
     # Ensure CUDA is ready
     torch.cuda.set_device(device)
@@ -115,7 +139,12 @@ def precompile_canonical_shapes(
 
     print(f"\nPre-compiling {len(canonical_shapes)} canonical shapes on {device}...")
     print(f"  Backends: {active_triton_backends}")
+    if timeout_seconds > 0:
+        print(f"  Timeout: {timeout_seconds}s per shape (shapes that hang will be skipped)")
     print("  This may take a few minutes on first run (cached afterward)\n")
+
+    successful_shapes: list[tuple[int, int, int]] = []
+    skipped_shapes: list[tuple[int, int, int]] = []
 
     for i, (T, K, C) in enumerate(canonical_shapes):
         print(
@@ -124,45 +153,85 @@ def precompile_canonical_shapes(
             flush=True,
         )
 
-        for semiring_name in semirings:
-            if semiring_name not in TRITON_SUPPORTED_SEMIRINGS:
-                continue
+        shape_success = True
 
-            triton_semiring = semiring_name.lower()
+        # Set up timeout if requested (Unix only)
+        if timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(timeout_seconds)
 
-            # Use B=1 for faster compilation (shape is what matters)
-            # Explicitly create on CUDA device
-            with torch.cuda.device(device):
-                edge = torch.randn(1, T - 1, K, C, C, device=device, requires_grad=True)
-                lengths = torch.full((1,), T, dtype=torch.long, device=device)
+        try:
+            for semiring_name in semirings:
+                if semiring_name not in TRITON_SUPPORTED_SEMIRINGS:
+                    continue
 
-                for backend in active_triton_backends:
-                    try:
-                        use_triton_kernel = backend in ("triton", "triton_checkpointing")
-                        backend_use_compile = use_compile and backend != "triton_checkpointing"
+                triton_semiring = semiring_name.lower()
 
-                        # Forward pass (triggers compilation)
-                        v = semi_crf_triton_forward(
-                            edge,
-                            lengths,
-                            use_triton=use_triton_kernel,
-                            semiring=triton_semiring,
-                            use_compile=backend_use_compile,
-                        )
-                        # Backward pass (triggers backward kernel compilation)
-                        v.sum().backward()
+                # Use B=1 for faster compilation (shape is what matters)
+                # Explicitly create on CUDA device
+                with torch.cuda.device(device):
+                    edge = torch.randn(1, T - 1, K, C, C, device=device, requires_grad=True)
+                    lengths = torch.full((1,), T, dtype=torch.long, device=device)
 
-                        # Ensure kernels are actually compiled (not just queued)
-                        torch.cuda.synchronize(device)
+                    for backend in active_triton_backends:
+                        try:
+                            use_triton_kernel = backend in ("triton", "triton_checkpointing")
+                            backend_use_compile = use_compile and backend != "triton_checkpointing"
 
-                    except Exception as e:
-                        print(f"(warn: {backend}/{semiring_name}: {str(e)[:30]})", end=" ")
+                            # Forward pass (triggers compilation)
+                            v = semi_crf_triton_forward(
+                                edge,
+                                lengths,
+                                use_triton=use_triton_kernel,
+                                semiring=triton_semiring,
+                                use_compile=backend_use_compile,
+                            )
+                            # Backward pass (triggers backward kernel compilation)
+                            v.sum().backward()
 
-                del edge, lengths
-                torch.cuda.empty_cache()
+                            # Ensure kernels are actually compiled (not just queued)
+                            torch.cuda.synchronize(device)
 
-        print("done")
+                        except CompileTimeoutError:
+                            raise  # Re-raise to be caught by outer handler
+                        except Exception as e:
+                            print(f"(warn: {backend}/{semiring_name}: {str(e)[:30]})", end=" ")
 
-    print("\nPre-compilation complete. Starting benchmarks...\n")
+                    del edge, lengths
+                    torch.cuda.empty_cache()
+
+        except CompileTimeoutError:
+            print(f"TIMEOUT (>{timeout_seconds}s) - skipping", end=" ")
+            shape_success = False
+            skipped_shapes.append((T, K, C))
+            # Reset CUDA state after timeout
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        finally:
+            # Cancel the alarm and restore old handler
+            if timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+        if shape_success:
+            successful_shapes.append((T, K, C))
+            print("done")
+        else:
+            print("")
+
+    # Summary
+    if skipped_shapes:
+        print(f"\nWARNING: {len(skipped_shapes)} shape(s) timed out and were skipped:")
+        for T, K, C in skipped_shapes:
+            print(f"  - T={T}, K={K}, C={C}")
+        print("These shapes will compile on-demand during benchmarking (may be slow).\n")
+
+    print(
+        f"\nPre-compilation complete. {len(successful_shapes)}/{len(canonical_shapes)} shapes ready.\n"
+    )
     gc.collect()
     torch.cuda.empty_cache()
+
+    return successful_shapes

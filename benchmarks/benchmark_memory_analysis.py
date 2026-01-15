@@ -108,6 +108,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--precompile-timeout",
+        type=int,
+        default=120,
+        help=(
+            "Timeout in seconds for compiling each shape during pre-compilation. "
+            "Shapes that exceed this timeout will be skipped and compile on-demand. "
+            "Set to 0 to disable timeout. Default: 120"
+        ),
+    )
+    parser.add_argument(
         "--compile-cache-dir",
         type=Path,
         default=None,
@@ -306,7 +316,14 @@ def main():
 
     # Pre-compile all canonical shapes before timing (separates compile time from runtime)
     if args.use_compile and has_triton_backends and not args.skip_precompile and canonical_shapes:
-        precompile_canonical_shapes(canonical_shapes, device, backends, semirings, use_compile=True)
+        precompile_canonical_shapes(
+            canonical_shapes,
+            device,
+            backends,
+            semirings,
+            use_compile=True,
+            timeout_seconds=args.precompile_timeout,
+        )
 
     for backend in backends:
         for semiring_name in semirings:
