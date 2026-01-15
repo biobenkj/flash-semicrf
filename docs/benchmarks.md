@@ -186,6 +186,7 @@ python benchmarks/benchmark_memory_analysis.py \
 | `--skip-precompile` | off | Skip pre-compilation phase (use if cache is warm) |
 | `--compile-cache-dir` | `<output-dir>/.torch_compile_cache` | Directory for compile cache (use local scratch on HPC) |
 | `--compile-cache-size-gb` | 10.0 | Maximum cache size in GB before eviction |
+| `--compile-threads` | all | Number of CPU threads for compilation (match HPC allocation) |
 
 The `triton` backend uses a hybrid approach:
 - **Inference** (`--phases forward`): Custom Triton kernel (~45x faster)
@@ -289,6 +290,7 @@ On HPC systems, use node-local storage for the compile cache to avoid network fi
 
 ```bash
 # Use $TMPDIR (typically node-local scratch) with larger cache
+# Match --compile-threads to your SLURM/PBS CPU allocation
 python benchmarks/benchmark_memory_analysis.py \
     --backends triton,linear_scan_streaming \
     --T 128,256,512,1024 \
@@ -297,6 +299,7 @@ python benchmarks/benchmark_memory_analysis.py \
     --compile-friendly \
     --compile-cache-dir "${TMPDIR:-/tmp}/torch_compile_cache" \
     --compile-cache-size-gb 50.0 \
+    --compile-threads "${SLURM_CPUS_PER_TASK:-8}" \
     --output-dir results/
 
 # Or use a persistent cache on fast local NVMe (with warm cache)
@@ -311,6 +314,7 @@ python benchmarks/benchmark_memory_analysis.py \
 
 **HPC Tips:**
 - Use `$TMPDIR` or node-local NVMe instead of network filesystems (Lustre, GPFS)
+- Set `--compile-threads` to match your CPU allocation (`$SLURM_CPUS_PER_TASK`, `$PBS_NCPUS`)
 - Set cache size based on available scratch space (compiled kernels can be 100MB+ each)
 - Use `--skip-precompile` on subsequent runs if cache persists between jobs
 - The cache stores both torch.compile artifacts and Triton kernels
