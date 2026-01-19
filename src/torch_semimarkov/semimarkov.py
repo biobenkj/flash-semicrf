@@ -51,6 +51,18 @@ class SemiMarkov(_Struct):
     """
 
     def _check_potentials(self, edge, lengths=None):
+        r"""Validate and convert edge potentials.
+
+        Args:
+            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+
+        Returns:
+            Tuple: ``(edge, batch, N, K, C, lengths)`` with validated dimensions.
+
+        Raises:
+            AssertionError: If shapes are inconsistent or lengths invalid.
+        """
         batch, N_1, K, C, C2 = self._get_dimension(edge)
         edge = self.semiring.convert(edge)
         N = N_1 + 1
@@ -67,46 +79,58 @@ class SemiMarkov(_Struct):
         lengths=None,
         force_grad=False,
     ):
-        r"""logpartition(log_potentials, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor]]
+        r"""logpartition(log_potentials, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
 
         Compute the log partition function using streaming linear scan.
 
         The partition function :math:`Z(x) = \sum_y \exp(\phi(x, y))` sums over
         all valid segmentations. This method returns :math:`\log Z(x)`.
 
-        Memory: O(KC) - independent of sequence length T.
-        Compute: O(T × K × C²).
+        Memory: :math:`O(KC)` - independent of sequence length :math:`T`.
+        Compute: :math:`O(T \times K \times C^2)`.
 
         Args:
             log_potentials (Tensor): Edge potentials of shape
                 :math:`(\text{batch}, N-1, K, C, C)` in log-space.
             lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None`` (assumes all sequences have length N).
+                Default: ``None`` (assumes all sequences have length N)
             force_grad (bool, optional): If ``True``, force gradient computation even
                 when not needed. Default: ``False``
 
         Returns:
-            Tuple[Tensor, List[Tensor]]: A tuple containing:
+            Tuple[Tensor, List[Tensor], None]: A tuple containing:
 
-            - **log_Z** (Tensor): Log partition function of shape :math:`(\text{batch},)`
+            - **log_Z** (Tensor): Log partition function of shape :math:`(\text{ssize}, \text{batch})`
+              where ssize is the semiring size (typically 1 for LogSemiring)
             - **potentials** (List[Tensor]): List containing the input potentials for gradient computation
+            - **beta** (None): Placeholder for backward compatibility (always ``None``)
 
         Examples::
 
             >>> model = SemiMarkov(LogSemiring)
             >>> edge = torch.randn(4, 99, 8, 6, 6)
             >>> lengths = torch.full((4,), 100)
-            >>> log_Z, _ = model.logpartition(edge, lengths=lengths)
+            >>> log_Z, potentials, _ = model.logpartition(edge, lengths=lengths)
+            >>> log_Z.shape
+            torch.Size([1, 4])
+
+        See Also:
+            :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`:
+                For very long sequences, use the streaming API which computes
+                edges on-the-fly from cumulative scores.
         """
         return self._dp_scan_streaming(log_potentials, lengths, force_grad)
 
     def _dp_scan_streaming(self, edge, lengths=None, force_grad=False):
         r"""_dp_scan_streaming(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
 
-        Streaming O(N) scan with O(KC) memory. **This is the default algorithm.**
+        Streaming :math:`O(N)` scan with :math:`O(KC)` memory.
 
-        Uses a ring buffer of the last K beta values instead of storing all T betas.
-        Alpha values are computed inline and consumed immediately without storage.
+        Uses a ring buffer of the last :math:`K` beta values instead of storing all
+        :math:`T` betas. Alpha values are computed inline and consumed immediately
+        without storage.
+
+        The recurrence computes:
 
         .. math::
             \beta[n, c] = \text{logsumexp}_{k=1}^{\min(K-1,n)} \sum_{c'} \left(
@@ -115,15 +139,22 @@ class SemiMarkov(_Struct):
 
         Args:
             edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
-            lengths (Tensor, optional): Sequence lengths. Default: ``None``
-            force_grad (bool, optional): Force gradient computation. Default: ``False``
+            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
+                Default: ``None``
+            force_grad (bool, optional): Force gradient computation even when not needed.
+                Default: ``False``
 
         Returns:
-            Tuple[Tensor, List[Tensor], None]: (log_Z, [edge], None)
+            Tuple[Tensor, List[Tensor], None]: A tuple containing:
+
+            - **log_Z** (Tensor): Log partition of shape :math:`(\text{ssize}, \text{batch})`
+            - **potentials** (List[Tensor]): Input potentials for gradient computation
+            - **beta** (None): Placeholder (always ``None`` for streaming)
 
         .. note::
-            Memory is O(KC) for the ring buffer, independent of sequence length T.
-            This makes it universally applicable across all genomic parameter regimes.
+            Memory is :math:`O(KC)` for the ring buffer, independent of sequence length
+            :math:`T`. This makes it universally applicable across all genomic parameter
+            regimes where :math:`T` can exceed 400K.
         """
         semiring = self.semiring
         ssize = semiring.size()

@@ -65,17 +65,23 @@ NEG_INF = -1e9
 
 
 def _compute_checkpoint_interval(T: int, K: int) -> int:
-    """Compute optimal checkpoint interval to minimize total memory.
+    r"""_compute_checkpoint_interval(T, K) -> int
 
-    The optimal interval S minimizes: Memory = (T/S)×K×C + S×C + K×C
-    Taking d/dS = 0 gives: S* = √(T×K)
+    Compute optimal checkpoint interval to minimize total memory.
+
+    The optimal interval :math:`S` minimizes total memory:
+
+    .. math::
+        \text{Memory} = \frac{T}{S} \times K \times C + S \times C + K \times C
+
+    Taking :math:`\frac{d}{dS} = 0` gives :math:`S^* = \sqrt{T \times K}`.
 
     Args:
-        T: Sequence length.
-        K: Maximum duration.
+        T (int): Sequence length.
+        K (int): Maximum segment duration.
 
     Returns:
-        Optimal checkpoint interval (at least K).
+        int: Optimal checkpoint interval (at least K).
     """
     optimal = int(math.sqrt(T * K))
     return max(K, optimal)
@@ -90,28 +96,43 @@ def compute_edge_block_golden_rule(
     proj_start: Optional[torch.Tensor] = None,
     proj_end: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute edge block on-the-fly using the Golden Rule.
+    r"""compute_edge_block_golden_rule(cum_scores, transition, duration_bias, t, k, proj_start=None, proj_end=None) -> Tensor
 
-    This computes the edge potential for segments starting at position t
-    with duration k, without materializing the full edge tensor.
+    Compute edge block on-the-fly using the Golden Rule.
 
-    edge[c_dest, c_src] = segment_score[c_dest] + transition[c_src, c_dest]
+    This computes the edge potential for segments starting at position ``t``
+    with duration ``k``, without materializing the full edge tensor:
 
-    where segment_score = content_score + duration_bias + boundaries
+    .. math::
+        \text{edge}[c_{\text{dest}}, c_{\text{src}}] = \text{segment\_score}[c_{\text{dest}}]
+        + \text{transition}[c_{\text{src}}, c_{\text{dest}}]
+
+    where :math:`\text{segment\_score} = \text{content\_score} + \text{duration\_bias} + \text{boundaries}`.
 
     Args:
-        cum_scores: Cumulative projected scores of shape (batch, T+1, C).
+        cum_scores (Tensor): Cumulative projected scores of shape :math:`(\text{batch}, T+1, C)`.
             Must be float32 and zero-centered for numerical stability.
-        transition: Label transition scores of shape (C, C).
-            transition[c_src, c_dest] is the score for c_src -> c_dest.
-        duration_bias: Duration-specific label bias of shape (K, C).
-        t: Segment start position.
-        k: Segment duration.
-        proj_start: Optional start boundary scores of shape (batch, T, C).
-        proj_end: Optional end boundary scores of shape (batch, T, C).
+        transition (Tensor): Label transition scores of shape :math:`(C, C)`.
+            ``transition[c_src, c_dest]`` is the score for :math:`c_{\text{src}} \to c_{\text{dest}}`.
+        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
+        t (int): Segment start position.
+        k (int): Segment duration.
+        proj_start (Tensor, optional): Start boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
 
     Returns:
-        edge_block: Edge potentials of shape (batch, C_dest, C_src).
+        Tensor: Edge potentials of shape :math:`(\text{batch}, C, C)`.
+
+    Examples::
+
+        >>> cum_scores = torch.randn(2, 101, 4)  # batch=2, T=100, C=4
+        >>> transition = torch.randn(4, 4)
+        >>> duration_bias = torch.randn(8, 4)  # K=8
+        >>> edge = compute_edge_block_golden_rule(cum_scores, transition, duration_bias, t=10, k=3)
+        >>> edge.shape
+        torch.Size([2, 4, 4])
     """
     # Content score via cumsum difference: (batch, C)
     content_score = cum_scores[:, t + k, :] - cum_scores[:, t, :]
@@ -145,28 +166,39 @@ def semi_crf_streaming_forward_pytorch(
     proj_end: Optional[torch.Tensor] = None,
     checkpoint_interval: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-    """Forward pass with Golden Rule edge computation.
+    r"""semi_crf_streaming_forward_pytorch(cum_scores, transition, duration_bias, lengths, K, semiring='log', proj_start=None, proj_end=None, checkpoint_interval=None) -> Tuple[Tensor, Tensor, int]
 
-    Computes the log partition function using a ring buffer with O(KC) memory.
+    Forward pass with Golden Rule edge computation.
+
+    Computes the log partition function using a ring buffer with :math:`O(KC)` memory.
     Edge potentials are computed on-the-fly from cumulative scores.
 
+    .. note::
+        This is an internal function. Use :func:`semi_crf_streaming_forward` for the
+        public API with automatic differentiation support.
+
     Args:
-        cum_scores: Cumulative projected scores of shape (batch, T+1, C).
+        cum_scores (Tensor): Cumulative projected scores of shape :math:`(\text{batch}, T+1, C)`.
             Must be float32. Should be zero-centered before cumsum.
-        transition: Label transition scores of shape (C, C).
-        duration_bias: Duration-specific label bias of shape (K, C).
-        lengths: Sequence lengths of shape (batch,).
-        K: Maximum segment duration.
-        semiring: "log" (logsumexp) or "max" (Viterbi).
-        proj_start: Optional start boundary scores of shape (batch, T, C).
-        proj_end: Optional end boundary scores of shape (batch, T, C).
-        checkpoint_interval: Interval for saving ring buffer state.
-            Defaults to √(T×K).
+        transition (Tensor): Label transition scores of shape :math:`(C, C)`.
+        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
+        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+        K (int): Maximum segment duration.
+        semiring (str, optional): ``"log"`` (logsumexp) or ``"max"`` (Viterbi).
+            Default: ``"log"``
+        proj_start (Tensor, optional): Start boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
+        checkpoint_interval (int, optional): Interval for saving ring buffer state.
+            Default: ``None`` (uses :math:`\sqrt{T \times K}`)
 
     Returns:
-        partition: Log partition function of shape (batch,).
-        ring_checkpoints: Saved ring buffer states for backward.
-        checkpoint_interval: Actual interval used.
+        Tuple[Tensor, Tensor, int]: A tuple containing:
+
+        - **partition** (Tensor): Log partition function of shape :math:`(\text{batch},)`
+        - **ring_checkpoints** (Tensor): Saved ring buffer states for backward
+        - **checkpoint_interval** (int): Actual interval used
     """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
@@ -294,31 +326,48 @@ def semi_crf_streaming_backward_pytorch(
     proj_start: Optional[torch.Tensor] = None,
     proj_end: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """Backward pass computing gradients via marginals.
+    r"""semi_crf_streaming_backward_pytorch(cum_scores, transition, duration_bias, lengths, K, log_Z, ring_checkpoints, checkpoint_interval, semiring='log', proj_start=None, proj_end=None) -> Tuple[Tensor, ...]
+
+    Backward pass computing gradients via marginals.
 
     Uses the forward-backward algorithm with checkpointing. Recomputes alpha
     within segments from saved ring buffer checkpoints, then computes beta
     backward while accumulating gradients.
 
+    The marginal probability is computed as:
+
+    .. math::
+        P(\text{segment}_{t,k,c}) = \frac{\alpha[t, c_{\text{src}}] \cdot
+        \text{edge}[c_{\text{dest}}, c_{\text{src}}] \cdot \beta[t+k, c_{\text{dest}}]}{Z}
+
+    .. note::
+        This is an internal function. Use :func:`semi_crf_streaming_forward` which
+        automatically handles gradients via :class:`SemiCRFStreaming`.
+
     Args:
-        cum_scores: Cumulative projected scores of shape (batch, T+1, C).
-        transition: Label transition scores of shape (C, C).
-        duration_bias: Duration-specific label bias of shape (K, C).
-        lengths: Sequence lengths of shape (batch,).
-        K: Maximum segment duration.
-        log_Z: Log partition values of shape (batch,).
-        ring_checkpoints: Saved ring buffer states of shape (batch, num_checkpoints, K, C).
-        checkpoint_interval: Interval between checkpoints.
-        semiring: "log" or "max".
-        proj_start: Optional start boundary scores of shape (batch, T, C).
-        proj_end: Optional end boundary scores of shape (batch, T, C).
+        cum_scores (Tensor): Cumulative projected scores of shape :math:`(\text{batch}, T+1, C)`.
+        transition (Tensor): Label transition scores of shape :math:`(C, C)`.
+        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
+        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+        K (int): Maximum segment duration.
+        log_Z (Tensor): Log partition values of shape :math:`(\text{batch},)`.
+        ring_checkpoints (Tensor): Saved ring buffer states of shape
+            :math:`(\text{batch}, \text{num\_checkpoints}, K, C)`.
+        checkpoint_interval (int): Interval between checkpoints.
+        semiring (str, optional): ``"log"`` or ``"max"``. Default: ``"log"``
+        proj_start (Tensor, optional): Start boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
 
     Returns:
-        grad_cum_scores: Gradient w.r.t. cum_scores of shape (batch, T+1, C).
-        grad_transition: Gradient w.r.t. transition of shape (C, C).
-        grad_duration_bias: Gradient w.r.t. duration_bias of shape (K, C).
-        grad_proj_start: Gradient w.r.t. proj_start if provided, else None.
-        grad_proj_end: Gradient w.r.t. proj_end if provided, else None.
+        Tuple[Tensor, Tensor, Tensor, Optional[Tensor], Optional[Tensor]]: A tuple containing:
+
+        - **grad_cum_scores** (Tensor): Gradient of shape :math:`(\text{batch}, T+1, C)`
+        - **grad_transition** (Tensor): Gradient of shape :math:`(C, C)`
+        - **grad_duration_bias** (Tensor): Gradient of shape :math:`(K, C)`
+        - **grad_proj_start** (Tensor or None): Gradient if ``proj_start`` was provided
+        - **grad_proj_end** (Tensor or None): Gradient if ``proj_end`` was provided
     """
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
@@ -504,10 +553,17 @@ def semi_crf_streaming_backward_pytorch(
 
 
 class SemiCRFStreaming(torch.autograd.Function):
-    """Autograd function for streaming Semi-CRF with Golden Rule edge computation.
+    r"""Autograd function for streaming Semi-CRF with Golden Rule edge computation.
 
     This wraps the forward and backward passes to enable automatic differentiation.
-    Memory usage is O(KC) for the ring buffer, independent of sequence length T.
+    Memory usage is :math:`O(KC)` for the ring buffer, independent of sequence length :math:`T`.
+
+    .. note::
+        This class is used internally by :func:`semi_crf_streaming_forward`.
+        Users should call that function directly rather than using this class.
+
+    See Also:
+        :func:`semi_crf_streaming_forward`: Main entry point for streaming Semi-CRF
     """
 
     @staticmethod
@@ -593,35 +649,49 @@ def semi_crf_streaming_forward(
     proj_start: Optional[torch.Tensor] = None,
     proj_end: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute Semi-CRF partition function with Golden Rule streaming.
+    r"""semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K, semiring='log', proj_start=None, proj_end=None) -> Tensor
+
+    Compute Semi-CRF partition function with Golden Rule streaming.
 
     This is the main entry point for the streaming API. Edge potentials are
     computed on-the-fly from cumulative scores, eliminating the need for the
-    full (batch, T-1, K, C, C) edge tensor.
+    full :math:`(\text{batch}, T-1, K, C, C)` edge tensor.
 
-    Memory: O(KC) ring buffer, independent of sequence length T.
-    Compute: O(T × K × C²) same as standard Semi-CRF.
+    Memory: :math:`O(KC)` ring buffer, independent of sequence length :math:`T`.
+    Compute: :math:`O(T \times K \times C^2)` same as standard Semi-CRF.
+
+    .. warning::
+        ``cum_scores`` **MUST** be float32 for numerical stability at :math:`T > 100K`.
+        Zero-centering before cumsum is critical to prevent precision loss.
 
     Args:
-        cum_scores: Cumulative projected scores of shape (batch, T+1, C).
-            MUST be float32 for numerical stability at T>100K.
-            SHOULD be zero-centered before cumsum to prevent precision loss.
-        transition: Label transition scores of shape (C, C).
-            transition[c_src, c_dest] is the score for c_src -> c_dest.
-        duration_bias: Duration-specific label bias of shape (K, C).
+        cum_scores (Tensor): Cumulative projected scores of shape :math:`(\text{batch}, T+1, C)`.
+            Must be float32 and zero-centered before cumsum for numerical stability.
+        transition (Tensor): Label transition scores of shape :math:`(C, C)`.
+            ``transition[c_src, c_dest]`` is the score for :math:`c_{\text{src}} \to c_{\text{dest}}`.
+        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
             Required to compensate for sum-pooling length bias.
-        lengths: Sequence lengths of shape (batch,).
-        K: Maximum segment duration.
-        semiring: "log" (logsumexp for partition) or "max" (Viterbi decoding).
-        proj_start: Optional start boundary scores of shape (batch, T, C).
-        proj_end: Optional end boundary scores of shape (batch, T, C).
+        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+        K (int): Maximum segment duration.
+        semiring (str, optional): ``"log"`` (logsumexp for partition) or ``"max"`` (Viterbi).
+            Default: ``"log"``
+        proj_start (Tensor, optional): Start boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape :math:`(\text{batch}, T, C)`.
+            Default: ``None``
 
     Returns:
-        partition: Log partition function (or max score) of shape (batch,).
+        Tensor: Log partition function (or max score) of shape :math:`(\text{batch},)`.
 
-    Example:
+    Examples::
+
+        >>> import torch
+        >>> from torch_semimarkov.streaming import semi_crf_streaming_forward
+        >>>
         >>> # Encoder output
-        >>> h = encoder(x)  # (batch, T, hidden_dim)
+        >>> batch, T, hidden_dim, C, K = 2, 100, 64, 4, 8
+        >>> h = torch.randn(batch, T, hidden_dim)  # encoder output
+        >>> W_content = torch.randn(hidden_dim, C)
         >>>
         >>> # Pre-project to label space (Golden Rule: outside kernel)
         >>> projected = h @ W_content  # (batch, T, C)
@@ -633,10 +703,21 @@ def semi_crf_streaming_forward(
         >>> cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float32)
         >>> cum_scores[:, 1:, :] = torch.cumsum(projected.float(), dim=1)
         >>>
+        >>> # Model parameters
+        >>> transition = torch.randn(C, C) * 0.1
+        >>> duration_bias = torch.randn(K, C) * 0.1
+        >>> lengths = torch.full((batch,), T)
+        >>>
         >>> # Streaming forward
         >>> partition = semi_crf_streaming_forward(
         ...     cum_scores, transition, duration_bias, lengths, K
         ... )
+        >>> partition.shape
+        torch.Size([2])
+
+    See Also:
+        :class:`~torch_semimarkov.SemiMarkov`: Pre-computed edge tensor API
+        :func:`compute_edge_block_golden_rule`: On-the-fly edge computation helper
     """
     return SemiCRFStreaming.apply(
         cum_scores, transition, duration_bias, lengths, K, semiring,
