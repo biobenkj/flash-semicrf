@@ -712,18 +712,16 @@ if HAS_TRITON:
                                         other=NEG_INF,
                                     )
                                 else:
-                                    # Need to get from checkpoint
-                                    prev_ckpt = start_pos // CHECKPOINT_INTERVAL
+                                    # Position is before seg_start, get from current checkpoint
+                                    # The checkpoint at ckpt_idx contains alpha[seg_start-K+1..seg_start]
+                                    # at ring indices (seg_start-K+1) % K .. seg_start % K
                                     prev_ring_idx = start_pos % K
-                                    if prev_ckpt < NUM_CKPTS:
-                                        alpha_prev = tl.load(
-                                            ring_ckpt_base + prev_ckpt * stride_ckpt_n +
-                                            prev_ring_idx * stride_ckpt_k + c_idx * stride_ckpt_c,
-                                            mask=c_mask,
-                                            other=NEG_INF,
-                                        )
-                                    else:
-                                        alpha_prev = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+                                    alpha_prev = tl.load(
+                                        ring_ckpt_base + ckpt_idx * stride_ckpt_n +
+                                        prev_ring_idx * stride_ckpt_k + c_idx * stride_ckpt_c,
+                                        mask=c_mask,
+                                        other=NEG_INF,
+                                    )
 
                                 # Compute edge on-the-fly
                                 cum_end = tl.load(
