@@ -25,6 +25,7 @@ import torch
 @dataclass
 class ScaleConfig:
     """Configuration for scale testing."""
+
     batch: int
     T: int
     K: int
@@ -36,6 +37,7 @@ class ScaleConfig:
 @dataclass
 class ScaleResult:
     """Result from a scale benchmark run."""
+
     config: ScaleConfig
     forward_ms: float
     backward_ms: float
@@ -50,22 +52,20 @@ class ScaleResult:
 SCALE_CONFIGS = [
     # Baseline: Should work on most GPUs
     ScaleConfig(batch=2, T=10000, K=100, C=24, name="baseline_10K", expected_memory_gb=2.0),
-
     # Medium scale: Requires ~8-16GB
     ScaleConfig(batch=2, T=50000, K=500, C=24, name="medium_50K", expected_memory_gb=8.0),
-
     # Large scale: Target for Phase 3
     ScaleConfig(batch=2, T=100000, K=1000, C=24, name="large_100K", expected_memory_gb=16.0),
-
     # Very large: Pushing limits
     ScaleConfig(batch=1, T=200000, K=1500, C=24, name="xlarge_200K", expected_memory_gb=24.0),
-
     # Target genomics scale (may require 48GB+ GPU)
     ScaleConfig(batch=1, T=400000, K=3000, C=24, name="genomics_400K", expected_memory_gb=40.0),
 ]
 
 
-def create_scale_inputs(config: ScaleConfig, device: torch.device, dtype: torch.dtype = torch.float32):
+def create_scale_inputs(
+    config: ScaleConfig, device: torch.device, dtype: torch.dtype = torch.float32
+):
     """Create inputs for scale testing."""
     torch.manual_seed(42)
 
@@ -105,7 +105,7 @@ def benchmark_scale(
     use_triton: bool = True,
 ) -> ScaleResult:
     """Benchmark at scale with memory-conscious approach."""
-    from torch_semimarkov.streaming import semi_crf_streaming_forward, HAS_TRITON
+    from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
 
     if use_triton and not HAS_TRITON:
         return ScaleResult(
@@ -234,16 +234,22 @@ def print_scale_results(results: list[ScaleResult]):
     print("STREAMING SEMI-CRF SCALE BENCHMARK")
     print("=" * 110)
 
-    print(f"\n{'Config':<18} | {'B×T×K':<18} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Throughput':>15} | {'Status':<8}")
+    print(
+        f"\n{'Config':<18} | {'B×T×K':<18} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Throughput':>15} | {'Status':<8}"
+    )
     print("-" * 110)
 
     for r in results:
         btk = f"{r.config.batch}×{r.config.T//1000}K×{r.config.K}"
         if r.status == "success":
             throughput_str = f"{r.throughput_positions_per_sec/1e6:.2f}M pos/s"
-            print(f"{r.config.name:<18} | {btk:<18} | {r.forward_ms:>8.1f}ms | {r.backward_ms:>8.1f}ms | {r.total_ms:>8.1f}ms | {r.peak_memory_gb:>6.1f}GB | {throughput_str:>15} | {r.status:<8}")
+            print(
+                f"{r.config.name:<18} | {btk:<18} | {r.forward_ms:>8.1f}ms | {r.backward_ms:>8.1f}ms | {r.total_ms:>8.1f}ms | {r.peak_memory_gb:>6.1f}GB | {throughput_str:>15} | {r.status:<8}"
+            )
         else:
-            print(f"{r.config.name:<18} | {btk:<18} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {'---':>15} | {r.status:<8}")
+            print(
+                f"{r.config.name:<18} | {btk:<18} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {'---':>15} | {r.status:<8}"
+            )
             if r.error:
                 print(f"{'':18} | Error: {r.error}")
 
@@ -264,10 +270,14 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to benchmark on")
     parser.add_argument("--warmup", type=int, default=2, help="Warmup iterations")
     parser.add_argument("--repeats", type=int, default=5, help="Timed iterations")
-    parser.add_argument("--configs", type=str, default="all",
-                        help="Comma-separated config names or 'all'")
-    parser.add_argument("--pytorch", action="store_true",
-                        help="Also benchmark PyTorch reference (very slow at scale)")
+    parser.add_argument(
+        "--configs", type=str, default="all", help="Comma-separated config names or 'all'"
+    )
+    parser.add_argument(
+        "--pytorch",
+        action="store_true",
+        help="Also benchmark PyTorch reference (very slow at scale)",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -275,9 +285,11 @@ def main():
         return
 
     device = torch.device(args.device)
-    print(f"Scale Benchmark")
+    print("Scale Benchmark")
     print(f"Device: {torch.cuda.get_device_name(device)}")
-    print(f"Total Memory: {torch.cuda.get_device_properties(device).total_memory / (1024**3):.1f}GB")
+    print(
+        f"Total Memory: {torch.cuda.get_device_properties(device).total_memory / (1024**3):.1f}GB"
+    )
 
     # Select configs
     if args.configs == "all":

@@ -107,17 +107,17 @@ See Also
 :class:`torch_semimarkov.SemiMarkov` : High-level API with marginals and sampling
 """
 
-from .constants import NEG_INF
-from .pytorch_reference import (
-    _compute_checkpoint_interval,
-    compute_edge_block_golden_rule,
-    semi_crf_streaming_forward_pytorch,
-    semi_crf_streaming_backward_pytorch,
-)
 from .autograd import (
     SemiCRFStreaming,
     SemiCRFStreamingTriton,
     semi_crf_streaming_forward,
+)
+from .constants import NEG_INF
+from .pytorch_reference import (
+    _compute_checkpoint_interval,
+    compute_edge_block_golden_rule,
+    semi_crf_streaming_backward_pytorch,
+    semi_crf_streaming_forward_pytorch,
 )
 
 # Re-export HAS_TRITON for external checks
@@ -128,8 +128,8 @@ except ImportError:
 
 # Conditionally export Triton launchers
 if HAS_TRITON:
-    from .triton_forward import launch_streaming_triton_kernel
     from .triton_backward import launch_streaming_triton_backward
+    from .triton_forward import launch_streaming_triton_kernel
 
 __all__ = [
     # Main API
@@ -145,4 +145,7 @@ __all__ = [
     "_compute_checkpoint_interval",
     "NEG_INF",
     "HAS_TRITON",
+    # Triton launchers (conditionally available)
+    "launch_streaming_triton_backward",
+    "launch_streaming_triton_kernel",
 ]

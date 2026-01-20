@@ -27,9 +27,9 @@ This reference implementation uses full storage (Option C from roadmap) for clar
 The Triton kernel will use recomputation (Option A) to maintain O(KC) memory.
 """
 
-import torch
-from typing import Tuple, Optional
+from typing import Optional
 
+import torch
 
 NEG_INF = -1e9
 
@@ -49,7 +49,7 @@ def semi_crf_forward_with_alpha(
     edge: torch.Tensor,
     lengths: torch.Tensor,
     semiring: str = "log",
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Forward pass that returns both partition and all α values.
 
     This is a modified version of the forward pass that stores all intermediate
@@ -234,9 +234,7 @@ def semi_crf_backward_beta(
             beta_t = torch.max(scores_over_dest, dim=1)[0]
 
         # Only update active positions
-        beta[:, t, :] = torch.where(
-            active_mask.view(batch, 1), beta_t, beta[:, t, :]
-        )
+        beta[:, t, :] = torch.where(active_mask.view(batch, 1), beta_t, beta[:, t, :])
 
     return beta
 
@@ -270,8 +268,6 @@ def semi_crf_compute_marginals(
     """
     batch, T_minus_1, K, C, _ = edge.shape
     T = T_minus_1 + 1
-    device = edge.device
-    dtype = edge.dtype
 
     # Initialize marginals to 0
     marginals = torch.zeros_like(edge)
@@ -322,7 +318,7 @@ def semi_crf_backward_pytorch(
     edge: torch.Tensor,
     lengths: torch.Tensor,
     semiring: str = "log",
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Complete backward pass: compute partition and gradients.
 
     This is the main entry point for the PyTorch reference backward.
@@ -372,9 +368,7 @@ class SemiCRFBackward(torch.autograd.Function):
         semiring: str = "log",
     ) -> torch.Tensor:
         # Compute forward pass and store values for backward
-        partition, alpha = semi_crf_forward_with_alpha(
-            edge.detach(), lengths, semiring
-        )
+        partition, alpha = semi_crf_forward_with_alpha(edge.detach(), lengths, semiring)
 
         # Save for backward
         ctx.save_for_backward(edge, lengths, alpha, partition)
@@ -383,9 +377,7 @@ class SemiCRFBackward(torch.autograd.Function):
         return partition
 
     @staticmethod
-    def backward(
-        ctx, grad_output: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], None, None]:
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[Optional[torch.Tensor], None, None]:
         edge, lengths, alpha, partition = ctx.saved_tensors
         semiring = ctx.semiring
 
@@ -425,6 +417,7 @@ def semi_crf_forward_backward(
 # =============================================================================
 # Triton Kernel (GPU only, optional) - Non-checkpointed backward
 # =============================================================================
+
 
 def _next_power_of_2(n):
     """Return the smallest power of 2 >= n."""
@@ -539,7 +532,13 @@ if HAS_TRITON:
         # Set β[final_pos] = 0 in the ring buffer
         final_ring_slot = (seq_len - 1) % K
         final_ring_offset = ring_base + final_ring_slot * stride_rk + c_idx * stride_rc
-        tl.store(final_ring_offset, tl.where(c_mask, tl.zeros([C_PAD], dtype=DTYPE), tl.full([C_PAD], NEG_INF, dtype=DTYPE)), mask=c_mask)
+        tl.store(
+            final_ring_offset,
+            tl.where(
+                c_mask, tl.zeros([C_PAD], dtype=DTYPE), tl.full([C_PAD], NEG_INF, dtype=DTYPE)
+            ),
+            mask=c_mask,
+        )
 
         # Main backward loop: t from seq_len-2 down to 0
         # We iterate backward through positions
@@ -676,9 +675,7 @@ if HAS_TRITON:
             alpha_padded = alpha.contiguous()
 
         # Allocate ring buffer for beta
-        beta_ring = torch.empty(
-            (batch, K, C_PAD), device=edge.device, dtype=edge.dtype
-        )
+        beta_ring = torch.empty((batch, K, C_PAD), device=edge.device, dtype=edge.dtype)
 
         # Allocate output gradient tensor
         grad_edge = torch.zeros_like(edge)
@@ -746,9 +743,7 @@ class SemiCRFTritonBackward(torch.autograd.Function):
         semiring: str = "log",
     ) -> torch.Tensor:
         # Compute forward pass with alpha storage
-        partition, alpha = semi_crf_forward_with_alpha(
-            edge.detach(), lengths, semiring
-        )
+        partition, alpha = semi_crf_forward_with_alpha(edge.detach(), lengths, semiring)
 
         # Save for backward
         ctx.save_for_backward(edge, lengths, alpha, partition)
@@ -757,9 +752,7 @@ class SemiCRFTritonBackward(torch.autograd.Function):
         return partition
 
     @staticmethod
-    def backward(
-        ctx, grad_output: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], None, None]:
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[Optional[torch.Tensor], None, None]:
         edge, lengths, alpha, partition = ctx.saved_tensors
         semiring = ctx.semiring
 
@@ -769,9 +762,7 @@ class SemiCRFTritonBackward(torch.autograd.Function):
         else:
             # Fall back to PyTorch implementation
             beta = semi_crf_backward_beta(edge, lengths, semiring)
-            marginals = semi_crf_compute_marginals(
-                edge, alpha, beta, partition, lengths
-            )
+            marginals = semi_crf_compute_marginals(edge, alpha, beta, partition, lengths)
 
         # Scale by upstream gradient
         grad_edge = marginals * grad_output.view(-1, 1, 1, 1, 1)

@@ -1,10 +1,23 @@
-"""Triton backward kernel for streaming Semi-CRF.
+r"""Triton backward kernel for streaming Semi-CRF.
 
 This module contains the Triton kernel for the backward pass and the launcher
 function that allocates buffers and dispatches the kernel.
-"""
 
-from typing import Tuple
+The backward pass uses the forward-backward algorithm with checkpointing:
+
+1. **Phase 1**: Recompute alpha values from saved ring buffer checkpoints
+2. **Phase 2**: Compute beta backward while accumulating gradients
+
+Gradients are computed via marginal probabilities:
+
+.. math::
+    P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}]) =
+    \frac{\exp(\alpha[t, c_{\text{src}}] + \text{edge} + \beta[t+k, c_{\text{dst}}])}
+    {\exp(\log Z)}
+
+Functions:
+    launch_streaming_triton_backward: Main entry point for launching backward kernel.
+"""
 
 import torch
 
@@ -100,38 +113,41 @@ if HAS_TRITON:
         stride_gdbw_k,
         stride_gdbw_c,
     ):
-        """
-        Streaming Semi-CRF backward kernel with gradient computation.
+        r"""Streaming Semi-CRF backward kernel with gradient computation.
 
         Computes gradients via the forward-backward algorithm:
+
         1. Recompute alpha from checkpoints (segment by segment)
         2. Compute beta backward while accumulating gradients
 
-        Marginal probability: P(segment) = exp(alpha + edge + beta - log_Z)
+        Marginal probability:
+
+        .. math::
+            P(\text{segment}) = \exp(\alpha + \text{edge} + \beta - \log Z)
+
         Gradient accumulation uses atomic operations for shared parameters.
 
-        Gradient Scaling Semantics (IMPORTANT):
-        ---------------------------------------
-        There's a subtle difference in how gradients are scaled for per-batch vs shared parameters:
+        .. important::
+            **Gradient Scaling Semantics**
 
-        - **Per-batch parameters** (cum_scores): Each batch element's gradient contribution
-          is scaled by its corresponding grad_output[batch_idx]. This happens INSIDE the kernel.
+            There's a subtle difference in how gradients are scaled for per-batch
+            vs shared parameters:
 
-        - **Shared parameters** (transition, duration_bias): These are accumulated across all
-          batch elements WITHOUT per-element scaling. The scaling by grad_output.sum() happens
-          AFTER the kernel in the launcher function.
+            - **Per-batch parameters** (``cum_scores``): Each batch element's gradient
+              contribution is scaled by its corresponding ``grad_output[batch_idx]``.
+              This happens INSIDE the kernel.
 
-        This matches PyTorch's backward semantics where:
-            grad_transition = sum_{b,t,k}(marginal[b,t,k]) * grad_output.sum()
+            - **Shared parameters** (``transition``, ``duration_bias``): These are
+              accumulated across all batch elements WITHOUT per-element scaling. The
+              scaling by ``grad_output`` happens AFTER the kernel via einsum.
 
-        NOT:
-            grad_transition = sum_{b,t,k}(marginal[b,t,k] * grad_output[b])  # WRONG!
+            This matches PyTorch's backward semantics:
 
-        When grad_output = [1, 1, ..., 1] (the common case), the difference is a factor of `batch`:
-        - Correct: sum(marginals) * batch
-        - Wrong: sum(marginals) * 1
+            .. code-block:: text
 
-        This was a subtle bug that caused a factor-of-2 error when batch=2.
+                grad_transition = einsum("bij, b -> ij", marginals, grad_output)
+
+        One program is launched per batch element (grid size = batch_size).
         """
         NEG_INF: tl.constexpr = -1e9
 
@@ -207,8 +223,10 @@ if HAS_TRITON:
                 # Initialize alpha from checkpoint (stores ring buffer state at seg_start)
                 for k_slot in tl.range(0, K):
                     alpha_val = tl.load(
-                        ring_ckpt_base + ckpt_idx * stride_ckpt_n +
-                        k_slot * stride_ckpt_k + c_idx * stride_ckpt_c,
+                        ring_ckpt_base
+                        + ckpt_idx * stride_ckpt_n
+                        + k_slot * stride_ckpt_k
+                        + c_idx * stride_ckpt_c,
                         mask=c_mask,
                         other=NEG_INF,
                     )
@@ -237,7 +255,9 @@ if HAS_TRITON:
                                 local_start = start_pos - seg_start
                                 if local_start >= 0 and local_start < SEGMENT_SIZE:
                                     alpha_prev = tl.load(
-                                        alpha_buf_base + local_start * stride_ab_t + c_idx * stride_ab_c,
+                                        alpha_buf_base
+                                        + local_start * stride_ab_t
+                                        + c_idx * stride_ab_c,
                                         mask=c_mask,
                                         other=NEG_INF,
                                     )
@@ -247,8 +267,10 @@ if HAS_TRITON:
                                     # at ring indices (seg_start-K+1) % K .. seg_start % K
                                     prev_ring_idx = start_pos % K
                                     alpha_prev = tl.load(
-                                        ring_ckpt_base + ckpt_idx * stride_ckpt_n +
-                                        prev_ring_idx * stride_ckpt_k + c_idx * stride_ckpt_c,
+                                        ring_ckpt_base
+                                        + ckpt_idx * stride_ckpt_n
+                                        + prev_ring_idx * stride_ckpt_k
+                                        + c_idx * stride_ckpt_c,
                                         mask=c_mask,
                                         other=NEG_INF,
                                     )
@@ -277,13 +299,17 @@ if HAS_TRITON:
                                 # Segment starts at start_pos, ends at t-1 (inclusive)
                                 if HAS_BOUNDARIES:
                                     start_score = tl.load(
-                                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                                        proj_start_base
+                                        + start_pos * stride_ps_t
+                                        + c_idx * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
                                     end_pos_boundary = t - 1
                                     end_score = tl.load(
-                                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                                        proj_end_base
+                                        + end_pos_boundary * stride_ps_t
+                                        + c_idx * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
@@ -292,7 +318,10 @@ if HAS_TRITON:
                                 # Load k-indexed transition for duration-dependent case
                                 if HAS_DURATION_TRANSITIONS:
                                     transition_block = tl.load(
-                                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                                        transition_ptr
+                                        + k * stride_tr_k
+                                        + c_dst_idx * stride_tr_dst
+                                        + c_src_idx * stride_tr_src,
                                         mask=c_mask_2d,
                                         other=0.0,
                                     )
@@ -312,7 +341,9 @@ if HAS_TRITON:
                                 # Accumulate via logsumexp
                                 max_alpha = tl.maximum(alpha_t, score_for_k)
                                 alpha_t = max_alpha + tl.log(
-                                    tl.exp(alpha_t - max_alpha) + tl.exp(score_for_k - max_alpha) + 1e-10
+                                    tl.exp(alpha_t - max_alpha)
+                                    + tl.exp(score_for_k - max_alpha)
+                                    + 1e-10
                                 )
 
                         # Store recomputed alpha
@@ -346,7 +377,9 @@ if HAS_TRITON:
                                 # Get beta[end_pos] from ring buffer
                                 end_ring_idx = end_pos % K
                                 beta_next = tl.load(
-                                    beta_ring_base + end_ring_idx * stride_br_k + c_idx * stride_br_c,
+                                    beta_ring_base
+                                    + end_ring_idx * stride_br_k
+                                    + c_idx * stride_br_c,
                                     mask=c_mask,
                                     other=NEG_INF,
                                 )
@@ -381,7 +414,9 @@ if HAS_TRITON:
                                     )
                                     end_pos_boundary = end_pos - 1
                                     end_score = tl.load(
-                                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                                        proj_end_base
+                                        + end_pos_boundary * stride_ps_t
+                                        + c_idx * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
@@ -390,12 +425,17 @@ if HAS_TRITON:
                                 # Load k-indexed transition for duration-dependent case
                                 if HAS_DURATION_TRANSITIONS:
                                     transition_block = tl.load(
-                                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                                        transition_ptr
+                                        + k * stride_tr_k
+                                        + c_dst_idx * stride_tr_dst
+                                        + c_src_idx * stride_tr_src,
                                         mask=c_mask_2d,
                                         other=0.0,
                                     )
 
-                                edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
+                                edge_block = (
+                                    segment_score[:, None] + transition_block
+                                )  # (C_PAD, C_PAD)
 
                                 # === Compute marginal ===
                                 # log_marginal[c_dst, c_src] = alpha[t, c_src] + edge[c_dst, c_src] + beta[end, c_dst] - log_Z
@@ -416,7 +456,9 @@ if HAS_TRITON:
 
                                 # grad_cum_scores: positive at end_pos, negative at t
                                 # Scale by upstream gradient for per-batch tensor
-                                marginal_sum_src = tl.sum(marginal, axis=1)  # sum over c_src -> (C_PAD,)
+                                marginal_sum_src = tl.sum(
+                                    marginal, axis=1
+                                )  # sum over c_src -> (C_PAD,)
                                 marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
                                 marginal_sum_src_scaled = marginal_sum_src * grad_out
 
@@ -439,12 +481,20 @@ if HAS_TRITON:
                                 # For static: grad_tr_workspace[batch, src, dst]
                                 # c_dst_idx is (C_PAD, 1) for src, c_src_idx is (1, C_PAD) for dst
                                 if HAS_DURATION_TRANSITIONS:
-                                    tr_offsets_ws = k * stride_gtw_k + c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                    tr_offsets_ws = (
+                                        k * stride_gtw_k
+                                        + c_dst_idx * stride_gtw_src
+                                        + c_src_idx * stride_gtw_dst
+                                    )
                                 else:
-                                    tr_offsets_ws = c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                    tr_offsets_ws = (
+                                        c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                    )
                                 # atomic_add still needed within batch (multiple t iterations add to same location)
                                 # but no inter-batch contention since each batch has its own workspace slice
-                                tl.atomic_add(grad_tr_ws_base + tr_offsets_ws, marginal_T, mask=c_mask_2d)
+                                tl.atomic_add(
+                                    grad_tr_ws_base + tr_offsets_ws, marginal_T, mask=c_mask_2d
+                                )
 
                                 # grad_duration_bias: write to per-batch workspace (unscaled)
                                 # grad_db_workspace[batch, k, c_dst] += sum over c_src
@@ -465,7 +515,9 @@ if HAS_TRITON:
                                     )
                                     # grad_proj_end[end_pos-1, c_dst] += marginal_sum_src * grad_out
                                     tl.atomic_add(
-                                        grad_pe_base + (end_pos - 1) * stride_ps_t + c_idx * stride_ps_c,
+                                        grad_pe_base
+                                        + (end_pos - 1) * stride_ps_t
+                                        + c_idx * stride_ps_c,
                                         marginal_sum_src_scaled,
                                         mask=c_mask,
                                     )
@@ -478,7 +530,8 @@ if HAS_TRITON:
                                 # Logsumexp over c_dst (axis 0)
                                 max_beta_k = tl.max(scores_for_beta, axis=0)
                                 beta_k = max_beta_k + tl.log(
-                                    tl.sum(tl.exp(scores_for_beta - max_beta_k[None, :]), axis=0) + 1e-10
+                                    tl.sum(tl.exp(scores_for_beta - max_beta_k[None, :]), axis=0)
+                                    + 1e-10
                                 )
                                 beta_k = tl.where(c_mask, beta_k, NEG_INF)
 
@@ -507,28 +560,41 @@ if HAS_TRITON:
         grad_output: torch.Tensor,
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Launch the Triton backward kernel.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+
+        Launch the Triton backward kernel with proper buffer allocation.
+
+        This function allocates working memory (alpha buffer, beta ring buffer)
+        and dispatches the backward kernel. Gradients for shared parameters
+        are accumulated per-batch then reduced via einsum.
 
         Args:
-            cum_scores: (batch, T+1, C)
-            transition: (C, C) for static, or (K, C, C) for duration-dependent (Phase 4A)
-            duration_bias: (K, C)
-            lengths: (batch,)
-            log_Z: (batch,) partition values from forward
-            ring_checkpoints: (batch, num_ckpts, K, C) saved states
-            checkpoint_interval: interval used during forward
-            grad_output: (batch,) upstream gradient
-            proj_start: (batch, T, C) start boundary scores. Optional.
-            proj_end: (batch, T, C) end boundary scores. Optional.
+            cum_scores (Tensor): Cumulative projected scores of shape
+                :math:`(\text{batch}, T+1, C)`.
+            transition (Tensor): Transition scores of shape :math:`(C, C)` for
+                static transitions, or :math:`(K, C, C)` for duration-dependent.
+            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
+            ring_checkpoints (Tensor): Saved ring buffer states of shape
+                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+            checkpoint_interval (int): Interval used during forward pass.
+            grad_output (Tensor): Upstream gradient of shape :math:`(\text{batch},)`.
+            proj_start (Tensor, optional): Start boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
+            proj_end (Tensor, optional): End boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
 
         Returns:
-            grad_cum_scores: (batch, T+1, C)
-            grad_transition: (C, C) or (K, C, C) for duration-dependent
-            grad_duration_bias: (K, C)
-            grad_proj_start: (batch, T, C) or None if boundaries not provided
-            grad_proj_end: (batch, T, C) or None if boundaries not provided
+            tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of gradients:
+                - **grad_cum_scores** (Tensor): Shape :math:`(\text{batch}, T+1, C)`.
+                - **grad_transition** (Tensor): Shape :math:`(C, C)` or :math:`(K, C, C)`.
+                - **grad_duration_bias** (Tensor): Shape :math:`(K, C)`.
+                - **grad_proj_start** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
+                  if boundaries provided.
+                - **grad_proj_end** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
+                  if boundaries provided.
         """
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
@@ -571,9 +637,7 @@ if HAS_TRITON:
             stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0
             grad_proj_start = None
             grad_proj_end = None
-            # Need dummy pointers for kernel
-            grad_proj_start_ptr = cum_scores  # Won't be accessed
-            grad_proj_end_ptr = cum_scores
+            # Kernel uses proj_start/proj_end directly when HAS_BOUNDARY_PROJ=False
 
         # Pad checkpoints to C_PAD
         if ring_checkpoints.shape[-1] < C_PAD:
@@ -585,12 +649,8 @@ if HAS_TRITON:
             ring_ckpts_padded = ring_checkpoints.contiguous()
 
         # Allocate working memory
-        alpha_buffer = torch.full(
-            (batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype
-        )
-        beta_ring = torch.full(
-            (batch, K, C_PAD), NEG_INF, device=device, dtype=dtype
-        )
+        alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
+        beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # Allocate gradient outputs
         grad_cum_scores = torch.zeros(batch, T_plus_1, C, device=device, dtype=dtype)
@@ -716,10 +776,10 @@ if HAS_TRITON:
         #
         # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
         if has_duration_transitions:
-            grad_transition = torch.einsum('bkij, b -> kij', grad_tr_workspace, grad_output)
+            grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output)
         else:
-            grad_transition = torch.einsum('bij, b -> ij', grad_tr_workspace, grad_output)
+            grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output)
 
-        grad_duration_bias = torch.einsum('bkc, b -> kc', grad_db_workspace, grad_output)
+        grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output)
 
         return grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end

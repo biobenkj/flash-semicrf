@@ -9,11 +9,8 @@ import pytest
 import torch
 
 from torch_semimarkov.streaming import (
-    semi_crf_streaming_forward,
     compute_edge_block_golden_rule,
-    semi_crf_streaming_forward_pytorch,
-    semi_crf_streaming_backward_pytorch,
-    SemiCRFStreaming,
+    semi_crf_streaming_forward,
 )
 
 
@@ -54,7 +51,11 @@ class TestEdgeBlockComputation:
             cum_scores, transition, duration_bias, t=10, k=3
         )
 
-        assert edge_block.shape == (batch, C, C), f"Expected shape (batch, C, C), got {edge_block.shape}"
+        assert edge_block.shape == (
+            batch,
+            C,
+            C,
+        ), f"Expected shape (batch, C, C), got {edge_block.shape}"
 
     def test_edge_block_values(self):
         """Verify edge block computation is correct."""
@@ -62,9 +63,7 @@ class TestEdgeBlockComputation:
         cum_scores, transition, duration_bias, _ = create_golden_rule_inputs(batch, T, K, C)
 
         t, k = 5, 2
-        edge_block = compute_edge_block_golden_rule(
-            cum_scores, transition, duration_bias, t, k
-        )
+        edge_block = compute_edge_block_golden_rule(cum_scores, transition, duration_bias, t, k)
 
         # Manual computation
         content_score = cum_scores[:, t + k, :] - cum_scores[:, t, :]  # (batch, C)
@@ -103,9 +102,7 @@ class TestStreamingForward:
         batch, T, K, C = 2, 100, 8, 4
         cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert torch.isfinite(partition).all(), "Partition contains non-finite values"
         assert partition.shape == (batch,), f"Expected shape (batch,), got {partition.shape}"
@@ -116,9 +113,7 @@ class TestStreamingForward:
         cum_scores, transition, duration_bias, _ = create_golden_rule_inputs(batch, T, K, C)
         lengths = torch.tensor([T, T - 10, T - 20, T], dtype=torch.long)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert torch.isfinite(partition).all()
         # Different lengths should give different values
@@ -168,9 +163,7 @@ class TestStreamingBackward:
         transition.requires_grad_(True)
         duration_bias.requires_grad_(True)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         partition.sum().backward()
 
         assert torch.isfinite(cum_scores.grad).all(), "cum_scores grad non-finite"
@@ -186,9 +179,7 @@ class TestStreamingBackward:
         transition.requires_grad_(True)
         duration_bias.requires_grad_(True)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         partition.sum().backward()
 
         assert cum_scores.grad.shape == cum_scores.shape
@@ -205,8 +196,13 @@ class TestStreamingBackward:
         cum_scores.requires_grad_(True)
 
         partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K,
-            proj_start=proj_start, proj_end=proj_end
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
         )
         partition.sum().backward()
 
@@ -227,9 +223,7 @@ class TestStreamingBackward:
         transition.requires_grad_(True)
         duration_bias.requires_grad_(True)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         partition.sum().backward()
 
         assert torch.isfinite(cum_scores.grad).all()
@@ -269,9 +263,7 @@ class TestGradientCorrectness:
 
         cum_scores.requires_grad_(True)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         partition.sum().backward()
 
         # The gradient w.r.t. cum_scores represents flow through each position
@@ -293,9 +285,7 @@ class TestNumericalStability:
         batch, T, K, C = 1, 1000, 10, 4
         cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert torch.isfinite(partition).all(), f"T={T}: Non-finite partition"
 
@@ -312,12 +302,14 @@ class TestNumericalStability:
         lengths = torch.full((batch,), T, dtype=torch.long)
 
         import warnings
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            partition = semi_crf_streaming_forward(
+            _partition = semi_crf_streaming_forward(
                 cum_scores, transition, duration_bias, lengths, K
             )
             # Should get a warning about non-zero-centered input
+            del _partition  # Only called to trigger warning
             assert len(w) > 0, "Expected warning about non-zero-centered input"
 
 
@@ -330,19 +322,17 @@ if __name__ == "__main__":
     transition.requires_grad_(True)
     duration_bias.requires_grad_(True)
 
-    print(f"Input shapes:")
+    print("Input shapes:")
     print(f"  cum_scores: {cum_scores.shape}")
     print(f"  transition: {transition.shape}")
     print(f"  duration_bias: {duration_bias.shape}")
     print(f"  lengths: {lengths}")
 
-    partition = semi_crf_streaming_forward(
-        cum_scores, transition, duration_bias, lengths, K
-    )
+    partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
     print(f"\nPartition: {partition}")
 
     partition.sum().backward()
-    print(f"\nGradients:")
+    print("\nGradients:")
     print(f"  cum_scores.grad finite: {torch.isfinite(cum_scores.grad).all()}")
     print(f"  transition.grad finite: {torch.isfinite(transition.grad).all()}")
     print(f"  duration_bias.grad finite: {torch.isfinite(duration_bias.grad).all()}")

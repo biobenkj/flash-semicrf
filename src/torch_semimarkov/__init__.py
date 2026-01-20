@@ -21,9 +21,9 @@ Modifications:
 
 from .semimarkov import SemiMarkov
 from .streaming import (
-    semi_crf_streaming_forward,
     SemiCRFStreaming,
     compute_edge_block_golden_rule,
+    semi_crf_streaming_forward,
 )
 
 __version__ = "0.2.0"

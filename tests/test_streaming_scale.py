@@ -52,13 +52,9 @@ class TestNoOOM:
 
         gc.collect()
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all(), "Partition should be finite"
@@ -70,13 +66,9 @@ class TestNoOOM:
 
         gc.collect()
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all(), "Partition should be finite"
@@ -89,13 +81,9 @@ class TestNoOOM:
 
         gc.collect()
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all(), "Partition should be finite"
@@ -113,9 +101,7 @@ class TestNoOOM:
             batch, T, K, C, device="cuda"
         )
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all(), "Partition should be finite"
@@ -134,9 +120,7 @@ class TestNoOOM:
             batch, T, K, C, device="cuda"
         )
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all(), "Partition should be finite"
@@ -161,9 +145,7 @@ class TestMemoryUsage:
         cum_scores1, transition1, duration_bias1, lengths1 = create_golden_rule_inputs(
             batch, T1, K, C, device="cuda"
         )
-        _ = semi_crf_streaming_forward(
-            cum_scores1, transition1, duration_bias1, lengths1, K
-        )
+        _ = semi_crf_streaming_forward(cum_scores1, transition1, duration_bias1, lengths1, K)
         torch.cuda.synchronize()
         mem_T1 = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
 
@@ -178,13 +160,11 @@ class TestMemoryUsage:
         cum_scores2, transition2, duration_bias2, lengths2 = create_golden_rule_inputs(
             batch, T2, K, C, device="cuda"
         )
-        _ = semi_crf_streaming_forward(
-            cum_scores2, transition2, duration_bias2, lengths2, K
-        )
+        _ = semi_crf_streaming_forward(cum_scores2, transition2, duration_bias2, lengths2, K)
         torch.cuda.synchronize()
         mem_T2 = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
 
-        print(f"\nMemory usage:")
+        print("\nMemory usage:")
         print(f"  T={T1}: {mem_T1:.1f} MB")
         print(f"  T={T2}: {mem_T2:.1f} MB")
         print(f"  Ratio: {mem_T2 / mem_T1:.2f}x (expected ~4x for O(TC), ~1x for O(KC))")
@@ -204,13 +184,9 @@ class TestNumericalStabilityAtScale:
         T, K, C = 10_000, 50, 8
         batch = 1
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert torch.isfinite(partition).all(), f"Non-finite at T={T}"
 
@@ -220,13 +196,9 @@ class TestNumericalStabilityAtScale:
         T, K, C = 50_000, 100, 8
         batch = 1
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 
         assert torch.isfinite(partition).all(), f"Non-finite at T={T}"
 
@@ -235,17 +207,13 @@ class TestNumericalStabilityAtScale:
         T, K, C = 1_000, 20, 8
         batch = 1
 
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
         cum_scores.requires_grad_(True)
         transition.requires_grad_(True)
         duration_bias.requires_grad_(True)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         partition.sum().backward()
 
         assert torch.isfinite(cum_scores.grad).all(), "cum_scores grad non-finite"
@@ -265,13 +233,9 @@ if __name__ == "__main__":
     T, K, C = 10_000, 100, 24
     batch = 1
 
-    cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-        batch, T, K, C
-    )
+    cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-    partition = semi_crf_streaming_forward(
-        cum_scores, transition, duration_bias, lengths, K
-    )
+    partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
     print(f"  Partition: {partition.item():.4f}")
     print(f"  Finite: {torch.isfinite(partition).all()}")
 
@@ -280,13 +244,9 @@ if __name__ == "__main__":
     T, K, C = 50_000, 500, 24
     batch = 1
 
-    cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-        batch, T, K, C
-    )
+    cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-    partition = semi_crf_streaming_forward(
-        cum_scores, transition, duration_bias, lengths, K
-    )
+    partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
     print(f"  Partition: {partition.item():.4f}")
     print(f"  Finite: {torch.isfinite(partition).all()}")
 
@@ -298,13 +258,9 @@ if __name__ == "__main__":
     gc.collect()
 
     try:
-        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(
-            batch, T, K, C
-        )
+        cum_scores, transition, duration_bias, lengths = create_golden_rule_inputs(batch, T, K, C)
 
-        partition = semi_crf_streaming_forward(
-            cum_scores, transition, duration_bias, lengths, K
-        )
+        partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
         print(f"  Partition: {partition.item():.4f}")
         print(f"  Finite: {torch.isfinite(partition).all()}")
         print("\n" + "=" * 60)

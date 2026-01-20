@@ -7,29 +7,26 @@ autograd-based backward.
 
 import pytest
 import torch
-
 from torch_semimarkov.triton_backward import (
-    semi_crf_forward_with_alpha,
-    semi_crf_backward_beta,
-    semi_crf_compute_marginals,
-    semi_crf_backward_pytorch,
-    semi_crf_forward_backward,
-    semi_crf_triton_backward,
-    semi_crf_forward_with_checkpoints,
-    semi_crf_backward_from_checkpoints,
-    semi_crf_checkpointed_backward,
-    semi_crf_forward_with_ring_checkpoints,
-    semi_crf_backward_from_ring_checkpoints,
-    semi_crf_optimized_checkpointed_backward,
-    _compute_checkpoint_interval,
-    SemiCRFBackward,
     HAS_TRITON,
+    _compute_checkpoint_interval,
+    semi_crf_backward_beta,
+    semi_crf_backward_from_checkpoints,
+    semi_crf_backward_from_ring_checkpoints,
+    semi_crf_backward_pytorch,
+    semi_crf_checkpointed_backward,
+    semi_crf_compute_marginals,
+    semi_crf_forward_backward,
+    semi_crf_forward_with_alpha,
+    semi_crf_forward_with_checkpoints,
+    semi_crf_forward_with_ring_checkpoints,
+    semi_crf_optimized_checkpointed_backward,
+    semi_crf_triton_backward,
 )
+
 from torch_semimarkov.triton_scan import (
     semi_crf_forward_pytorch,
-    semi_crf_triton_forward,
 )
-
 
 # =============================================================================
 # Forward with Alpha Tests
@@ -49,9 +46,9 @@ def test_forward_with_alpha_matches_reference():
     # Our implementation
     partition, alpha = semi_crf_forward_with_alpha(edge, lengths, semiring="log")
 
-    assert torch.allclose(partition, ref_partition, atol=1e-5), (
-        f"Partition mismatch: max diff {(partition - ref_partition).abs().max()}"
-    )
+    assert torch.allclose(
+        partition, ref_partition, atol=1e-5
+    ), f"Partition mismatch: max diff {(partition - ref_partition).abs().max()}"
 
 
 def test_forward_with_alpha_variable_lengths():
@@ -144,12 +141,10 @@ def test_marginals_sum_to_expected_segments():
     total_marginal = marginals.sum(dim=(1, 2, 3, 4))
 
     # Check bounds: at least 1 segment, at most T-1 segments
-    assert (total_marginal >= 1.0 - 1e-4).all(), (
-        f"Total marginal below 1: {total_marginal}"
-    )
-    assert (total_marginal <= (lengths - 1).float() + 1e-4).all(), (
-        f"Total marginal above T-1: {total_marginal}"
-    )
+    assert (total_marginal >= 1.0 - 1e-4).all(), f"Total marginal below 1: {total_marginal}"
+    assert (
+        total_marginal <= (lengths - 1).float() + 1e-4
+    ).all(), f"Total marginal above T-1: {total_marginal}"
 
 
 def test_marginals_non_negative():
@@ -204,14 +199,14 @@ def test_backward_matches_autograd():
     )
 
     # Check partition values match
-    assert torch.allclose(partition_autograd.detach(), partition_explicit, atol=1e-5), (
-        f"Partition mismatch: {(partition_autograd.detach() - partition_explicit).abs().max()}"
-    )
+    assert torch.allclose(
+        partition_autograd.detach(), partition_explicit, atol=1e-5
+    ), f"Partition mismatch: {(partition_autograd.detach() - partition_explicit).abs().max()}"
 
     # Check gradients match
-    assert torch.allclose(grad_autograd, grad_explicit, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_autograd - grad_explicit).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_autograd, grad_explicit, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_autograd - grad_explicit).abs().max()}"
 
 
 def test_backward_matches_autograd_variable_lengths():
@@ -233,9 +228,9 @@ def test_backward_matches_autograd_variable_lengths():
     )
 
     assert torch.allclose(partition_autograd.detach(), partition_explicit, atol=1e-5)
-    assert torch.allclose(grad_autograd, grad_explicit, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_autograd - grad_explicit).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_autograd, grad_explicit, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_autograd - grad_explicit).abs().max()}"
 
 
 def test_gradcheck_small():
@@ -315,9 +310,9 @@ def test_autograd_function_backward():
     grad_test = edge_test.grad
 
     assert torch.allclose(out_ref.detach(), out_test.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_test, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_test).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_test, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_test).abs().max()}"
 
 
 def test_autograd_function_with_grad_output():
@@ -358,11 +353,12 @@ def test_single_position_sequence():
     # Reference
     ref = semi_crf_forward_pytorch(edge, lengths, semiring="log")
     ref.sum().backward()
-    grad_ref = edge.grad.clone()
 
     # Our implementation
     edge.grad = None
-    out = semi_crf_forward_backward(edge.detach().clone().requires_grad_(True), lengths, semiring="log")
+    out = semi_crf_forward_backward(
+        edge.detach().clone().requires_grad_(True), lengths, semiring="log"
+    )
 
     assert torch.allclose(out, ref.detach(), atol=1e-5)
 
@@ -492,9 +488,9 @@ def test_triton_backward_kernel_matches_pytorch():
     # Compute gradients using Triton kernel
     grad_triton = launch_triton_backward_kernel(edge, alpha, partition, lengths)
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -518,9 +514,9 @@ def test_triton_backward_kernel_variable_lengths():
     # Triton kernel
     grad_triton = launch_triton_backward_kernel(edge, alpha, partition, lengths)
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -544,9 +540,9 @@ def test_triton_backward_kernel_non_power_of_2_labels():
     # Triton kernel
     grad_triton = launch_triton_backward_kernel(edge, alpha, partition, lengths)
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -571,9 +567,9 @@ def test_triton_backward_autograd_function():
     grad_triton = edge_triton.grad
 
     assert torch.allclose(out_ref.detach(), out_triton.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_triton, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_triton).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_triton, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_triton).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -597,9 +593,9 @@ def test_triton_backward_larger_shapes():
     # Triton kernel
     grad_triton = launch_triton_backward_kernel(edge, alpha, partition, lengths)
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-3), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-3
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -655,13 +651,11 @@ def test_checkpointed_forward_matches_full_forward():
     partition_full, _ = semi_crf_forward_with_alpha(edge, lengths)
 
     # Checkpointed forward
-    partition_ckpt, checkpoints, interval = semi_crf_forward_with_checkpoints(
-        edge, lengths
-    )
+    partition_ckpt, checkpoints, interval = semi_crf_forward_with_checkpoints(edge, lengths)
 
-    assert torch.allclose(partition_full, partition_ckpt, atol=1e-5), (
-        f"Partition mismatch: {(partition_full - partition_ckpt).abs().max()}"
-    )
+    assert torch.allclose(
+        partition_full, partition_ckpt, atol=1e-5
+    ), f"Partition mismatch: {(partition_full - partition_ckpt).abs().max()}"
 
 
 def test_checkpointed_forward_checkpoint_count():
@@ -678,9 +672,9 @@ def test_checkpointed_forward_checkpoint_count():
     )
 
     expected_num_checkpoints = (T + interval - 1) // interval  # ceil(T / interval)
-    assert checkpoints.shape[1] == expected_num_checkpoints, (
-        f"Expected {expected_num_checkpoints} checkpoints, got {checkpoints.shape[1]}"
-    )
+    assert (
+        checkpoints.shape[1] == expected_num_checkpoints
+    ), f"Expected {expected_num_checkpoints} checkpoints, got {checkpoints.shape[1]}"
     assert actual_interval == interval
 
 
@@ -698,9 +692,9 @@ def test_checkpointed_forward_variable_intervals():
         partition_ckpt, checkpoints, _ = semi_crf_forward_with_checkpoints(
             edge, lengths, checkpoint_interval=interval
         )
-        assert torch.allclose(partition_ref, partition_ckpt, atol=1e-5), (
-            f"Partition mismatch for interval={interval}"
-        )
+        assert torch.allclose(
+            partition_ref, partition_ckpt, atol=1e-5
+        ), f"Partition mismatch for interval={interval}"
 
 
 def test_checkpointed_backward_matches_full_backward():
@@ -725,9 +719,9 @@ def test_checkpointed_backward_matches_full_backward():
         edge.detach(), checkpoints, partition_ckpt, lengths, interval
     )
 
-    assert torch.allclose(grad_ref, grad_ckpt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_ckpt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
 
 
 def test_checkpointed_autograd_function():
@@ -750,18 +744,16 @@ def test_checkpointed_autograd_function():
     grad_ckpt = edge_ckpt.grad
 
     assert torch.allclose(out_ref.detach(), out_ckpt.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_ckpt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_ckpt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
 
 
 def test_checkpointed_gradcheck():
     """Verify checkpointed backward with torch.autograd.gradcheck."""
     torch.manual_seed(3500)
     batch, T, K, C = 1, 8, 3, 2
-    edge = torch.randn(
-        batch, T - 1, K, C, C, dtype=torch.float64, requires_grad=True
-    )
+    edge = torch.randn(batch, T - 1, K, C, C, dtype=torch.float64, requires_grad=True)
     lengths = torch.full((batch,), T, dtype=torch.long)
 
     def func(edge_input):
@@ -790,9 +782,9 @@ def test_checkpointed_variable_lengths():
     grad_ckpt = edge_ckpt.grad
 
     assert torch.allclose(out_ref.detach(), out_ckpt.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_ckpt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_ckpt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_ckpt).abs().max()}"
 
 
 def test_checkpointed_small_interval():
@@ -841,7 +833,6 @@ def test_checkpointed_large_interval():
 
 def test_checkpointed_memory_reduction():
     """Verify that checkpointing actually reduces memory usage."""
-    import math
 
     T = 100
     C = 10
@@ -858,12 +849,12 @@ def test_checkpointed_memory_reduction():
     reduction_factor = full_alpha_elements / checkpointed_elements
     expected_reduction = T / num_checkpoints
 
-    assert reduction_factor >= 5, (
-        f"Expected at least 5x memory reduction, got {reduction_factor:.1f}x"
-    )
-    assert abs(reduction_factor - expected_reduction) < 0.1, (
-        f"Reduction factor {reduction_factor:.1f} doesn't match expected {expected_reduction:.1f}"
-    )
+    assert (
+        reduction_factor >= 5
+    ), f"Expected at least 5x memory reduction, got {reduction_factor:.1f}x"
+    assert (
+        abs(reduction_factor - expected_reduction) < 0.1
+    ), f"Reduction factor {reduction_factor:.1f} doesn't match expected {expected_reduction:.1f}"
 
 
 # =============================================================================
@@ -882,13 +873,11 @@ def test_optimized_checkpointed_forward_matches_full():
     partition_full, _ = semi_crf_forward_with_alpha(edge, lengths)
 
     # Optimized checkpointed forward
-    partition_opt, ring_ckpts, interval = semi_crf_forward_with_ring_checkpoints(
-        edge, lengths
-    )
+    partition_opt, ring_ckpts, interval = semi_crf_forward_with_ring_checkpoints(edge, lengths)
 
-    assert torch.allclose(partition_full, partition_opt, atol=1e-5), (
-        f"Partition mismatch: {(partition_full - partition_opt).abs().max()}"
-    )
+    assert torch.allclose(
+        partition_full, partition_opt, atol=1e-5
+    ), f"Partition mismatch: {(partition_full - partition_opt).abs().max()}"
 
     # Ring checkpoints should have shape (batch, num_ckpts, K, C)
     num_ckpts = (T + interval - 1) // interval
@@ -917,9 +906,9 @@ def test_optimized_checkpointed_backward_matches_full():
         edge.detach(), ring_ckpts, partition_opt, lengths, interval
     )
 
-    assert torch.allclose(grad_ref, grad_opt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_opt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
 
 
 def test_optimized_checkpointed_autograd():
@@ -942,9 +931,9 @@ def test_optimized_checkpointed_autograd():
     grad_opt = edge_opt.grad
 
     assert torch.allclose(out_ref.detach(), out_opt.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_opt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_opt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
 
 
 def test_optimized_checkpointed_variable_lengths():
@@ -967,18 +956,16 @@ def test_optimized_checkpointed_variable_lengths():
     grad_opt = edge_opt.grad
 
     assert torch.allclose(out_ref.detach(), out_opt.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_opt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_opt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_opt).abs().max()}"
 
 
 def test_optimized_checkpointed_gradcheck():
     """Verify optimized checkpointed backward with torch.autograd.gradcheck."""
     torch.manual_seed(4400)
     batch, T, K, C = 1, 10, 3, 2
-    edge = torch.randn(
-        batch, T - 1, K, C, C, dtype=torch.float64, requires_grad=True
-    )
+    edge = torch.randn(batch, T - 1, K, C, C, dtype=torch.float64, requires_grad=True)
     lengths = torch.full((batch,), T, dtype=torch.long)
 
     def func(edge_input):
@@ -1007,14 +994,13 @@ def test_optimized_vs_basic_checkpointed():
     grad_opt = edge_opt.grad
 
     assert torch.allclose(out_basic, out_opt, atol=1e-5)
-    assert torch.allclose(grad_basic, grad_opt, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_basic - grad_opt).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_basic, grad_opt, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_basic - grad_opt).abs().max()}"
 
 
 def test_optimized_checkpointed_memory_tradeoff():
     """Verify memory trade-off: O(√T × K × C) vs O(√T × C)."""
-    import math
 
     T = 100
     K = 8
@@ -1038,7 +1024,7 @@ def test_optimized_checkpointed_memory_tradeoff():
     optimized_reduction = full_elements / optimized_checkpoint_elements
 
     assert basic_reduction >= 5, f"Basic should have ≥5× reduction, got {basic_reduction:.1f}×"
-    assert optimized_reduction >= 1, f"Optimized should have positive reduction"
+    assert optimized_reduction >= 1, "Optimized should have positive reduction"
 
 
 # =============================================================================
@@ -1060,9 +1046,7 @@ def test_triton_checkpointed_kernel_matches_pytorch():
     lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
 
     # Compute forward with ring checkpoints
-    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(
-        edge, lengths
-    )
+    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(edge, lengths)
 
     # PyTorch reference
     grad_pytorch = semi_crf_backward_from_ring_checkpoints(
@@ -1074,9 +1058,9 @@ def test_triton_checkpointed_kernel_matches_pytorch():
         edge, ring_checkpoints, partition, lengths, interval
     )
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -1093,9 +1077,7 @@ def test_triton_checkpointed_kernel_variable_lengths():
     lengths = torch.tensor([24, 18, 12, 6], dtype=torch.long, device="cuda")
 
     # Compute forward with ring checkpoints
-    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(
-        edge, lengths
-    )
+    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(edge, lengths)
 
     # PyTorch reference
     grad_pytorch = semi_crf_backward_from_ring_checkpoints(
@@ -1107,9 +1089,9 @@ def test_triton_checkpointed_kernel_variable_lengths():
         edge, ring_checkpoints, partition, lengths, interval
     )
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -1126,9 +1108,7 @@ def test_triton_checkpointed_kernel_non_power_of_2_labels():
     lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
 
     # Compute forward with ring checkpoints
-    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(
-        edge, lengths
-    )
+    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(edge, lengths)
 
     # PyTorch reference
     grad_pytorch = semi_crf_backward_from_ring_checkpoints(
@@ -1140,9 +1120,9 @@ def test_triton_checkpointed_kernel_non_power_of_2_labels():
         edge, ring_checkpoints, partition, lengths, interval
     )
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -1169,9 +1149,9 @@ def test_triton_checkpointed_autograd_function():
     grad_triton = edge_triton.grad
 
     assert torch.allclose(out_ref.detach(), out_triton.detach(), atol=1e-5)
-    assert torch.allclose(grad_ref, grad_triton, atol=1e-4), (
-        f"Gradient mismatch: max diff {(grad_ref - grad_triton).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_ref, grad_triton, atol=1e-4
+    ), f"Gradient mismatch: max diff {(grad_ref - grad_triton).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -1188,9 +1168,7 @@ def test_triton_checkpointed_larger_shapes():
     lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
 
     # Compute forward with ring checkpoints
-    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(
-        edge, lengths
-    )
+    partition, ring_checkpoints, interval = semi_crf_forward_with_ring_checkpoints(edge, lengths)
 
     # PyTorch reference
     grad_pytorch = semi_crf_backward_from_ring_checkpoints(
@@ -1202,9 +1180,9 @@ def test_triton_checkpointed_larger_shapes():
         edge, ring_checkpoints, partition, lengths, interval
     )
 
-    assert torch.allclose(grad_triton, grad_pytorch, atol=1e-3), (
-        f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
-    )
+    assert torch.allclose(
+        grad_triton, grad_pytorch, atol=1e-3
+    ), f"Gradient mismatch: max diff {(grad_triton - grad_pytorch).abs().max()}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

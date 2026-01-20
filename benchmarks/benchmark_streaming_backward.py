@@ -24,6 +24,7 @@ import torch
 @dataclass
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
+
     batch: int
     T: int
     K: int
@@ -38,6 +39,7 @@ class BenchmarkConfig:
 @dataclass
 class BenchmarkResult:
     """Result from a benchmark run."""
+
     config: BenchmarkConfig
     forward_ms: float
     backward_ms: float
@@ -52,21 +54,20 @@ CONFIGS = [
     # Small scale - quick iteration
     BenchmarkConfig(batch=4, T=100, K=8, C=4, name="tiny"),
     BenchmarkConfig(batch=4, T=500, K=16, C=8, name="small"),
-
     # Medium scale - typical training
     BenchmarkConfig(batch=4, T=1000, K=32, C=24, name="medium"),
     BenchmarkConfig(batch=4, T=5000, K=64, C=24, name="medium_long"),
-
     # Large scale - target genomics
     BenchmarkConfig(batch=2, T=10000, K=100, C=24, name="large"),
     BenchmarkConfig(batch=2, T=50000, K=500, C=24, name="very_large"),
-
     # Scale target (may OOM on smaller GPUs)
     BenchmarkConfig(batch=1, T=100000, K=1000, C=24, name="target_scale"),
 ]
 
 
-def create_inputs(config: BenchmarkConfig, device: torch.device, dtype: torch.dtype = torch.float32):
+def create_inputs(
+    config: BenchmarkConfig, device: torch.device, dtype: torch.dtype = torch.float32
+):
     """Create test inputs for the streaming API."""
     torch.manual_seed(42)
 
@@ -99,7 +100,7 @@ def benchmark_triton_backward(
     repeats: int = 10,
 ) -> BenchmarkResult:
     """Benchmark the Triton streaming backward kernel."""
-    from torch_semimarkov.streaming import semi_crf_streaming_forward, HAS_TRITON
+    from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
 
     if not HAS_TRITON:
         return BenchmarkResult(
@@ -295,26 +296,38 @@ def print_results(results_triton: list[BenchmarkResult], results_pytorch: list[B
     print("STREAMING BACKWARD KERNEL BENCHMARK RESULTS")
     print("=" * 100)
 
-    print(f"\n{'Config':<20} | {'Backend':<10} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Status':<10}")
+    print(
+        f"\n{'Config':<20} | {'Backend':<10} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Status':<10}"
+    )
     print("-" * 100)
 
-    for rt, rp in zip(results_triton, results_pytorch):
+    for rt, rp in zip(results_triton, results_pytorch, strict=True):
         # Triton row
         if rt.status == "success":
-            print(f"{rt.config.name:<20} | {'Triton':<10} | {rt.forward_ms:>8.2f}ms | {rt.backward_ms:>8.2f}ms | {rt.total_ms:>8.2f}ms | {rt.peak_memory_gb:>6.2f}GB | {rt.status:<10}")
+            print(
+                f"{rt.config.name:<20} | {'Triton':<10} | {rt.forward_ms:>8.2f}ms | {rt.backward_ms:>8.2f}ms | {rt.total_ms:>8.2f}ms | {rt.peak_memory_gb:>6.2f}GB | {rt.status:<10}"
+            )
         else:
-            print(f"{rt.config.name:<20} | {'Triton':<10} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {rt.status:<10}")
+            print(
+                f"{rt.config.name:<20} | {'Triton':<10} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {rt.status:<10}"
+            )
 
         # PyTorch row
         if rp.status == "success":
-            print(f"{'':<20} | {'PyTorch':<10} | {rp.forward_ms:>8.2f}ms | {rp.backward_ms:>8.2f}ms | {rp.total_ms:>8.2f}ms | {rp.peak_memory_gb:>6.2f}GB | {rp.status:<10}")
+            print(
+                f"{'':<20} | {'PyTorch':<10} | {rp.forward_ms:>8.2f}ms | {rp.backward_ms:>8.2f}ms | {rp.total_ms:>8.2f}ms | {rp.peak_memory_gb:>6.2f}GB | {rp.status:<10}"
+            )
         else:
-            print(f"{'':<20} | {'PyTorch':<10} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {rp.status:<10}")
+            print(
+                f"{'':<20} | {'PyTorch':<10} | {'---':>10} | {'---':>10} | {'---':>10} | {'---':>8} | {rp.status:<10}"
+            )
 
         # Speedup
         if rt.status == "success" and rp.status == "success" and rp.backward_ms > 0:
             speedup = rp.backward_ms / rt.backward_ms
-            print(f"{'':<20} | {'Speedup':<10} | {'':>10} | {speedup:>8.2f}x  | {'':>10} | {'':>8} |")
+            print(
+                f"{'':<20} | {'Speedup':<10} | {'':>10} | {speedup:>8.2f}x  | {'':>10} | {'':>8} |"
+            )
 
         print("-" * 100)
 
@@ -322,7 +335,7 @@ def print_results(results_triton: list[BenchmarkResult], results_pytorch: list[B
     print("\nSUMMARY: Backward Pass Speedups (Triton vs PyTorch)")
     print("-" * 50)
     speedups = []
-    for rt, rp in zip(results_triton, results_pytorch):
+    for rt, rp in zip(results_triton, results_pytorch, strict=True):
         if rt.status == "success" and rp.status == "success" and rp.backward_ms > 0:
             speedup = rp.backward_ms / rt.backward_ms
             speedups.append((rt.config.name, speedup))
@@ -338,8 +351,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to benchmark on")
     parser.add_argument("--warmup", type=int, default=3, help="Number of warmup runs")
     parser.add_argument("--repeats", type=int, default=10, help="Number of timed runs")
-    parser.add_argument("--configs", type=str, default="all",
-                        help="Comma-separated config names or 'all'")
+    parser.add_argument(
+        "--configs", type=str, default="all", help="Comma-separated config names or 'all'"
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -367,7 +381,9 @@ def main():
     results_pytorch = []
 
     for config in configs:
-        print(f"\n--- {config.name}: batch={config.batch}, T={config.T}, K={config.K}, C={config.C} ---")
+        print(
+            f"\n--- {config.name}: batch={config.batch}, T={config.T}, K={config.K}, C={config.C} ---"
+        )
 
         # Clear cache between configs
         torch.cuda.empty_cache()

@@ -1,10 +1,20 @@
-"""Triton forward kernels for streaming Semi-CRF.
+r"""Triton forward kernels for streaming Semi-CRF.
 
 This module contains the Triton kernels for the forward pass (log and max semiring)
 and the launcher function that allocates buffers and dispatches the kernels.
-"""
 
-from typing import Tuple
+The kernels implement the Golden Rule optimization where edge potentials are
+computed on-the-fly from cumulative scores:
+
+.. math::
+    \text{edge}[c_{\text{dst}}, c_{\text{src}}] =
+    (\text{cum\_scores}[t+k, c_{\text{dst}}] - \text{cum\_scores}[t, c_{\text{dst}}])
+    + \text{duration\_bias}[k, c_{\text{dst}}]
+    + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
+
+Functions:
+    launch_streaming_triton_kernel: Main entry point for launching Triton forward kernels.
+"""
 
 import torch
 
@@ -24,7 +34,28 @@ except ImportError:
 
 
 def _next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 >= n."""
+    r"""_next_power_of_2(n) -> int
+
+    Return the smallest power of 2 greater than or equal to n.
+
+    This is used for padding tensor dimensions to powers of 2, which is
+    required for efficient Triton kernel execution.
+
+    Args:
+        n (int): Input value.
+
+    Returns:
+        int: Smallest power of 2 >= n.
+
+    Examples::
+
+        >>> _next_power_of_2(5)
+        8
+        >>> _next_power_of_2(8)
+        8
+        >>> _next_power_of_2(24)
+        32
+    """
     if n <= 0:
         return 1
     if n & (n - 1) == 0:
@@ -86,16 +117,21 @@ if HAS_TRITON:
         stride_ckpt_k,
         stride_ckpt_c,
     ):
-        """
-        Streaming Semi-CRF forward scan with Golden Rule edge computation.
+        r"""Streaming Semi-CRF forward scan with Golden Rule edge computation (log semiring).
 
-        Computes edge potentials on-the-fly from cumulative scores:
+        This Triton kernel computes the forward pass of the Semi-CRF using logsumexp
+        reductions. Edge potentials are computed on-the-fly from cumulative scores:
+
+        .. code-block:: text
+
             edge[c_dst, c_src] = (cum_scores[t+k, c_dst] - cum_scores[t, c_dst])
                                + duration_bias[k, c_dst]
                                + transition[c_src, c_dst]
 
-        Uses a ring buffer for alpha values (O(KC) memory).
+        Memory: Uses a ring buffer for alpha values with :math:`O(KC)` memory.
         Saves ring buffer checkpoints at regular intervals for backward pass.
+
+        One program is launched per batch element (grid size = batch_size).
         """
         NEG_INF: tl.constexpr = -1e9
 
@@ -242,7 +278,10 @@ if HAS_TRITON:
                 # For duration-dependent transitions, load transition[k] inside the loop
                 if HAS_DURATION_TRANSITIONS:
                     transition_block = tl.load(
-                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                        transition_ptr
+                        + k * stride_tr_k
+                        + c_dst_idx * stride_tr_dst
+                        + c_src_idx * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
                     )  # (C_PAD, C_PAD) - transition[k].T
@@ -297,7 +336,10 @@ if HAS_TRITON:
                     # Only save if checkpoint index is valid
                     save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
                     tl.store(
-                        ring_ckpt_base + ckpt_idx * stride_ckpt_n + k_save * stride_ckpt_k + c_idx * stride_ckpt_c,
+                        ring_ckpt_base
+                        + ckpt_idx * stride_ckpt_n
+                        + k_save * stride_ckpt_k
+                        + c_idx * stride_ckpt_c,
                         ring_val,
                         mask=save_mask,
                     )
@@ -360,9 +402,14 @@ if HAS_TRITON:
         stride_ckpt_k,
         stride_ckpt_c,
     ):
-        """
-        Streaming Semi-CRF forward scan with max semiring (Viterbi).
-        Same structure as log kernel but uses max instead of logsumexp.
+        r"""Streaming Semi-CRF forward scan with max semiring (Viterbi decoding).
+
+        Same structure as :func:`semi_crf_streaming_scan_kernel` but uses max
+        instead of logsumexp for reductions. This implements the Viterbi algorithm
+        for finding the most likely segmentation.
+
+        See :func:`semi_crf_streaming_scan_kernel` for detailed documentation of
+        parameters and the edge computation formula.
         """
         NEG_INF: tl.constexpr = -1e9
 
@@ -477,7 +524,10 @@ if HAS_TRITON:
                 # For duration-dependent transitions, load transition[k] inside the loop
                 if HAS_DURATION_TRANSITIONS:
                     transition_block = tl.load(
-                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                        transition_ptr
+                        + k * stride_tr_k
+                        + c_dst_idx * stride_tr_dst
+                        + c_src_idx * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
                     )  # (C_PAD, C_PAD) - transition[k].T
@@ -516,7 +566,10 @@ if HAS_TRITON:
                     )
                     save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
                     tl.store(
-                        ring_ckpt_base + ckpt_idx * stride_ckpt_n + k_save * stride_ckpt_k + c_idx * stride_ckpt_c,
+                        ring_ckpt_base
+                        + ckpt_idx * stride_ckpt_n
+                        + k_save * stride_ckpt_k
+                        + c_idx * stride_ckpt_c,
                         ring_val,
                         mask=save_mask,
                     )
@@ -542,25 +595,37 @@ if HAS_TRITON:
         checkpoint_interval: int = None,
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        """
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None) -> tuple[Tensor, Tensor, int]
+
         Launch the streaming Triton kernel with proper buffer allocation.
 
+        This function allocates the required buffers (ring buffer, checkpoints)
+        and dispatches the appropriate Triton kernel based on the semiring.
+
         Args:
-            cum_scores: (batch, T+1, C) cumulative projected scores
-            transition: (C, C) for static transitions, or (K, C, C) for duration-dependent (Phase 4A)
-            duration_bias: (K, C) duration-specific bias
-            lengths: (batch,) sequence lengths
-            K: max segment duration
-            semiring: "log" or "max"
-            checkpoint_interval: interval for saving ring buffer (default: sqrt(T*K))
-            proj_start: (batch, T, C) start boundary scores. Optional.
-            proj_end: (batch, T, C) end boundary scores. Optional.
+            cum_scores (Tensor): Cumulative projected scores of shape
+                :math:`(\text{batch}, T+1, C)`.
+            transition (Tensor): Transition scores of shape :math:`(C, C)` for
+                static transitions, or :math:`(K, C, C)` for duration-dependent.
+            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            K (int): Maximum segment duration.
+            semiring (str, optional): ``"log"`` or ``"max"``. Default: ``"log"``
+            checkpoint_interval (int, optional): Interval for saving ring buffer.
+                If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
+            proj_start (Tensor, optional): Start boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
+            proj_end (Tensor, optional): End boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
 
         Returns:
-            partition: (batch,) partition function values
-            ring_checkpoints: (batch, num_ckpts, K, C) saved ring buffer states
-            checkpoint_interval: actual interval used
+            tuple[Tensor, Tensor, int]: Tuple of:
+                - **partition** (Tensor): Partition function values of shape
+                  :math:`(\text{batch},)`.
+                - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
+                  :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+                - **checkpoint_interval** (int): Actual interval used.
         """
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
@@ -605,9 +670,7 @@ if HAS_TRITON:
         partition = torch.empty(batch, device=device, dtype=dtype)
 
         # Live ring buffer (will be L1/L2 cached for small K*C)
-        ring_buffer = torch.full(
-            (batch, K, C_PAD), NEG_INF, device=device, dtype=dtype
-        )
+        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # Checkpoint storage for backward pass
         ring_checkpoints = torch.full(
@@ -630,7 +693,11 @@ if HAS_TRITON:
 
         # Launch kernel
         grid = (batch,)
-        kernel = semi_crf_streaming_scan_kernel if semiring == "log" else semi_crf_streaming_scan_kernel_max
+        kernel = (
+            semi_crf_streaming_scan_kernel
+            if semiring == "log"
+            else semi_crf_streaming_scan_kernel_max
+        )
         kernel[grid](
             cum_scores,
             transition,
