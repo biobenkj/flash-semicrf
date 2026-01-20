@@ -41,7 +41,7 @@ if HAS_TRITON:
     def semi_crf_streaming_scan_kernel(
         # Inputs
         cum_scores_ptr,  # (batch, T+1, C) - cumulative projected scores
-        transition_ptr,  # (C, C) - transition matrix
+        transition_ptr,  # (C, C) or (K, C, C) - transition matrix
         duration_bias_ptr,  # (K, C) - duration-specific bias
         lengths_ptr,  # (batch,) - sequence lengths
         # Boundary projections (optional, may be null if HAS_BOUNDARIES=False)
@@ -60,11 +60,13 @@ if HAS_TRITON:
         CHECKPOINT_INTERVAL: tl.constexpr,  # interval for saving ring buffer
         NUM_CKPTS: tl.constexpr,  # number of checkpoints
         HAS_BOUNDARIES: tl.constexpr,  # whether boundary projections are provided
+        HAS_DURATION_TRANSITIONS: tl.constexpr,  # whether transitions are (K, C, C)
         # Strides for cum_scores (batch, T+1, C)
         stride_cs_b,
         stride_cs_t,
         stride_cs_c,
-        # Strides for transition (C, C)
+        # Strides for transition (C, C) or (K, C, C)
+        stride_tr_k,  # Only used if HAS_DURATION_TRANSITIONS
         stride_tr_src,
         stride_tr_dst,
         # Strides for duration_bias (K, C)
@@ -125,13 +127,16 @@ if HAS_TRITON:
             proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
 
         # Load transition matrix into registers: (C_PAD, C_PAD)
+        # For static transitions (C, C): load once here
+        # For duration-dependent (K, C, C): load inside k-loop
         # transition[c_src, c_dst] -> we need transition.T for edge computation
         # So we load transition_ptr[c_dst, c_src] effectively
-        transition_block = tl.load(
-            transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
-            mask=c_mask_2d,
-            other=0.0,
-        )  # (C_PAD, C_PAD) - this is transition.T
+        if not HAS_DURATION_TRANSITIONS:
+            transition_block = tl.load(
+                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                mask=c_mask_2d,
+                other=0.0,
+            )  # (C_PAD, C_PAD) - this is transition.T
 
         # Initialize ring buffer: alpha[0, :] = 0.0, rest = NEG_INF
         # Ring buffer layout: ring[k, c] where k = position % K
@@ -232,7 +237,16 @@ if HAS_TRITON:
 
                 # Edge block: edge[c_dst, c_src] = segment_score[c_dst] + transition[c_src, c_dst]
                 # segment_score is (C_PAD,), expand to (C_PAD, 1) for c_dst
-                # transition_block is already (C_PAD, C_PAD) as transition.T
+                # transition_block is (C_PAD, C_PAD) as transition.T
+
+                # For duration-dependent transitions, load transition[k] inside the loop
+                if HAS_DURATION_TRANSITIONS:
+                    transition_block = tl.load(
+                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                        mask=c_mask_2d,
+                        other=0.0,
+                    )  # (C_PAD, C_PAD) - transition[k].T
+
                 edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
 
                 # === Compute scores and reduction ===
@@ -309,7 +323,7 @@ if HAS_TRITON:
     def semi_crf_streaming_scan_kernel_max(
         # Same signature as log kernel
         cum_scores_ptr,
-        transition_ptr,
+        transition_ptr,  # (C, C) or (K, C, C)
         duration_bias_ptr,
         lengths_ptr,
         # Boundary projections (optional)
@@ -326,9 +340,11 @@ if HAS_TRITON:
         CHECKPOINT_INTERVAL: tl.constexpr,
         NUM_CKPTS: tl.constexpr,
         HAS_BOUNDARIES: tl.constexpr,
+        HAS_DURATION_TRANSITIONS: tl.constexpr,  # whether transitions are (K, C, C)
         stride_cs_b,
         stride_cs_t,
         stride_cs_c,
+        stride_tr_k,  # Only used if HAS_DURATION_TRANSITIONS
         stride_tr_src,
         stride_tr_dst,
         stride_db_k,
@@ -372,11 +388,13 @@ if HAS_TRITON:
             proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
             proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
 
-        transition_block = tl.load(
-            transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
-            mask=c_mask_2d,
-            other=0.0,
-        )
+        # Load static transitions once (duration-dependent loaded inside k-loop)
+        if not HAS_DURATION_TRANSITIONS:
+            transition_block = tl.load(
+                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                mask=c_mask_2d,
+                other=0.0,
+            )
 
         # Initialize ring buffer
         # Note: Use tl.range (not static_range) to avoid compile-time explosion for large K
@@ -456,6 +474,14 @@ if HAS_TRITON:
                     )
                     segment_score = segment_score + start_score + end_score
 
+                # For duration-dependent transitions, load transition[k] inside the loop
+                if HAS_DURATION_TRANSITIONS:
+                    transition_block = tl.load(
+                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                        mask=c_mask_2d,
+                        other=0.0,
+                    )  # (C_PAD, C_PAD) - transition[k].T
+
                 edge_block = segment_score[:, None] + transition_block
 
                 scores = alpha_prev[None, :] + edge_block
@@ -522,7 +548,7 @@ if HAS_TRITON:
 
         Args:
             cum_scores: (batch, T+1, C) cumulative projected scores
-            transition: (C, C) transition matrix
+            transition: (C, C) for static transitions, or (K, C, C) for duration-dependent (Phase 4A)
             duration_bias: (K, C) duration-specific bias
             lengths: (batch,) sequence lengths
             K: max segment duration
@@ -554,6 +580,9 @@ if HAS_TRITON:
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
+
+        # Determine if duration-dependent transitions (Phase 4A)
+        has_duration_transitions = transition.ndim == 3
 
         # Ensure inputs are contiguous
         cum_scores = cum_scores.contiguous()
@@ -587,7 +616,14 @@ if HAS_TRITON:
 
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
-        stride_tr_src, stride_tr_dst = transition.stride()
+
+        # Handle transition strides for both (C, C) and (K, C, C)
+        if has_duration_transitions:
+            stride_tr_k, stride_tr_src, stride_tr_dst = transition.stride()
+        else:
+            stride_tr_k = 0  # Not used for static transitions
+            stride_tr_src, stride_tr_dst = transition.stride()
+
         stride_db_k, stride_db_c = duration_bias.stride()
         stride_ring_b, stride_ring_k, stride_ring_c = ring_buffer.stride()
         stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_checkpoints.stride()
@@ -613,9 +649,11 @@ if HAS_TRITON:
             checkpoint_interval,
             num_checkpoints,
             has_boundaries,  # HAS_BOUNDARIES constexpr
+            has_duration_transitions,  # HAS_DURATION_TRANSITIONS constexpr
             stride_cs_b,
             stride_cs_t,
             stride_cs_c,
+            stride_tr_k,
             stride_tr_src,
             stride_tr_dst,
             stride_db_k,

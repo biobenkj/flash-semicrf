@@ -154,7 +154,7 @@ def benchmark_scale(
             duration_bias.grad = None
             torch.cuda.synchronize()
 
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats(device)
 
         # Timed runs
         forward_times = []
@@ -182,7 +182,7 @@ def benchmark_scale(
             transition.grad = None
             duration_bias.grad = None
 
-        peak_memory = torch.cuda.max_memory_allocated() / (1024**3)
+        peak_memory = torch.cuda.max_memory_allocated(device) / (1024**3)
 
         avg_forward = sum(forward_times) / len(forward_times)
         avg_backward = sum(backward_times) / len(backward_times)

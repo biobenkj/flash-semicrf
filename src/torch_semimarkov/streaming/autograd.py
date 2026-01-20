@@ -88,11 +88,27 @@ class SemiCRFStreaming(torch.autograd.Function):
         grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end = grads
 
         # Scale by upstream gradient
+        #
+        # Per-batch parameters (cum_scores, proj_start, proj_end):
+        #   Scale each batch element by its grad_output[b]
+        #
+        # Shared parameters (transition, duration_bias):
+        #   These now come as per-batch tensors: (batch, C, C) or (batch, K, C, C)
+        #   We apply weighted sum: grad = Σ_b[grad_output[b] × grad_per_batch[b]]
+        #   Using einsum for memory efficiency (avoids large intermediate tensor)
         batch = grad_output.shape[0]
         scale = grad_output.view(batch, 1, 1)
         grad_cum_scores = grad_cum_scores * scale
-        grad_transition = grad_transition * grad_output.sum()
-        grad_duration_bias = grad_duration_bias * grad_output.sum()
+
+        # Shared parameters: weighted sum via einsum (memory-efficient)
+        # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
+        if grad_transition.ndim == 3:  # (batch, C, C) - static transitions
+            grad_transition = torch.einsum('bij, b -> ij', grad_transition, grad_output)
+        else:  # (batch, K, C, C) - duration-dependent
+            grad_transition = torch.einsum('bkij, b -> kij', grad_transition, grad_output)
+
+        grad_duration_bias = torch.einsum('bkc, b -> kc', grad_duration_bias, grad_output)
+
         if grad_proj_start is not None:
             grad_proj_start = grad_proj_start * scale
         if grad_proj_end is not None:
@@ -222,7 +238,8 @@ def semi_crf_streaming_forward(
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
             Must be float32 and zero-centered before cumsum for numerical stability.
-        transition: Label transition scores of shape (C, C).
+        transition: Label transition scores of shape (C, C) for static transitions,
+            or (K, C, C) for duration-dependent transitions (Phase 4A).
             ``transition[c_src, c_dest]`` is the score for c_src → c_dest.
         duration_bias: Duration-specific label bias of shape (K, C).
             Required to compensate for sum-pooling length bias.

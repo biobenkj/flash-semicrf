@@ -58,7 +58,8 @@ def compute_edge_block_golden_rule(
 
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
-        transition: Label transition scores of shape (C, C).
+        transition: Label transition scores of shape (C, C) for static transitions,
+            or (K, C, C) for duration-dependent transitions (Phase 4A).
         duration_bias: Duration-specific label bias of shape (K, C).
         t: Segment start position.
         k: Segment duration.
@@ -84,7 +85,14 @@ def compute_edge_block_golden_rule(
     # segment_score: (batch, C) -> unsqueeze to (batch, C, 1) for c_dest
     # transition: (C_src, C_dest) -> transpose to (C_dest, C_src) -> (1, C_dest, C_src)
     # Result: (batch, C_dest, C_src)
-    edge_block = segment_score.unsqueeze(-1) + transition.T.unsqueeze(0)
+    if transition.ndim == 2:
+        # Static transitions: (C, C)
+        trans_k = transition
+    else:
+        # Duration-dependent transitions: (K, C, C) - index by k
+        trans_k = transition[k]
+
+    edge_block = segment_score.unsqueeze(-1) + trans_k.T.unsqueeze(0)
 
     return edge_block
 
@@ -107,7 +115,8 @@ def semi_crf_streaming_forward_pytorch(
 
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
-        transition: Label transition scores of shape (C, C).
+        transition: Label transition scores of shape (C, C) for static transitions,
+            or (K, C, C) for duration-dependent transitions (Phase 4A).
         duration_bias: Duration-specific label bias of shape (K, C).
         lengths: Sequence lengths of shape (batch,).
         K: Maximum segment duration.
@@ -254,7 +263,8 @@ def semi_crf_streaming_backward_pytorch(
 
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
-        transition: Label transition scores of shape (C, C).
+        transition: Label transition scores of shape (C, C) for static transitions,
+            or (K, C, C) for duration-dependent transitions (Phase 4A).
         duration_bias: Duration-specific label bias of shape (K, C).
         lengths: Sequence lengths of shape (batch,).
         K: Maximum segment duration.
@@ -277,9 +287,15 @@ def semi_crf_streaming_backward_pytorch(
     effective_interval = max(checkpoint_interval, K)
 
     # Initialize gradient accumulators
+    # Note: grad_transition and grad_duration_bias are per-batch to allow proper
+    # weighting by grad_output in the autograd wrapper. The caller (autograd.py)
+    # will apply einsum to compute: grad = Σ_b[grad_output[b] × grad_per_batch[b]]
     grad_cum_scores = torch.zeros_like(cum_scores)
-    grad_transition = torch.zeros_like(transition)
-    grad_duration_bias = torch.zeros_like(duration_bias)
+    if transition.ndim == 2:
+        grad_transition = torch.zeros(batch, C, C, device=device, dtype=dtype)
+    else:
+        grad_transition = torch.zeros(batch, K, C, C, device=device, dtype=dtype)
+    grad_duration_bias = torch.zeros(batch, K, C, device=device, dtype=dtype)
     grad_proj_start = torch.zeros_like(proj_start) if proj_start is not None else None
     grad_proj_end = torch.zeros_like(proj_end) if proj_end is not None else None
 
@@ -406,11 +422,17 @@ def semi_crf_streaming_backward_pytorch(
                 # grad_cum_scores[t, c_dest] -= sum over c_src of marginal[c_dest, c_src]
                 grad_cum_scores[:, t, :] -= marginal_sum_dest
 
-                # grad_transition: sum over batch, positions
-                grad_transition += marginal.sum(dim=0).T  # (C_src, C_dest)
+                # grad_transition: per-batch accumulation (don't sum over batch)
+                # marginal is (batch, C_dest, C_src), transpose to (batch, C_src, C_dest)
+                # For duration-dependent transitions (K, C, C), index by k
+                if transition.ndim == 2:
+                    grad_transition += marginal.transpose(-1, -2)  # (batch, C_src, C_dest)
+                else:
+                    grad_transition[:, k] += marginal.transpose(-1, -2)  # (batch, C_src, C_dest) at index k
 
-                # grad_duration_bias[k, c_dest] += sum over batch, c_src of marginal[c_dest, c_src]
-                grad_duration_bias[k, :] += marginal.sum(dim=(0, -1))  # (C_dest,)
+                # grad_duration_bias: per-batch accumulation
+                # marginal.sum(dim=-1) sums over C_src -> (batch, C_dest)
+                grad_duration_bias[:, k, :] += marginal.sum(dim=-1)  # (batch, C_dest)
 
                 # grad_proj_start, grad_proj_end
                 if grad_proj_start is not None:

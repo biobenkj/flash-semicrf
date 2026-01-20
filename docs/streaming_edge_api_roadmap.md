@@ -599,7 +599,7 @@ python3 benchmarks/benchmark_streaming_scale.py
 
 ### Phase 4: Enhanced Scoring (Duration + Boundary Contrast)
 
-**Status**: ✅ Phase 4B Complete (Triton boundary support) | 🔲 Phase 4A Not Started
+**Status**: ✅ Phase 4A Complete | ✅ Phase 4B Complete
 
 ---
 
@@ -609,14 +609,41 @@ python3 benchmarks/benchmark_streaming_scale.py
 1. Duration-dependent scoring (exons have typical length distributions)
 2. Boundary contrast features (splice sites are defined by *transitions*, not positions)
 
-#### 4A: Duration-Dependent Scoring
+#### 4A: Duration-Dependent Scoring ✅ COMPLETE
+
+**Status**: Implemented on 2025-01-20
 
 **Motivation**: Different labels have different typical durations. Exons: 50-300bp, Introns: 100-10,000bp.
 
-**Tasks**:
-- [ ] Extend API to accept `(K, C, C)` duration-dependent transitions
-- [ ] Add low-rank factorization option to prevent overfitting: `transition[k] = base + U[k] @ V[k].T`
-- [ ] Update kernels to use duration-indexed transitions
+**Completed Tasks**:
+- [x] Extend API to accept `(K, C, C)` duration-dependent transitions
+- [x] Update kernels to use duration-indexed transitions
+- [ ] Add low-rank factorization option to prevent overfitting (deferred to future enhancement)
+
+**Implementation Summary**:
+- Added `HAS_DURATION_TRANSITIONS: tl.constexpr` compile-time flag for zero overhead when using static transitions
+- For static `(C, C)` transitions: loads once outside k-loop (existing efficient behavior)
+- For duration-dependent `(K, C, C)` transitions: loads `transition[k]` inside k-loop
+- Gradient workspace expands from `(batch, C, C)` to `(batch, K, C, C)` for duration-dependent case
+- Maintains full backward compatibility with existing code using static transitions
+
+**Files Modified**:
+- `src/torch_semimarkov/streaming/pytorch_reference.py` - Reference implementation with `transition.ndim` check
+- `src/torch_semimarkov/streaming/triton_forward.py` - Forward kernels (log and max semirings)
+- `src/torch_semimarkov/streaming/triton_backward.py` - Backward kernel with k-indexed gradients
+- `src/torch_semimarkov/streaming/autograd.py` - Autograd integration (docstring update)
+- `tests/test_streaming_triton.py` - Added `TestDurationDependentTransitions` test class
+
+**Usage Example**:
+```python
+# Static transitions (existing behavior)
+transition = torch.randn(C, C)  # (C, C)
+partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
+
+# Duration-dependent transitions (new in Phase 4A)
+transition_kcc = torch.randn(K, C, C)  # (K, C, C) - different transition per duration k
+partition = semi_crf_streaming_forward(cum_scores, transition_kcc, duration_bias, lengths, K)
+```
 
 **Note**: `duration_bias` (K, C) is now in Phase 2 (core) since it's required for sum-pooling.
 
@@ -925,13 +952,14 @@ benchmarks/
 | 2 | Triton forward kernel | 3-4 days | ✅ COMPLETED |
 | 2b | Triton backward kernel | 4-5 days | ✅ COMPLETED |
 | 3 | Performance optimizations | 2-3 days | ✅ Core complete (pending HPC validation) |
-| 4 | Duration-dependent scoring | 2 days | 🔲 Pending |
+| 4A | Duration-dependent transitions | 1 day | ✅ COMPLETED |
+| 4B | Boundary contrast features | 1 day | ✅ COMPLETED |
 | 5 | Integration layer | 2-3 days | 🔲 Pending |
 | 6 | Testing and validation | 2-3 days | 🔲 Pending |
 
-**Progress: ~70% complete (Phases 1, 2, 2b, 3 core done)**
+**Progress: ~80% complete (Phases 1, 2, 2b, 3 core, 4A, 4B done)**
 
-**Remaining effort: ~7-9 days**
+**Remaining effort: ~5-6 days**
 
 ---
 
@@ -964,6 +992,15 @@ benchmarks/
 
 ## Changelog
 
+- **2025-01-20**: Completed Phase 4A (Duration-dependent transitions):
+  - Extended transition API to support both `(C, C)` static and `(K, C, C)` duration-dependent shapes
+  - Added `HAS_DURATION_TRANSITIONS: tl.constexpr` for compile-time conditional code paths
+  - Updated Triton forward kernels (log and max) with k-indexed transition loading
+  - Updated Triton backward kernel with expanded gradient workspace `(batch, K, C, C)`
+  - Full backward compatibility - existing static transition code works unchanged
+  - Added `TestDurationDependentTransitions` test class with 8 test methods
+- **2025-01-20**: Completed Phase 4B (Boundary projections):
+  - Added `proj_start` and `proj_end` support to Triton forward and backward kernels
 - **2025-01-20**: Completed Phase 3 core optimizations:
   - Register-based local accumulation for `grad_transition` (reduces atomic contention from O(batch×T×K) to O(batch))
   - Added `@triton.autotune` to all kernels (forward log, forward max, backward)
@@ -977,5 +1014,5 @@ benchmarks/
 ---
 
 *Created: 2025-01-18*
-*Last Updated: 2025-01-20*
+*Last Updated: 2025-01-20 (Phase 4A complete)*
 *Target: torch-semimarkov v2.0 with streaming edge API*

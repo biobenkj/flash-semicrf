@@ -29,7 +29,7 @@ if HAS_TRITON:
     def semi_crf_streaming_backward_kernel(
         # Inputs (from forward)
         cum_scores_ptr,  # (batch, T+1, C)
-        transition_ptr,  # (C, C)
+        transition_ptr,  # (C, C) or (K, C, C)
         duration_bias_ptr,  # (K, C)
         lengths_ptr,  # (batch,)
         log_Z_ptr,  # (batch,) - partition function values
@@ -43,7 +43,7 @@ if HAS_TRITON:
         beta_ring_ptr,  # (batch, K, C_PAD) - beta ring buffer
         # Outputs (gradients)
         grad_cum_scores_ptr,  # (batch, T+1, C)
-        grad_tr_workspace_ptr,  # (batch, C, C) - per-batch accumulator, no atomic needed
+        grad_tr_workspace_ptr,  # (batch, C, C) or (batch, K, C, C) - per-batch accumulator
         grad_db_workspace_ptr,  # (batch, K, C) - per-batch accumulator, no atomic needed
         grad_proj_start_ptr,  # (batch, T, C) - gradient for proj_start (only if HAS_BOUNDARIES)
         grad_proj_end_ptr,  # (batch, T, C) - gradient for proj_end (only if HAS_BOUNDARIES)
@@ -57,11 +57,13 @@ if HAS_TRITON:
         NUM_CKPTS: tl.constexpr,
         SEGMENT_SIZE: tl.constexpr,  # = CHECKPOINT_INTERVAL + K
         HAS_BOUNDARIES: tl.constexpr,  # whether boundary projections are provided
+        HAS_DURATION_TRANSITIONS: tl.constexpr,  # whether transitions are (K, C, C)
         # Strides for cum_scores (batch, T+1, C)
         stride_cs_b,
         stride_cs_t,
         stride_cs_c,
-        # Strides for transition (C, C)
+        # Strides for transition (C, C) or (K, C, C)
+        stride_tr_k,  # Only used if HAS_DURATION_TRANSITIONS
         stride_tr_src,
         stride_tr_dst,
         # Strides for duration_bias (K, C)
@@ -88,8 +90,9 @@ if HAS_TRITON:
         stride_gcs_b,
         stride_gcs_t,
         stride_gcs_c,
-        # Strides for grad_tr_workspace (batch, C, C)
+        # Strides for grad_tr_workspace (batch, C, C) or (batch, K, C, C)
         stride_gtw_b,
+        stride_gtw_k,  # Only used if HAS_DURATION_TRANSITIONS
         stride_gtw_src,
         stride_gtw_dst,
         # Strides for grad_db_workspace (batch, K, C)
@@ -165,12 +168,14 @@ if HAS_TRITON:
             grad_ps_base = grad_proj_start_ptr + batch_idx * stride_ps_b
             grad_pe_base = grad_proj_end_ptr + batch_idx * stride_ps_b
 
-        # Load transition matrix into registers
-        transition_block = tl.load(
-            transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
-            mask=c_mask_2d,
-            other=0.0,
-        )  # (C_PAD, C_PAD) - this is transition.T
+        # Load transition matrix into registers (only for static transitions)
+        # Duration-dependent transitions are loaded inside the k-loops
+        if not HAS_DURATION_TRANSITIONS:
+            transition_block = tl.load(
+                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                mask=c_mask_2d,
+                other=0.0,
+            )  # (C_PAD, C_PAD) - this is transition.T
 
         # Initialize beta ring buffer at final positions
         final_pos = seq_len - 1
@@ -284,6 +289,14 @@ if HAS_TRITON:
                                     )
                                     segment_score = segment_score + start_score + end_score
 
+                                # Load k-indexed transition for duration-dependent case
+                                if HAS_DURATION_TRANSITIONS:
+                                    transition_block = tl.load(
+                                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                                        mask=c_mask_2d,
+                                        other=0.0,
+                                    )
+
                                 edge_block = segment_score[:, None] + transition_block
 
                                 scores = alpha_prev[None, :] + edge_block
@@ -374,6 +387,14 @@ if HAS_TRITON:
                                     )
                                     segment_score = segment_score + start_score + end_score
 
+                                # Load k-indexed transition for duration-dependent case
+                                if HAS_DURATION_TRANSITIONS:
+                                    transition_block = tl.load(
+                                        transition_ptr + k * stride_tr_k + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                                        mask=c_mask_2d,
+                                        other=0.0,
+                                    )
+
                                 edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
 
                                 # === Compute marginal ===
@@ -413,10 +434,15 @@ if HAS_TRITON:
                                 # grad_transition: write to per-batch workspace (unscaled marginal)
                                 # marginal is (C_dst, C_src), grad_transition[c_src, c_dst] += marginal[c_dst, c_src]
                                 marginal_T = tl.trans(marginal)  # (C_src, C_dst) = (C_PAD, C_PAD)
-                                # Compute 2D offsets for workspace: grad_tr_workspace[batch, src, dst]
+                                # Compute 2D offsets for workspace
+                                # For duration-dependent: grad_tr_workspace[batch, k, src, dst]
+                                # For static: grad_tr_workspace[batch, src, dst]
                                 # c_dst_idx is (C_PAD, 1) for src, c_src_idx is (1, C_PAD) for dst
-                                tr_offsets_ws = c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
-                                # atomic_add still needed within batch (multiple t,k iterations add to same location)
+                                if HAS_DURATION_TRANSITIONS:
+                                    tr_offsets_ws = k * stride_gtw_k + c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                else:
+                                    tr_offsets_ws = c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                # atomic_add still needed within batch (multiple t iterations add to same location)
                                 # but no inter-batch contention since each batch has its own workspace slice
                                 tl.atomic_add(grad_tr_ws_base + tr_offsets_ws, marginal_T, mask=c_mask_2d)
 
@@ -487,7 +513,7 @@ if HAS_TRITON:
 
         Args:
             cum_scores: (batch, T+1, C)
-            transition: (C, C)
+            transition: (C, C) for static, or (K, C, C) for duration-dependent (Phase 4A)
             duration_bias: (K, C)
             lengths: (batch,)
             log_Z: (batch,) partition values from forward
@@ -499,7 +525,7 @@ if HAS_TRITON:
 
         Returns:
             grad_cum_scores: (batch, T+1, C)
-            grad_transition: (C, C)
+            grad_transition: (C, C) or (K, C, C) for duration-dependent
             grad_duration_bias: (K, C)
             grad_proj_start: (batch, T, C) or None if boundaries not provided
             grad_proj_end: (batch, T, C) or None if boundaries not provided
@@ -518,6 +544,9 @@ if HAS_TRITON:
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
+
+        # Determine if duration-dependent transitions (Phase 4A)
+        has_duration_transitions = transition.ndim == 3
 
         # Ensure contiguous
         cum_scores = cum_scores.contiguous()
@@ -565,23 +594,41 @@ if HAS_TRITON:
 
         # Allocate gradient outputs
         grad_cum_scores = torch.zeros(batch, T_plus_1, C, device=device, dtype=dtype)
-        grad_transition = torch.zeros(C, C, device=device, dtype=dtype)
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=dtype)
 
         # Allocate per-batch workspace buffers to avoid atomic add contention
         # Each batch element accumulates to its own slice, then we sum after kernel
-        grad_tr_workspace = torch.zeros(batch, C, C, device=device, dtype=dtype)
+        if has_duration_transitions:
+            # Duration-dependent: (batch, K, C, C)
+            grad_tr_workspace = torch.zeros(batch, K, C, C, device=device, dtype=dtype)
+        else:
+            # Static: (batch, C, C)
+            grad_tr_workspace = torch.zeros(batch, C, C, device=device, dtype=dtype)
         grad_db_workspace = torch.zeros(batch, K, C, device=device, dtype=dtype)
 
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
-        stride_tr_src, stride_tr_dst = transition.stride()
+
+        # Handle transition strides for both (C, C) and (K, C, C)
+        if has_duration_transitions:
+            stride_tr_k, stride_tr_src, stride_tr_dst = transition.stride()
+        else:
+            stride_tr_k = 0  # Not used for static transitions
+            stride_tr_src, stride_tr_dst = transition.stride()
+
         stride_db_k, stride_db_c = duration_bias.stride()
         stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_ckpts_padded.stride()
         stride_ab_b, stride_ab_t, stride_ab_c = alpha_buffer.stride()
         stride_br_b, stride_br_k, stride_br_c = beta_ring.stride()
         stride_gcs_b, stride_gcs_t, stride_gcs_c = grad_cum_scores.stride()
-        stride_gtw_b, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+
+        # Handle grad_tr_workspace strides for both shapes
+        if has_duration_transitions:
+            stride_gtw_b, stride_gtw_k, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+        else:
+            stride_gtw_k = 0  # Not used for static transitions
+            stride_gtw_b, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+
         stride_gdbw_b, stride_gdbw_k, stride_gdbw_c = grad_db_workspace.stride()
 
         # Use actual gradients or dummies for kernel call
@@ -616,9 +663,11 @@ if HAS_TRITON:
             num_checkpoints,
             segment_size,
             has_boundaries,  # HAS_BOUNDARIES constexpr
+            has_duration_transitions,  # HAS_DURATION_TRANSITIONS constexpr
             stride_cs_b,
             stride_cs_t,
             stride_cs_c,
+            stride_tr_k,
             stride_tr_src,
             stride_tr_dst,
             stride_db_k,
@@ -640,6 +689,7 @@ if HAS_TRITON:
             stride_gcs_t,
             stride_gcs_c,
             stride_gtw_b,
+            stride_gtw_k,
             stride_gtw_src,
             stride_gtw_dst,
             stride_gdbw_b,
@@ -647,28 +697,29 @@ if HAS_TRITON:
             stride_gdbw_c,
         )
 
-        # Sum workspace buffers across batch dimension to get final shared gradients
-        grad_transition = grad_tr_workspace.sum(dim=0)
-        grad_duration_bias = grad_db_workspace.sum(dim=0)
+        # Compute weighted sum of per-batch gradients for shared parameters.
+        #
+        # Correct gradient semantics for shared parameters:
+        #   grad_θ = Σ_b[grad_output[b] × Σ_{t,k}(marginal[b,t,k])]
+        #
+        # NOT the buggy formula:
+        #   grad_θ = Σ_{b,t,k}(marginal[b,t,k]) × Σ_b(grad_output[b])  # WRONG!
+        #
+        # The difference matters when grad_output varies across batch elements
+        # (e.g., masked sequences, weighted losses). With uniform grad_output=[1,1,...],
+        # both formulas happen to give the same result, which is why tests using
+        # .sum().backward() didn't catch the bug.
+        #
+        # We use einsum for memory efficiency: it fuses the multiply + reduce
+        # without creating a large intermediate tensor. For K=1024, C=64, batch=16,
+        # the naive broadcast approach would allocate ~268MB just to sum immediately.
+        #
+        # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
+        if has_duration_transitions:
+            grad_transition = torch.einsum('bkij, b -> kij', grad_tr_workspace, grad_output)
+        else:
+            grad_transition = torch.einsum('bij, b -> ij', grad_tr_workspace, grad_output)
 
-        # Scale shared parameter gradients by grad_output.sum()
-        #
-        # BUG FIX: This is critical for correctness!
-        #
-        # PyTorch backward semantics for shared parameters:
-        #   grad_transition = sum_{b,t,k}(marginal) * grad_output.sum()
-        #
-        # The kernel accumulates unscaled marginals via atomic_add across all batch elements.
-        # We then scale by grad_output.sum() here (NOT per-element grad_output[b]).
-        #
-        # Without this fix, when batch=2 and grad_output=[1,1]:
-        #   - Triton computed: sum(marginals) * 1 = sum(marginals)
-        #   - PyTorch computed: sum(marginals) * 2 = 2 * sum(marginals)
-        #   - Result: factor of 2 error (0.5 relative difference)
-        #
-        # See kernel docstring for full explanation of the scaling semantics.
-        grad_output_sum = grad_output.sum()
-        grad_transition = grad_transition * grad_output_sum
-        grad_duration_bias = grad_duration_bias * grad_output_sum
+        grad_duration_bias = torch.einsum('bkc, b -> kc', grad_db_workspace, grad_output)
 
         return grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end
