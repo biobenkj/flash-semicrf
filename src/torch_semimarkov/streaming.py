@@ -850,19 +850,13 @@ if HAS_TRITON:
                                     mask=c_mask,
                                 )
 
-                                # grad_transition: use vectorized atomic adds
+                                # grad_transition: use 2D atomic add
                                 # marginal is (C_dst, C_src), grad_transition[c_src, c_dst] += marginal[c_dst, c_src]
-                                # We transpose by iterating c_dst in outer, c_src in inner
-                                marginal_T = tl.trans(marginal)  # (C_src, C_dst)
-                                for c_s in tl.static_range(0, C_PAD):
-                                    if c_s < C:
-                                        grad_tr_row = marginal_T[c_s, :]  # (C_PAD,) for c_dst
-                                        grad_tr_row = tl.where(c_idx < C, grad_tr_row, 0.0)
-                                        tl.atomic_add(
-                                            grad_transition_ptr + c_s * stride_tr_src + c_idx * stride_tr_dst,
-                                            grad_tr_row,
-                                            mask=c_idx < C,
-                                        )
+                                marginal_T = tl.trans(marginal)  # (C_src, C_dst) = (C_PAD, C_PAD)
+                                # Compute 2D offsets: grad_transition[row, col] at row * stride_tr_src + col * stride_tr_dst
+                                # c_dst_idx is (C_PAD, 1) serving as row indices, c_src_idx is (1, C_PAD) as col indices
+                                tr_offsets = c_dst_idx * stride_tr_src + c_src_idx * stride_tr_dst
+                                tl.atomic_add(grad_transition_ptr + tr_offsets, marginal_T, mask=c_mask_2d)
 
                                 # grad_duration_bias[k, c_dst] += sum over c_src
                                 tl.atomic_add(
