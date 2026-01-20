@@ -668,240 +668,234 @@ if HAS_TRITON:
             if seg_end > T:
                 seg_end = T
 
-            # Skip segments beyond sequence length
-            if seg_start >= seq_len - 1:
-                continue
+            # Only process segments within sequence length
+            if seg_start < seq_len - 1:
+                # === Phase 1: Recompute alpha for this segment ===
+                # Load ring buffer state from checkpoint
+                # Then recompute forward through the segment
 
-            # === Phase 1: Recompute alpha for this segment ===
-            # Load ring buffer state from checkpoint
-            # Then recompute forward through the segment
-
-            # Initialize alpha from checkpoint (stores ring buffer state at seg_start)
-            for k_slot in tl.static_range(0, K):
-                alpha_val = tl.load(
-                    ring_ckpt_base + ckpt_idx * stride_ckpt_n +
-                    k_slot * stride_ckpt_k + c_idx * stride_ckpt_c,
-                    mask=c_mask,
-                    other=NEG_INF,
-                )
-                # Store alpha[seg_start + k_slot - (seg_start % K)] if valid
-                # For simplicity, store at position 0 for initial ring state
-                if k_slot == seg_start % K:
-                    tl.store(
-                        alpha_buf_base + 0 * stride_ab_t + c_idx * stride_ab_c,
-                        alpha_val,
-                        mask=c_mask,
-                    )
-
-            # Recompute alpha values from seg_start+1 to seg_end
-            for local_t in range(1, SEGMENT_SIZE):
-                t = seg_start + local_t
-                if t >= seg_end or t >= seq_len:
-                    continue
-
-                alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
-
-                # Loop over valid durations
-                for k in tl.static_range(1, K):
-                    start_pos = t - k
-                    if start_pos < 0:
-                        continue
-
-                    # Get alpha_prev - either from buffer or checkpoint
-                    local_start = start_pos - seg_start
-                    if local_start >= 0 and local_start < SEGMENT_SIZE:
-                        alpha_prev = tl.load(
-                            alpha_buf_base + local_start * stride_ab_t + c_idx * stride_ab_c,
-                            mask=c_mask,
-                            other=NEG_INF,
-                        )
-                    else:
-                        # Need to get from checkpoint
-                        prev_ckpt = start_pos // CHECKPOINT_INTERVAL
-                        prev_ring_idx = start_pos % K
-                        if prev_ckpt < NUM_CKPTS:
-                            alpha_prev = tl.load(
-                                ring_ckpt_base + prev_ckpt * stride_ckpt_n +
-                                prev_ring_idx * stride_ckpt_k + c_idx * stride_ckpt_c,
-                                mask=c_mask,
-                                other=NEG_INF,
-                            )
-                        else:
-                            alpha_prev = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
-
-                    # Compute edge on-the-fly
-                    cum_end = tl.load(
-                        cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    cum_start = tl.load(
-                        cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    content_score = cum_end - cum_start
-
-                    dur_bias = tl.load(
-                        duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    segment_score = content_score + dur_bias
-                    edge_block = segment_score[:, None] + transition_block
-
-                    scores = alpha_prev[None, :] + edge_block
-                    scores = tl.where(c_mask_2d, scores, NEG_INF)
-
-                    # Logsumexp over c_src
-                    max_scores = tl.max(scores, axis=1)
-                    score_for_k = max_scores + tl.log(
-                        tl.sum(tl.exp(scores - max_scores[:, None]), axis=1) + 1e-10
-                    )
-                    score_for_k = tl.where(c_mask, score_for_k, NEG_INF)
-
-                    # Accumulate via logsumexp
-                    max_alpha = tl.maximum(alpha_t, score_for_k)
-                    alpha_t = max_alpha + tl.log(
-                        tl.exp(alpha_t - max_alpha) + tl.exp(score_for_k - max_alpha) + 1e-10
-                    )
-
-                # Store recomputed alpha
-                alpha_t = tl.where(c_mask, alpha_t, NEG_INF)
-                tl.store(
-                    alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
-                    alpha_t,
-                    mask=c_mask,
-                )
-
-            # === Phase 2: Compute beta backward and gradients ===
-            for t_offset in range(CHECKPOINT_INTERVAL):
-                t = seg_end - 1 - t_offset
-                if t < seg_start or t >= seq_len - 1 or t < 0:
-                    continue
-
-                # Get alpha[t] from buffer
-                local_t = t - seg_start
-                alpha_t = tl.load(
-                    alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
-                    mask=c_mask,
-                    other=NEG_INF,
-                )
-
-                # Compute beta[t] and gradients
-                new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
-
-                for k in tl.static_range(1, K):
-                    end_pos = t + k
-                    if end_pos > seq_len - 1 or end_pos > T - 1:
-                        continue
-
-                    # Get beta[end_pos] from ring buffer
-                    end_ring_idx = end_pos % K
-                    beta_next = tl.load(
-                        beta_ring_base + end_ring_idx * stride_br_k + c_idx * stride_br_c,
+                # Initialize alpha from checkpoint (stores ring buffer state at seg_start)
+                for k_slot in tl.static_range(0, K):
+                    alpha_val = tl.load(
+                        ring_ckpt_base + ckpt_idx * stride_ckpt_n +
+                        k_slot * stride_ckpt_k + c_idx * stride_ckpt_c,
                         mask=c_mask,
                         other=NEG_INF,
                     )
+                    # Store alpha[seg_start + k_slot - (seg_start % K)] if valid
+                    # For simplicity, store at position 0 for initial ring state
+                    if k_slot == seg_start % K:
+                        tl.store(
+                            alpha_buf_base + 0 * stride_ab_t + c_idx * stride_ab_c,
+                            alpha_val,
+                            mask=c_mask,
+                        )
 
-                    # Compute edge on-the-fly
-                    cum_end = tl.load(
-                        cum_scores_base + end_pos * stride_cs_t + c_idx * stride_cs_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    cum_start = tl.load(
-                        cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    content_score = cum_end - cum_start
+                # Recompute alpha values from seg_start+1 to seg_end
+                for local_t in range(1, SEGMENT_SIZE):
+                    t = seg_start + local_t
+                    # Only process if within segment and sequence bounds
+                    if t < seg_end and t < seq_len:
+                        alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-                    dur_bias = tl.load(
-                        duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
-                        mask=c_mask,
-                        other=0.0,
-                    )
-                    segment_score = content_score + dur_bias
-                    edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
+                        # Loop over valid durations
+                        for k in tl.static_range(1, K):
+                            start_pos = t - k
+                            # Only process valid start positions
+                            if start_pos >= 0:
+                                # Get alpha_prev - either from buffer or checkpoint
+                                local_start = start_pos - seg_start
+                                if local_start >= 0 and local_start < SEGMENT_SIZE:
+                                    alpha_prev = tl.load(
+                                        alpha_buf_base + local_start * stride_ab_t + c_idx * stride_ab_c,
+                                        mask=c_mask,
+                                        other=NEG_INF,
+                                    )
+                                else:
+                                    # Need to get from checkpoint
+                                    prev_ckpt = start_pos // CHECKPOINT_INTERVAL
+                                    prev_ring_idx = start_pos % K
+                                    if prev_ckpt < NUM_CKPTS:
+                                        alpha_prev = tl.load(
+                                            ring_ckpt_base + prev_ckpt * stride_ckpt_n +
+                                            prev_ring_idx * stride_ckpt_k + c_idx * stride_ckpt_c,
+                                            mask=c_mask,
+                                            other=NEG_INF,
+                                        )
+                                    else:
+                                        alpha_prev = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-                    # === Compute marginal ===
-                    # log_marginal[c_dst, c_src] = alpha[t, c_src] + edge[c_dst, c_src] + beta[end, c_dst] - log_Z
-                    log_marginal = (
-                        alpha_t[None, :]  # (1, C_PAD) for c_src
-                        + edge_block  # (C_PAD, C_PAD)
-                        + beta_next[:, None]  # (C_PAD, 1) for c_dst
-                        - log_Z
-                    )
-                    marginal = tl.exp(log_marginal)  # (C_PAD, C_PAD)
-                    marginal = tl.where(c_mask_2d, marginal, 0.0)
+                                # Compute edge on-the-fly
+                                cum_end = tl.load(
+                                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                cum_start = tl.load(
+                                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                content_score = cum_end - cum_start
 
-                    # Scale by upstream gradient
-                    marginal = marginal * grad_out
+                                dur_bias = tl.load(
+                                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                segment_score = content_score + dur_bias
+                                edge_block = segment_score[:, None] + transition_block
 
-                    # === Accumulate gradients ===
+                                scores = alpha_prev[None, :] + edge_block
+                                scores = tl.where(c_mask_2d, scores, NEG_INF)
 
-                    # grad_cum_scores: positive at end_pos, negative at t
-                    marginal_sum_src = tl.sum(marginal, axis=1)  # sum over c_src -> (C_PAD,)
-                    marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
+                                # Logsumexp over c_src
+                                max_scores = tl.max(scores, axis=1)
+                                score_for_k = max_scores + tl.log(
+                                    tl.sum(tl.exp(scores - max_scores[:, None]), axis=1) + 1e-10
+                                )
+                                score_for_k = tl.where(c_mask, score_for_k, NEG_INF)
 
-                    tl.atomic_add(
-                        grad_cs_base + end_pos * stride_gcs_t + c_idx * stride_gcs_c,
-                        marginal_sum_src,
-                        mask=c_mask,
-                    )
-                    tl.atomic_add(
-                        grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
-                        -marginal_sum_src,
-                        mask=c_mask,
-                    )
+                                # Accumulate via logsumexp
+                                max_alpha = tl.maximum(alpha_t, score_for_k)
+                                alpha_t = max_alpha + tl.log(
+                                    tl.exp(alpha_t - max_alpha) + tl.exp(score_for_k - max_alpha) + 1e-10
+                                )
 
-                    # grad_transition: use vectorized atomic adds
-                    # marginal is (C_dst, C_src), grad_transition[c_src, c_dst] += marginal[c_dst, c_src]
-                    # We transpose by iterating c_dst in outer, c_src in inner
-                    marginal_T = tl.trans(marginal)  # (C_src, C_dst)
-                    for c_s in tl.static_range(0, C_PAD):
-                        if c_s < C:
-                            grad_tr_row = marginal_T[c_s, :]  # (C_PAD,) for c_dst
-                            grad_tr_row = tl.where(c_idx < C, grad_tr_row, 0.0)
-                            tl.atomic_add(
-                                grad_transition_ptr + c_s * stride_tr_src + c_idx * stride_tr_dst,
-                                grad_tr_row,
-                                mask=c_idx < C,
-                            )
+                        # Store recomputed alpha
+                        alpha_t = tl.where(c_mask, alpha_t, NEG_INF)
+                        tl.store(
+                            alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
+                            alpha_t,
+                            mask=c_mask,
+                        )
 
-                    # grad_duration_bias[k, c_dst] += sum over c_src
-                    tl.atomic_add(
-                        grad_duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
-                        marginal_sum_src,
-                        mask=c_mask,
-                    )
+                # === Phase 2: Compute beta backward and gradients ===
+                for t_offset in range(CHECKPOINT_INTERVAL):
+                    t = seg_end - 1 - t_offset
+                    # Only process valid positions
+                    if t >= seg_start and t < seq_len - 1 and t >= 0:
+                        # Get alpha[t] from buffer
+                        local_t = t - seg_start
+                        alpha_t = tl.load(
+                            alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
+                            mask=c_mask,
+                            other=NEG_INF,
+                        )
 
-                    # === Update beta contribution ===
-                    # beta[t, c_src] = logsumexp over (k, c_dst) of edge[c_dst, c_src] + beta[end, c_dst]
-                    scores_for_beta = edge_block + beta_next[:, None]  # (C_dst, C_src)
-                    scores_for_beta = tl.where(c_mask_2d, scores_for_beta, NEG_INF)
+                        # Compute beta[t] and gradients
+                        new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-                    # Logsumexp over c_dst (axis 0)
-                    max_beta_k = tl.max(scores_for_beta, axis=0)
-                    beta_k = max_beta_k + tl.log(
-                        tl.sum(tl.exp(scores_for_beta - max_beta_k[None, :]), axis=0) + 1e-10
-                    )
-                    beta_k = tl.where(c_mask, beta_k, NEG_INF)
+                        for k in tl.static_range(1, K):
+                            end_pos = t + k
+                            # Only process valid end positions
+                            if end_pos <= seq_len - 1 and end_pos <= T - 1:
+                                # Get beta[end_pos] from ring buffer
+                                end_ring_idx = end_pos % K
+                                beta_next = tl.load(
+                                    beta_ring_base + end_ring_idx * stride_br_k + c_idx * stride_br_c,
+                                    mask=c_mask,
+                                    other=NEG_INF,
+                                )
 
-                    # Accumulate into new_beta via logsumexp over k
-                    max_new = tl.maximum(new_beta, beta_k)
-                    new_beta = max_new + tl.log(
-                        tl.exp(new_beta - max_new) + tl.exp(beta_k - max_new) + 1e-10
-                    )
+                                # Compute edge on-the-fly
+                                cum_end = tl.load(
+                                    cum_scores_base + end_pos * stride_cs_t + c_idx * stride_cs_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                cum_start = tl.load(
+                                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                content_score = cum_end - cum_start
 
-                # Store beta[t] to ring buffer
-                t_ring_idx = t % K
-                tl.store(
-                    beta_ring_base + t_ring_idx * stride_br_k + c_idx * stride_br_c,
-                    new_beta,
-                    mask=c_mask,
-                )
+                                dur_bias = tl.load(
+                                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                                    mask=c_mask,
+                                    other=0.0,
+                                )
+                                segment_score = content_score + dur_bias
+                                edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
+
+                                # === Compute marginal ===
+                                # log_marginal[c_dst, c_src] = alpha[t, c_src] + edge[c_dst, c_src] + beta[end, c_dst] - log_Z
+                                log_marginal = (
+                                    alpha_t[None, :]  # (1, C_PAD) for c_src
+                                    + edge_block  # (C_PAD, C_PAD)
+                                    + beta_next[:, None]  # (C_PAD, 1) for c_dst
+                                    - log_Z
+                                )
+                                marginal = tl.exp(log_marginal)  # (C_PAD, C_PAD)
+                                marginal = tl.where(c_mask_2d, marginal, 0.0)
+
+                                # Scale by upstream gradient
+                                marginal = marginal * grad_out
+
+                                # === Accumulate gradients ===
+
+                                # grad_cum_scores: positive at end_pos, negative at t
+                                marginal_sum_src = tl.sum(marginal, axis=1)  # sum over c_src -> (C_PAD,)
+                                marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
+
+                                tl.atomic_add(
+                                    grad_cs_base + end_pos * stride_gcs_t + c_idx * stride_gcs_c,
+                                    marginal_sum_src,
+                                    mask=c_mask,
+                                )
+                                tl.atomic_add(
+                                    grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
+                                    -marginal_sum_src,
+                                    mask=c_mask,
+                                )
+
+                                # grad_transition: use vectorized atomic adds
+                                # marginal is (C_dst, C_src), grad_transition[c_src, c_dst] += marginal[c_dst, c_src]
+                                # We transpose by iterating c_dst in outer, c_src in inner
+                                marginal_T = tl.trans(marginal)  # (C_src, C_dst)
+                                for c_s in tl.static_range(0, C_PAD):
+                                    if c_s < C:
+                                        grad_tr_row = marginal_T[c_s, :]  # (C_PAD,) for c_dst
+                                        grad_tr_row = tl.where(c_idx < C, grad_tr_row, 0.0)
+                                        tl.atomic_add(
+                                            grad_transition_ptr + c_s * stride_tr_src + c_idx * stride_tr_dst,
+                                            grad_tr_row,
+                                            mask=c_idx < C,
+                                        )
+
+                                # grad_duration_bias[k, c_dst] += sum over c_src
+                                tl.atomic_add(
+                                    grad_duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                                    marginal_sum_src,
+                                    mask=c_mask,
+                                )
+
+                                # === Update beta contribution ===
+                                # beta[t, c_src] = logsumexp over (k, c_dst) of edge[c_dst, c_src] + beta[end, c_dst]
+                                scores_for_beta = edge_block + beta_next[:, None]  # (C_dst, C_src)
+                                scores_for_beta = tl.where(c_mask_2d, scores_for_beta, NEG_INF)
+
+                                # Logsumexp over c_dst (axis 0)
+                                max_beta_k = tl.max(scores_for_beta, axis=0)
+                                beta_k = max_beta_k + tl.log(
+                                    tl.sum(tl.exp(scores_for_beta - max_beta_k[None, :]), axis=0) + 1e-10
+                                )
+                                beta_k = tl.where(c_mask, beta_k, NEG_INF)
+
+                                # Accumulate into new_beta via logsumexp over k
+                                max_new = tl.maximum(new_beta, beta_k)
+                                new_beta = max_new + tl.log(
+                                    tl.exp(new_beta - max_new) + tl.exp(beta_k - max_new) + 1e-10
+                                )
+
+                        # Store beta[t] to ring buffer
+                        t_ring_idx = t % K
+                        tl.store(
+                            beta_ring_base + t_ring_idx * stride_br_k + c_idx * stride_br_c,
+                            new_beta,
+                            mask=c_mask,
+                        )
 
     def launch_streaming_triton_backward(
         cum_scores: torch.Tensor,
