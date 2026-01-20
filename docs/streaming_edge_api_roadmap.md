@@ -599,7 +599,7 @@ python3 benchmarks/benchmark_streaming_scale.py
 
 ### Phase 4: Enhanced Scoring (Duration + Boundary Contrast)
 
-**Status**: 🔲 Not Started
+**Status**: ✅ Phase 4B Complete (Triton boundary support) | 🔲 Phase 4A Not Started
 
 ---
 
@@ -620,7 +620,21 @@ python3 benchmarks/benchmark_streaming_scale.py
 
 **Note**: `duration_bias` (K, C) is now in Phase 2 (core) since it's required for sum-pooling.
 
-#### 4B: Boundary Contrast Features
+#### 4B: Boundary Contrast Features ✅ COMPLETE
+
+**Status**: Triton kernel support implemented on 2025-01-20
+
+**Implementation Summary**:
+- Added `proj_start` and `proj_end` parameters to Triton forward kernels (log and max semirings)
+- Added boundary gradient accumulation to Triton backward kernel
+- Updated `launch_streaming_triton_kernel` and `launch_streaming_triton_backward` APIs
+- Removed boundary blocking in `semi_crf_streaming_forward` dispatch logic
+- Added comprehensive tests in `tests/test_streaming_triton.py::TestTritonStreamingBoundaries`
+
+**Files Modified**:
+- `src/torch_semimarkov/streaming/triton_forward.py` - Forward kernel boundary support
+- `src/torch_semimarkov/streaming/triton_backward.py` - Backward kernel boundary gradients
+- `src/torch_semimarkov/streaming/autograd.py` - Autograd integration
 
 **Motivation**: A segment boundary is defined by a *change* in signal (Intron→Exon), not
 just the absolute signal at a position. Current `proj_start = h[t] @ W_start` relies on

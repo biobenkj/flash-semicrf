@@ -405,6 +405,210 @@ class TestTritonStreamingTraining:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+class TestTritonStreamingBoundaries:
+    """Test the Triton streaming kernel with boundary projections (Phase 4B)."""
+
+    def create_boundary_inputs(self, batch, T, K, C, device="cuda", dtype=torch.float32, seed=42):
+        """Create test inputs including boundary projections."""
+        torch.manual_seed(seed)
+
+        # Standard inputs
+        projected = torch.randn(batch, T, C, device=device, dtype=dtype)
+        projected = projected - projected.mean(dim=1, keepdim=True)
+        cum_scores = torch.zeros(batch, T + 1, C, device=device, dtype=dtype)
+        cum_scores[:, 1:, :] = torch.cumsum(projected, dim=1)
+        transition = torch.randn(C, C, device=device, dtype=dtype) * 0.1
+        duration_bias = torch.randn(K, C, device=device, dtype=dtype) * 0.1
+        lengths = torch.full((batch,), T, dtype=torch.long, device=device)
+
+        # Boundary projections
+        proj_start = torch.randn(batch, T, C, device=device, dtype=dtype) * 0.1
+        proj_end = torch.randn(batch, T, C, device=device, dtype=dtype) * 0.1
+
+        return cum_scores, transition, duration_bias, lengths, proj_start, proj_end
+
+    def test_triton_with_boundaries_forward(self):
+        """Verify Triton forward with boundaries matches PyTorch."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+
+        # PyTorch reference
+        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        # Triton kernel
+        partition_triton, _, _ = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        torch.testing.assert_close(
+            partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4
+        )
+
+    def test_triton_with_boundaries_forward_max(self):
+        """Verify Triton max semiring with boundaries matches PyTorch."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+
+        # PyTorch reference
+        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K,
+            semiring="max", proj_start=proj_start, proj_end=proj_end
+        )
+
+        # Triton kernel
+        partition_triton, _, _ = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K,
+            semiring="max", proj_start=proj_start, proj_end=proj_end
+        )
+
+        torch.testing.assert_close(
+            partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4
+        )
+
+    def test_triton_with_boundaries_gradients(self):
+        """Verify Triton backward with boundaries matches PyTorch."""
+        from torch_semimarkov.streaming import semi_crf_streaming_forward
+
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+
+        # PyTorch path
+        cs_py = cum_scores.clone().requires_grad_(True)
+        tr_py = transition.clone().requires_grad_(True)
+        db_py = duration_bias.clone().requires_grad_(True)
+        ps_py = proj_start.clone().requires_grad_(True)
+        pe_py = proj_end.clone().requires_grad_(True)
+
+        partition_py = semi_crf_streaming_forward(
+            cs_py, tr_py, db_py, lengths, K,
+            proj_start=ps_py, proj_end=pe_py, use_triton=False
+        )
+        partition_py.sum().backward()
+
+        # Triton path
+        cs_tr = cum_scores.clone().requires_grad_(True)
+        tr_tr = transition.clone().requires_grad_(True)
+        db_tr = duration_bias.clone().requires_grad_(True)
+        ps_tr = proj_start.clone().requires_grad_(True)
+        pe_tr = proj_end.clone().requires_grad_(True)
+
+        partition_tr = semi_crf_streaming_forward(
+            cs_tr, tr_tr, db_tr, lengths, K,
+            proj_start=ps_tr, proj_end=pe_tr, use_triton=True
+        )
+        partition_tr.sum().backward()
+
+        # Compare partition values
+        torch.testing.assert_close(partition_tr, partition_py, rtol=1e-4, atol=1e-4)
+
+        # Compare gradients
+        torch.testing.assert_close(cs_tr.grad, cs_py.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(tr_tr.grad, tr_py.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(db_tr.grad, db_py.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(ps_tr.grad, ps_py.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(pe_tr.grad, pe_py.grad, rtol=1e-2, atol=1e-2)
+
+    def test_triton_boundaries_backward_kernel_raw(self):
+        """Test the raw Triton backward kernel with boundaries."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+
+        # Run forward
+        partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        # Run backward
+        grad_output = torch.ones(batch, device="cuda")
+        grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end = \
+            launch_streaming_triton_backward(
+                cum_scores, transition, duration_bias, lengths,
+                partition, ring_checkpoints, checkpoint_interval, grad_output,
+                proj_start=proj_start, proj_end=proj_end
+            )
+
+        # Verify shapes
+        assert grad_cum_scores.shape == cum_scores.shape
+        assert grad_transition.shape == transition.shape
+        assert grad_duration_bias.shape == duration_bias.shape
+        assert grad_proj_start.shape == proj_start.shape
+        assert grad_proj_end.shape == proj_end.shape
+
+        # Verify finite values
+        assert torch.isfinite(grad_cum_scores).all(), "grad_cum_scores non-finite"
+        assert torch.isfinite(grad_transition).all(), "grad_transition non-finite"
+        assert torch.isfinite(grad_duration_bias).all(), "grad_duration_bias non-finite"
+        assert torch.isfinite(grad_proj_start).all(), "grad_proj_start non-finite"
+        assert torch.isfinite(grad_proj_end).all(), "grad_proj_end non-finite"
+
+    def test_triton_boundaries_larger_C(self):
+        """Verify boundaries work with C=24 (genomics scale)."""
+        batch, T, K, C = 2, 50, 8, 24
+        cum_scores, transition, duration_bias, lengths, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+
+        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        partition_triton, _, _ = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        torch.testing.assert_close(
+            partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4
+        )
+
+    def test_triton_boundaries_variable_lengths(self):
+        """Verify boundaries handle variable sequence lengths."""
+        from torch_semimarkov.streaming import semi_crf_streaming_forward
+
+        batch, T, K, C = 4, 50, 6, 4
+        cum_scores, transition, duration_bias, _, proj_start, proj_end = \
+            self.create_boundary_inputs(batch, T, K, C)
+        lengths = torch.tensor([T, T - 10, T - 20, T - 30], dtype=torch.long, device="cuda")
+
+        # PyTorch path
+        cs_py = cum_scores.clone().requires_grad_(True)
+        ps_py = proj_start.clone().requires_grad_(True)
+        pe_py = proj_end.clone().requires_grad_(True)
+
+        partition_py = semi_crf_streaming_forward(
+            cs_py, transition, duration_bias, lengths, K,
+            proj_start=ps_py, proj_end=pe_py, use_triton=False
+        )
+        partition_py.sum().backward()
+
+        # Triton path
+        cs_tr = cum_scores.clone().requires_grad_(True)
+        ps_tr = proj_start.clone().requires_grad_(True)
+        pe_tr = proj_end.clone().requires_grad_(True)
+
+        partition_tr = semi_crf_streaming_forward(
+            cs_tr, transition, duration_bias, lengths, K,
+            proj_start=ps_tr, proj_end=pe_tr, use_triton=True
+        )
+        partition_tr.sum().backward()
+
+        # Compare
+        torch.testing.assert_close(partition_tr, partition_py, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(ps_tr.grad, ps_py.grad, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(pe_tr.grad, pe_py.grad, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
 class TestTritonStreamingBenchmark:
     """Benchmark tests for Triton streaming kernel."""
 

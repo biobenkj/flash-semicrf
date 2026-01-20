@@ -44,6 +44,9 @@ if HAS_TRITON:
         transition_ptr,  # (C, C) - transition matrix
         duration_bias_ptr,  # (K, C) - duration-specific bias
         lengths_ptr,  # (batch,) - sequence lengths
+        # Boundary projections (optional, may be null if HAS_BOUNDARIES=False)
+        proj_start_ptr,  # (batch, T, C) - start boundary scores
+        proj_end_ptr,  # (batch, T, C) - end boundary scores
         # Outputs
         out_ptr,  # (batch,) - partition function
         ring_ptr,  # (batch, K, C_PAD) - live ring buffer (read/write)
@@ -56,6 +59,7 @@ if HAS_TRITON:
         C_PAD: tl.constexpr,  # padded num labels (power of 2)
         CHECKPOINT_INTERVAL: tl.constexpr,  # interval for saving ring buffer
         NUM_CKPTS: tl.constexpr,  # number of checkpoints
+        HAS_BOUNDARIES: tl.constexpr,  # whether boundary projections are provided
         # Strides for cum_scores (batch, T+1, C)
         stride_cs_b,
         stride_cs_t,
@@ -66,6 +70,10 @@ if HAS_TRITON:
         # Strides for duration_bias (K, C)
         stride_db_k,
         stride_db_c,
+        # Strides for proj_start/proj_end (batch, T, C) - only used if HAS_BOUNDARIES
+        stride_ps_b,
+        stride_ps_t,
+        stride_ps_c,
         # Strides for ring buffer (batch, K, C_PAD)
         stride_ring_b,
         stride_ring_k,
@@ -110,6 +118,11 @@ if HAS_TRITON:
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_base = ring_ptr + batch_idx * stride_ring_b
         ring_ckpt_base = ring_ckpt_ptr + batch_idx * stride_ckpt_b
+
+        # Boundary projection base pointers (only used if HAS_BOUNDARIES)
+        if HAS_BOUNDARIES:
+            proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
+            proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
 
         # Load transition matrix into registers: (C_PAD, C_PAD)
         # transition[c_src, c_dst] -> we need transition.T for edge computation
@@ -199,6 +212,24 @@ if HAS_TRITON:
                 # Segment score = content_score + duration_bias
                 segment_score = content_score + dur_bias  # (C_PAD,)
 
+                # Add boundary scores if provided
+                # Segment starts at start_pos, ends at t-1 (inclusive)
+                if HAS_BOUNDARIES:
+                    # proj_start[start_pos, :] - start boundary score
+                    start_score = tl.load(
+                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    # proj_end[t-1, :] - end boundary score (t-1 is last position in segment)
+                    end_pos_boundary = t - 1
+                    end_score = tl.load(
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    segment_score = segment_score + start_score + end_score
+
                 # Edge block: edge[c_dst, c_src] = segment_score[c_dst] + transition[c_src, c_dst]
                 # segment_score is (C_PAD,), expand to (C_PAD, 1) for c_dst
                 # transition_block is already (C_PAD, C_PAD) as transition.T
@@ -281,6 +312,9 @@ if HAS_TRITON:
         transition_ptr,
         duration_bias_ptr,
         lengths_ptr,
+        # Boundary projections (optional)
+        proj_start_ptr,
+        proj_end_ptr,
         out_ptr,
         ring_ptr,  # (batch, K, C_PAD) - live ring buffer
         ring_ckpt_ptr,
@@ -291,6 +325,7 @@ if HAS_TRITON:
         C_PAD: tl.constexpr,
         CHECKPOINT_INTERVAL: tl.constexpr,
         NUM_CKPTS: tl.constexpr,
+        HAS_BOUNDARIES: tl.constexpr,
         stride_cs_b,
         stride_cs_t,
         stride_cs_c,
@@ -298,6 +333,9 @@ if HAS_TRITON:
         stride_tr_dst,
         stride_db_k,
         stride_db_c,
+        stride_ps_b,
+        stride_ps_t,
+        stride_ps_c,
         stride_ring_b,
         stride_ring_k,
         stride_ring_c,
@@ -328,6 +366,11 @@ if HAS_TRITON:
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_base = ring_ptr + batch_idx * stride_ring_b
         ring_ckpt_base = ring_ckpt_ptr + batch_idx * stride_ckpt_b
+
+        # Boundary projection base pointers (only used if HAS_BOUNDARIES)
+        if HAS_BOUNDARIES:
+            proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
+            proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
 
         transition_block = tl.load(
             transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
@@ -394,6 +437,25 @@ if HAS_TRITON:
                     other=0.0,
                 )
                 segment_score = content_score + dur_bias
+
+                # Add boundary scores if provided
+                # Segment starts at start_pos, ends at t-1 (inclusive)
+                if HAS_BOUNDARIES:
+                    # proj_start[start_pos, :] - start boundary score
+                    start_score = tl.load(
+                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    # proj_end[t-1, :] - end boundary score (t-1 is last position in segment)
+                    end_pos_boundary = t - 1
+                    end_score = tl.load(
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    segment_score = segment_score + start_score + end_score
+
                 edge_block = segment_score[:, None] + transition_block
 
                 scores = alpha_prev[None, :] + edge_block
@@ -452,6 +514,8 @@ if HAS_TRITON:
         K: int,
         semiring: str = "log",
         checkpoint_interval: int = None,
+        proj_start: torch.Tensor = None,
+        proj_end: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """
         Launch the streaming Triton kernel with proper buffer allocation.
@@ -464,6 +528,8 @@ if HAS_TRITON:
             K: max segment duration
             semiring: "log" or "max"
             checkpoint_interval: interval for saving ring buffer (default: sqrt(T*K))
+            proj_start: (batch, T, C) start boundary scores. Optional.
+            proj_end: (batch, T, C) end boundary scores. Optional.
 
         Returns:
             partition: (batch,) partition function values
@@ -486,11 +552,25 @@ if HAS_TRITON:
         # Pad C to next power of 2
         C_PAD = _next_power_of_2(C)
 
+        # Determine if boundaries are provided
+        has_boundaries = proj_start is not None and proj_end is not None
+
         # Ensure inputs are contiguous
         cum_scores = cum_scores.contiguous()
         transition = transition.contiguous()
         duration_bias = duration_bias.contiguous()
         lengths = lengths.contiguous()
+
+        # Handle boundary projections
+        if has_boundaries:
+            proj_start = proj_start.contiguous()
+            proj_end = proj_end.contiguous()
+            stride_ps_b, stride_ps_t, stride_ps_c = proj_start.stride()
+        else:
+            # Create dummy tensor for stride calculation (won't be accessed)
+            proj_start = cum_scores[:, :T, :]  # Reuse cum_scores memory, won't be accessed
+            proj_end = cum_scores[:, :T, :]
+            stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0  # Strides don't matter when not used
 
         # Allocate outputs
         partition = torch.empty(batch, device=device, dtype=dtype)
@@ -520,6 +600,8 @@ if HAS_TRITON:
             transition,
             duration_bias,
             lengths,
+            proj_start,
+            proj_end,
             partition,
             ring_buffer,
             ring_checkpoints,
@@ -530,6 +612,7 @@ if HAS_TRITON:
             C_PAD,
             checkpoint_interval,
             num_checkpoints,
+            has_boundaries,  # HAS_BOUNDARIES constexpr
             stride_cs_b,
             stride_cs_t,
             stride_cs_c,
@@ -537,6 +620,9 @@ if HAS_TRITON:
             stride_tr_dst,
             stride_db_k,
             stride_db_c,
+            stride_ps_b,
+            stride_ps_t,
+            stride_ps_c,
             stride_ring_b,
             stride_ring_k,
             stride_ring_c,
