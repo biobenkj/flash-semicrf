@@ -207,7 +207,8 @@ if HAS_TRITON:
             )
 
         # Process segments in reverse order
-        for ckpt_idx_loop in range(NUM_CKPTS):
+        # Note: Use tl.range to avoid compile-time unrolling for large NUM_CKPTS
+        for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
             ckpt_idx = NUM_CKPTS - 1 - ckpt_idx_loop
             seg_start = ckpt_idx * CHECKPOINT_INTERVAL
             seg_end = (ckpt_idx + 1) * CHECKPOINT_INTERVAL
@@ -240,7 +241,8 @@ if HAS_TRITON:
                         )
 
                 # Recompute alpha values from seg_start+1 to seg_end
-                for local_t in range(1, SEGMENT_SIZE):
+                # Note: Use tl.range to avoid compile-time unrolling for large SEGMENT_SIZE
+                for local_t in tl.range(1, SEGMENT_SIZE):
                     t = seg_start + local_t
                     # Only process if within segment and sequence bounds
                     if t < seg_end and t < seq_len:
@@ -355,7 +357,8 @@ if HAS_TRITON:
                         )
 
                 # === Phase 2: Compute beta backward and gradients ===
-                for t_offset in range(CHECKPOINT_INTERVAL):
+                # Note: Use tl.range to avoid compile-time unrolling for large CHECKPOINT_INTERVAL
+                for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
                     t = seg_end - 1 - t_offset
                     # Only process valid positions
                     if t >= seg_start and t < seq_len - 1 and t >= 0:
