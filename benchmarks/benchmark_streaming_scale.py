@@ -92,6 +92,8 @@ def create_scale_inputs(config: ScaleConfig, device: torch.device, dtype: torch.
     del projected
     torch.cuda.empty_cache()
 
+    print("Completed creation of scale input.")
+
     return cum_scores, transition, duration_bias, lengths
 
 
