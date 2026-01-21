@@ -2,43 +2,65 @@
 torch-semimarkov: Efficient Semi-Markov CRF Inference for PyTorch
 
 This package provides optimized implementations of Semi-Markov CRF inference
-algorithms, benchmarked and documented in:
+algorithms for genomic sequence annotation at chromosome scale (T=400K+).
 
-    "Practical Semi-Markov CRF Inference for Genomic Sequence Annotation"
-    Benjamin K. Johnson (2026)
-
-Key finding: Memory, not time, is the binding constraint. Vectorized linear scan
-is universally applicable across all genomic parameter regimes.
+Key Features:
+- O(KC) memory streaming scan (independent of sequence length T)
+- Streaming API for on-the-fly edge computation via prefix-sum decomposition
+- Triton GPU acceleration for inference
 
 Original pytorch-struct: https://github.com/harvardnlp/pytorch-struct
 License: MIT (see LICENSE file)
 
 Modifications:
-- Added use_linear_scan parameter for memory-efficient Semi-Markov CRF computation
-- Added vectorized linear scan implementation (2-3x speedup)
-- Added banded and block-triangular backends for experimentation
+- Added streaming linear scan with O(KC) memory
+- Added streaming API for T=400K+ sequences with on-the-fly edge computation
+- Removed memory-intensive backends (banded, block-triangular)
 - Optimized for genomic segmentation use cases
 """
 
-from .banded import BandedMatrix
-from .banded_utils import (
-    apply_permutation,
-    measure_effective_bandwidth,
-    rcm_ordering_from_adjacency,
-    snake_ordering,
+from .duration import (
+    CallableDuration,
+    DurationDistribution,
+    GeometricDuration,
+    LearnedDuration,
+    NegativeBinomialDuration,
+    PoissonDuration,
+    UniformDuration,
+    create_duration_distribution,
 )
-from .blocktriangular import BlockTriangularMatrix, block_triang_matmul
+from .nn import Segment, SemiMarkovCRFHead, ViterbiResult
 from .semimarkov import SemiMarkov
+from .streaming import (
+    SemiCRFStreaming,
+    compute_edge_block_streaming,
+    semi_crf_streaming_forward,
+)
+from .uncertainty import UncertaintyMixin, UncertaintySemiMarkovCRFHead
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    # Core API
     "SemiMarkov",
-    "BandedMatrix",
-    "BlockTriangularMatrix",
-    "block_triang_matmul",
-    "measure_effective_bandwidth",
-    "snake_ordering",
-    "rcm_ordering_from_adjacency",
-    "apply_permutation",
+    # Streaming API
+    "semi_crf_streaming_forward",
+    "SemiCRFStreaming",
+    "compute_edge_block_streaming",
+    # Neural network modules
+    "SemiMarkovCRFHead",
+    "Segment",
+    "ViterbiResult",
+    # Uncertainty quantification
+    "UncertaintyMixin",
+    "UncertaintySemiMarkovCRFHead",
+    # Duration distributions
+    "DurationDistribution",
+    "LearnedDuration",
+    "GeometricDuration",
+    "NegativeBinomialDuration",
+    "PoissonDuration",
+    "UniformDuration",
+    "CallableDuration",
+    "create_duration_distribution",
 ]

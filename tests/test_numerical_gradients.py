@@ -6,7 +6,6 @@ computed by autograd are correct. This provides strong validation that the
 backward pass implementation is mathematically correct.
 """
 
-import pytest
 import torch
 
 from torch_semimarkov import SemiMarkov
@@ -59,12 +58,12 @@ class TestNumericalGradients:
         sm = SemiMarkov(LogSemiring)
 
         def forward_func(e):
-            v, _, _ = sm.logpartition(e, lengths=lengths, use_linear_scan=True)
+            v, _, _ = sm.logpartition(e, lengths=lengths)
             return v.sum()
 
         # Analytical gradient
         edge_grad = edge.clone().requires_grad_(True)
-        v, _, _ = sm.logpartition(edge_grad, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge_grad, lengths=lengths)
         v.sum().backward()
         analytical_grad = edge_grad.grad.clone()
 
@@ -91,12 +90,12 @@ class TestNumericalGradients:
         sm = SemiMarkov(LogSemiring)
 
         def forward_func(e):
-            v, _, _ = sm.logpartition(e, lengths=lengths, use_linear_scan=True)
+            v, _, _ = sm.logpartition(e, lengths=lengths)
             return v.sum()
 
         # Analytical gradient
         edge_grad = edge.clone().requires_grad_(True)
-        v, _, _ = sm.logpartition(edge_grad, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge_grad, lengths=lengths)
         v.sum().backward()
         analytical_grad = edge_grad.grad.clone()
 
@@ -117,12 +116,12 @@ class TestNumericalGradients:
         sm = SemiMarkov(LogSemiring)
 
         def forward_func(e):
-            v, _, _ = sm.logpartition(e, lengths=lengths, use_linear_scan=True)
+            v, _, _ = sm.logpartition(e, lengths=lengths)
             return v.sum()
 
         # Analytical gradient
         edge_grad = edge.clone().requires_grad_(True)
-        v, _, _ = sm.logpartition(edge_grad, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge_grad, lengths=lengths)
         v.sum().backward()
         analytical_grad = edge_grad.grad.clone()
 
@@ -132,9 +131,8 @@ class TestNumericalGradients:
         max_diff = (analytical_grad - numerical_grad).abs().max().item()
         assert max_diff < 1e-4, f"Max absolute diff: {max_diff:.2e}"
 
-    @pytest.mark.parametrize("backend", ["streaming", "vectorized", "standard"])
-    def test_gradient_consistency_across_backends(self, backend):
-        """All backends should produce the same gradients."""
+    def test_gradient_consistency_streaming(self):
+        """Streaming backend produces consistent gradients."""
         batch, N, K, C = 2, 6, 3, 2
         torch.manual_seed(789)
 
@@ -143,25 +141,24 @@ class TestNumericalGradients:
 
         sm = SemiMarkov(LogSemiring)
 
-        # Get gradient from specified backend
+        # Get gradient from streaming backend
         edge_grad = edge.clone().requires_grad_(True)
-        if backend == "streaming":
-            v, _, _ = sm._dp_scan_streaming(edge_grad, lengths)
-        elif backend == "vectorized":
-            v, _, _ = sm._dp_standard_vectorized(edge_grad, lengths)
-        else:
-            v, _, _ = sm._dp_standard(edge_grad, lengths)
+        v, _, _ = sm._dp_scan_streaming(edge_grad, lengths)
         v.sum().backward()
         grad = edge_grad.grad.clone()
 
-        # Get reference gradient from streaming
+        # Verify gradient is finite and non-zero
+        assert torch.isfinite(grad).all(), "Gradient contains non-finite values"
+        assert grad.abs().sum() > 0, "Gradient is all zeros"
+
+        # Run again to verify determinism
         edge_ref = edge.clone().requires_grad_(True)
         v_ref, _, _ = sm._dp_scan_streaming(edge_ref, lengths)
         v_ref.sum().backward()
         grad_ref = edge_ref.grad.clone()
 
         max_diff = (grad - grad_ref).abs().max().item()
-        assert max_diff < 1e-10, f"Backend {backend} gradient differs by {max_diff:.2e}"
+        assert max_diff < 1e-10, f"Streaming gradient not deterministic, diff: {max_diff:.2e}"
 
 
 class TestMarginalGradients:
@@ -207,7 +204,7 @@ class TestMarginalGradients:
         marginals = sm.marginals(edge.detach(), lengths=lengths)
 
         # Manually compute gradient using autograd
-        v, _, _ = sm.logpartition(edge, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge, lengths=lengths)
         v.sum().backward()
         manual_grad = edge.grad
 
@@ -237,7 +234,7 @@ class TestHessianComputation:
         lengths = torch.full((batch,), N, dtype=torch.long)
 
         sm = SemiMarkov(LogSemiring)
-        v, _, _ = sm.logpartition(edge, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge, lengths=lengths)
 
         # First backward
         (grad,) = torch.autograd.grad(v.sum(), edge, create_graph=True)
@@ -260,7 +257,7 @@ class TestHessianComputation:
 
         def grad_func(e):
             e = e.clone().requires_grad_(True)
-            v, _, _ = sm.logpartition(e, lengths=lengths, use_linear_scan=True)
+            v, _, _ = sm.logpartition(e, lengths=lengths)
             v.sum().backward()
             return e.grad.sum()
 
@@ -280,7 +277,7 @@ class TestHessianComputation:
 
         # Analytical Hessian via double backward
         edge_grad = edge.clone().requires_grad_(True)
-        v, _, _ = sm.logpartition(edge_grad, lengths=lengths, use_linear_scan=True)
+        v, _, _ = sm.logpartition(edge_grad, lengths=lengths)
         (grad,) = torch.autograd.grad(v.sum(), edge_grad, create_graph=True)
         (hessian_row,) = torch.autograd.grad(grad.sum(), edge_grad)
         analytical_hessian = hessian_row[idx]

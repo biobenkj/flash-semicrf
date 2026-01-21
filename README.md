@@ -10,7 +10,7 @@ Efficient Semi-Markov CRF Inference using PyTorch and Triton
 [![CI](https://github.com/biobenkj/torch-semimarkov/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/biobenkj/torch-semimarkov/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/biobenkj/torch-semimarkov/branch/main/graph/badge.svg)](https://codecov.io/gh/biobenkj/torch-semimarkov)
 
-[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [Examples](#quick-start) | [GitHub](https://github.com/biobenkj/torch-semimarkov)
+[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [Examples](examples/) | [GitHub](https://github.com/biobenkj/torch-semimarkov)
 
 </div>
 
@@ -27,7 +27,7 @@ This makes Semi-Markov CRF inference practical for genome-scale annotation witho
 **torch-semimarkov** provides:
 
 - **Streaming scan** — $O(KC)$ memory, universally applicable across genomic parameter regimes
-- **Triton fused kernel** — optional GPU acceleration with ~45x speedup
+- **Triton fused kernel** — optional GPU acceleration
 
 ## Why Semi-Markov CRFs in genomics contexts?
 
@@ -58,10 +58,7 @@ git clone https://github.com/biobenkj/torch-semimarkov.git
 cd torch-semimarkov
 pip install -e ".[dev]"
 
-# With CUDA support (requires nvcc via CUDA_HOME)
-TORCH_SEMIMARKOV_CUDA=1 pip install -e .
-
-# Optional Triton kernel for GPU (used automatically when available)
+# Optional Triton kernel for GPU acceleration
 pip install triton
 ```
 
@@ -69,60 +66,107 @@ pip install triton
 
 ```python
 import torch
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from torch_semimarkov import SemiMarkovCRFHead
 
-# Parameters
-batch_size = 4
-seq_length = 1000   # T
-max_duration = 16   # K
-num_classes = 6     # C
+# Create CRF head (integrates with any encoder)
+crf = SemiMarkovCRFHead(
+    num_classes=24,      # C: number of segment labels
+    max_duration=100,    # K: maximum segment length
+    hidden_dim=512       # matches encoder output
+)
 
-# Create model
-model = SemiMarkov(LogSemiring)
+# Encoder output (from Mamba, Transformer, CNN, etc.)
+batch, T = 4, 1000
+hidden_states = torch.randn(batch, T, 512)
+lengths = torch.full((batch,), T)
 
-# Edge potentials: (batch, T-1, K, C, C)
-edge = torch.randn(batch_size, seq_length - 1, max_duration, num_classes, num_classes)
-lengths = torch.full((batch_size,), seq_length)
+# Training: compute NLL loss
+labels = torch.randint(0, 24, (batch, T))
+loss = crf.compute_loss(hidden_states, lengths, labels)
+loss.backward()
 
-# Forward pass (partition function)
-# Uses streaming scan by default: O(KC) memory
-log_Z, _ = model.logpartition(edge, lengths=lengths)
-
-# Backward pass for gradients
-log_Z.sum().backward()
+# Inference: partition function or Viterbi decoding
+log_Z = crf(hidden_states, lengths)['partition']
+viterbi_score = crf.decode(hidden_states, lengths)
 ```
 
-### Triton Fused Kernel (~45x speedup)
+Works with PyTorch Lightning and DDP out of the box—see [examples/lightning_integration.py](examples/lightning_integration.py).
 
-The Triton kernel uses a hybrid approach for optimal performance:
+For the low-level API with explicit edge tensors and semiring control, see the [API reference](docs/api.md).
 
-- **Inference** (`requires_grad=False`): Custom Triton kernel for maximum speed
-- **Training** (`requires_grad=True`): `torch.compile` for efficient automatic backward pass
+## Tensor Conventions
+
+**Edge tensor indexing:** `edge[batch, position, duration, c_dest, c_src]`
+
+This library follows **destination-first** convention for edge tensors, where `edge[..., j, i]` represents the potential for transitioning **from** label `i` **to** label `j`. This differs from some other CRF libraries that use source-first ordering.
+
+**Example:**
+```python
+# edge[b, t, k, j, i] represents:
+#   - Batch item b
+#   - Segment starting at position t
+#   - Duration k (segment spans positions t to t+k-1)
+#   - Transition FROM label i TO label j
+```
+
+**Transition matrix:** Similarly, `transition[c_src, c_dest]` stores the score for transitioning from `c_src` to `c_dest`.
+
+**Duration bias indexing:** `duration_bias[k, c]` stores the log-probability bias for segments of duration `k` with label `c`.
+
+- Index 0 is unused (no segments of duration 0)
+- Valid durations: 1 to K-1 (where K = `max_duration`)
+- Durations ≥ K are clamped to K-1
 
 ```python
-from torch_semimarkov.triton_scan import semi_crf_triton_forward
-
-edge = edge.cuda()
-lengths = lengths.cuda()
-
-# Inference: uses fast custom Triton kernel
-partition = semi_crf_triton_forward(edge, lengths)
-
-# Training: uses torch.compile for efficient backward
-edge_train = edge.requires_grad_(True)
-partition = semi_crf_triton_forward(edge_train, lengths)
-partition.sum().backward()
-
-# Viterbi decoding (max semiring)
-viterbi_score = semi_crf_triton_forward(edge, lengths, semiring="max")
+# A segment spanning positions [t, t+2] (3 positions, duration=3)
+# uses duration_bias[3, label]
 ```
+
+**Special case K=1:** When `max_duration=1`, the model behaves like a standard HMM where all segments have duration 1. In this case, `duration_bias[0]` stores the bias for duration 1 (due to clamping).
+
+### Triton Kernel
+
+When Triton is installed, torch-semimarkov uses fused GPU kernels that significantly accelerate both forward and backward passes.
+
+**How it works:**
+
+The streaming API computes edge potentials on-the-fly from cumulative scores rather than materializing the full `O(T × K × C²)` edge tensor. The Triton kernel fuses this computation with the forward scan:
+
+```
+# Edge computed on-the-fly (never materialized):
+content = cum_scores[t+k, c] - cum_scores[t, c]  # O(1) lookup
+edge[t, k, c_dst, c_src] = content + duration_bias[k, c] + transition[c_src, c_dst]
+```
+
+Key optimizations:
+- **Fused edge computation** — computes edges on-the-fly via prefix-sum, avoiding the full edge tensor
+- **O(KC) memory** — ring buffer for DP state, independent of sequence length
+- **Custom backward kernel** — custom Triton kernel for gradients, not autograd
+- **Checkpointing** — trades compute for memory by recomputing alpha values during backward
+
+**Usage:**
+
+The `SemiMarkovCRFHead` uses Triton automatically when available—pass `use_triton=True` (the default on GPU) to `forward()`, `compute_loss()`, or `decode()`.
+
+For direct access to the streaming kernel:
+
+```python
+from torch_semimarkov.streaming import semi_crf_streaming_forward
+
+# Cumulative scores from encoder (see docs for zero-centering requirements)
+partition = semi_crf_streaming_forward(
+    cum_scores, transition, duration_bias, lengths, K
+)
+```
+
+For performance characteristics, see [Benchmarking](docs/benchmarks.md).
 
 ## Documentation
 
 - [Integration guide](docs/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
 - [Parameter guide: T, K, C](docs/parameter_guide.md) — understanding sequence length, duration, and state dimensions
-- [Semirings guide](docs/semirings.md) - context and intuition for semirings used in torch-semimarkov
+- [Semirings guide](docs/semirings.md) — context and intuition for semirings used in torch-semimarkov
+- [Uncertainty and focused learning](docs/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
 - [Backends and Triton kernel](docs/backends.md) — algorithm selection and GPU acceleration
 - [API reference](docs/api.md) — detailed API documentation
 - [Benchmarking](docs/benchmarks.md) — performance measurement
@@ -142,18 +186,12 @@ Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.
 | Component | Status |
 |-----------|--------|
 | **Streaming Scan** | O(KC) memory, default backend |
-| **Vectorized Scan** | O(TKC) memory, 2-3x faster than standard linear scan |
-| **Binary Tree** | O(log N) depth, high memory for large KC |
-| **Block-Triangular** | Exploits duration constraint sparsity |
-| **Semirings** | Log, Max, Std, KMax, Entropy, CrossEntropy |
-| **Checkpoint Semiring** | Memory-efficient gradients |
-| **BandedMatrix (CPU)** | Prototype and not a recommended backend |
-| **CUDA Extension** | Builds when nvcc available |
-| **Triton Kernel** | ~45x speedup on GPU, Log/Max semirings, hybrid inference/training |
+| **Triton Kernel** | GPU acceleration, Log/Max semirings, custom forward/backward |
+| **Semirings** | Log, Max, Std, KMax, Entropy, CrossEntropy, KLDivergence |
 
 ## Acknowledgments
 
-This library builds on [pytorch-struct](https://github.com/harvardnlp/pytorch-struct) by Alexander Rush and [genbmm](https://github.com/harvardnlp/genbmm) for CUDA generalized batch matrix multiplication.
+This library builds on [pytorch-struct](https://github.com/harvardnlp/pytorch-struct) by Alexander Rush. GPU kernels are written using [Triton](https://github.com/triton-lang/triton).
 
 ## License
 
