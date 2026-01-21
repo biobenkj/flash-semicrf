@@ -44,6 +44,8 @@ Previously it was (batch, T-1, K, C, C), which only allowed positions up to T-1.
 """
 
 import argparse
+import math
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -52,6 +54,12 @@ import torch
 
 from torch_semimarkov.streaming import semi_crf_streaming_forward
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
+
+# Increase recursion limit for torch.compile with deep computational graphs.
+# The semi-CRF DP loop creates ~T sequential dependencies, and torch.compile's
+# inductor uses recursive topological sort which hits Python's default limit (~1000).
+# Setting to 10000 supports T up to ~8000 timesteps.
+sys.setrecursionlimit(10000)
 
 
 @dataclass
@@ -216,11 +224,15 @@ def run_triton_scan_benchmark(
     lengths: torch.Tensor,
     warmup: int = 3,
     iterations: int = 10,
+    forward_only: bool = False,
 ) -> BenchmarkResult:
     """Benchmark triton_scan API (pre-computed edge tensor).
 
     Note: lengths should be the number of timesteps (T). Internally, triton_scan
     uses lengths + 1 to capture at the correct DP position (matching streaming).
+
+    Args:
+        forward_only: If True, skip backward pass (avoids torch.compile issues)
     """
     # Memory for edge tensor
     memory_mb = edge.numel() * edge.element_size() / (1024 * 1024)
@@ -239,17 +251,27 @@ def run_triton_scan_benchmark(
     )
 
     # Forward + Backward (training)
-    edge_train = edge.detach().clone().requires_grad_(True)
-    backward_time = benchmark_backward(
-        semi_crf_triton_forward,
-        [edge_train],
-        edge_train,
-        triton_lengths,
-        warmup=warmup,
-        iterations=iterations,
-        use_triton=True,
-        use_compile=True,
-    )
+    if forward_only:
+        backward_time = float("nan")
+    else:
+        # torch.compile can fail with deep graphs (RecursionError in inductor)
+        # or OOM (compiled graph needs extra buffers for gradients)
+        edge_train = edge.detach().clone().requires_grad_(True)
+        try:
+            backward_time = benchmark_backward(
+                semi_crf_triton_forward,
+                [edge_train],
+                edge_train,
+                triton_lengths,
+                warmup=warmup,
+                iterations=iterations,
+                use_triton=True,
+                use_compile=True,
+            )
+        except RecursionError:
+            print("  WARNING: torch.compile failed with RecursionError (graph too deep)")
+            print("           Skipping backward benchmark for triton_scan")
+            backward_time = float("nan")
 
     return BenchmarkResult(
         name="triton_scan (pre-computed edge)",
@@ -269,8 +291,13 @@ def run_streaming_benchmark(
     K: int,
     warmup: int = 3,
     iterations: int = 10,
+    forward_only: bool = False,
 ) -> BenchmarkResult:
-    """Benchmark streaming API (on-the-fly edge computation)."""
+    """Benchmark streaming API (on-the-fly edge computation).
+
+    Args:
+        forward_only: If True, skip backward pass benchmarks
+    """
     # Memory for streaming inputs (much smaller than edge tensor)
     memory_mb = (
         cum_scores.numel() * cum_scores.element_size()
@@ -292,22 +319,25 @@ def run_streaming_benchmark(
     )
 
     # Forward + Backward (training)
-    cum_scores_train = cum_scores.detach().clone().requires_grad_(True)
-    transition_train = transition.detach().clone().requires_grad_(True)
-    duration_bias_train = duration_bias.detach().clone().requires_grad_(True)
+    if forward_only:
+        backward_time = float("nan")
+    else:
+        cum_scores_train = cum_scores.detach().clone().requires_grad_(True)
+        transition_train = transition.detach().clone().requires_grad_(True)
+        duration_bias_train = duration_bias.detach().clone().requires_grad_(True)
 
-    backward_time = benchmark_backward(
-        semi_crf_streaming_forward,
-        [cum_scores_train, transition_train, duration_bias_train],
-        cum_scores_train,
-        transition_train,
-        duration_bias_train,
-        lengths,
-        K,
-        warmup=warmup,
-        iterations=iterations,
-        use_triton=True,
-    )
+        backward_time = benchmark_backward(
+            semi_crf_streaming_forward,
+            [cum_scores_train, transition_train, duration_bias_train],
+            cum_scores_train,
+            transition_train,
+            duration_bias_train,
+            lengths,
+            K,
+            warmup=warmup,
+            iterations=iterations,
+            use_triton=True,
+        )
 
     return BenchmarkResult(
         name="streaming (on-the-fly edge)",
@@ -656,6 +686,21 @@ def run_batch_scaling_test(
                 )
             )
             del edge
+        except RecursionError:
+            # torch.compile hits recursion limit with deep computational graphs
+            triton_error = "COMPILE_ERROR"
+            print("      triton_scan COMPILE_ERROR: RecursionError in torch.compile")
+            print(f"        Graph too deep for inductor (T={T} exceeds recursion limit)")
+            triton_results.append(
+                BatchScalingResult(
+                    batch_size=batch,
+                    forward_time_ms=0,
+                    backward_time_ms=0,
+                    throughput_seq_per_sec=0,
+                    memory_mb=edge_memory_mb,
+                    error=triton_error,
+                )
+            )
         except Exception as e:
             if _is_cuda_error(e):
                 is_oom = _is_oom_error(e)
@@ -790,9 +835,15 @@ def format_results(results: list[BenchmarkResult], config: dict) -> str:
     lines.append("-" * 80)
 
     for r in results:
+        bwd_str = (
+            f"{r.backward_time_ms:<12.3f}" if not math.isnan(r.backward_time_ms) else "N/A         "
+        )
+        total_str = (
+            f"{r.total_time_ms:<12.3f}" if not math.isnan(r.total_time_ms) else "N/A         "
+        )
         lines.append(
-            f"{r.name:<35} {r.forward_time_ms:<12.3f} {r.backward_time_ms:<12.3f} "
-            f"{r.total_time_ms:<12.3f} {r.memory_mb:<12.2f}"
+            f"{r.name:<35} {r.forward_time_ms:<12.3f} {bwd_str} "
+            f"{total_str} {r.memory_mb:<12.2f}"
         )
 
     lines.append("-" * 80)
@@ -800,15 +851,23 @@ def format_results(results: list[BenchmarkResult], config: dict) -> str:
     # Speedup comparison
     if len(results) == 2:
         fwd_speedup = results[0].forward_time_ms / results[1].forward_time_ms
-        bwd_speedup = results[0].backward_time_ms / results[1].backward_time_ms
-        total_speedup = results[0].total_time_ms / results[1].total_time_ms
         mem_ratio = results[0].memory_mb / results[1].memory_mb
 
         lines.append("")
         lines.append("Comparison (streaming relative to triton_scan):")
         lines.append(f"  Forward speedup:  {fwd_speedup:.2f}x")
-        lines.append(f"  Backward speedup: {bwd_speedup:.2f}x")
-        lines.append(f"  Total speedup:    {total_speedup:.2f}x")
+
+        # Only show backward/total speedup if both have valid backward times
+        if not math.isnan(results[0].backward_time_ms) and not math.isnan(
+            results[1].backward_time_ms
+        ):
+            bwd_speedup = results[0].backward_time_ms / results[1].backward_time_ms
+            total_speedup = results[0].total_time_ms / results[1].total_time_ms
+            lines.append(f"  Backward speedup: {bwd_speedup:.2f}x")
+            lines.append(f"  Total speedup:    {total_speedup:.2f}x")
+        else:
+            lines.append("  Backward speedup: N/A (--forward-only mode)")
+
         lines.append(
             f"  Memory ratio:     {mem_ratio:.1f}x (triton_scan uses {mem_ratio:.1f}x more)"
         )
@@ -851,6 +910,11 @@ def main():
         choices=["forward", "backward", "both"],
         default="forward",
         help="Mode for batch scaling: forward (inference), backward (training), or both",
+    )
+    parser.add_argument(
+        "--forward-only",
+        action="store_true",
+        help="Skip backward pass benchmarks (avoids torch.compile issues)",
     )
     args = parser.parse_args()
 
@@ -964,7 +1028,11 @@ def main():
     # triton_scan benchmark
     print("  Benchmarking triton_scan...")
     result_triton = run_triton_scan_benchmark(
-        edge, lengths, warmup=args.warmup, iterations=args.iterations
+        edge,
+        lengths,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        forward_only=args.forward_only,
     )
     results.append(result_triton)
 
@@ -978,6 +1046,7 @@ def main():
         K,
         warmup=args.warmup,
         iterations=args.iterations,
+        forward_only=args.forward_only,
     )
     results.append(result_streaming)
 
@@ -990,6 +1059,7 @@ def main():
         "Batch size": batch,
         "Warmup iterations": args.warmup,
         "Timing iterations": args.iterations,
+        "Mode": "forward-only" if args.forward_only else "forward+backward",
     }
     print(format_results(results, config))
 

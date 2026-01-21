@@ -340,10 +340,13 @@ from torch_semimarkov.semirings.checkpoint import (
 )
 ```
 
-## Triton Fused Scan (Inference)
+## Triton Fused Scan (Inference Only)
 
-Direct access to the Triton kernel for **inference** when you have pre-computed edge tensors.
-This is optimized for fast forward passes without gradient computation.
+Direct access to the Triton kernel for **inference only** when you have pre-computed edge tensors.
+
+> **Note:** Even for inference, the streaming API is typically faster because computing
+> edges on-the-fly from O(T×C) data is faster than loading O(T×K×C²) pre-computed edges.
+> Use this API only when edge tensors are pre-computed from an external source.
 
 ```python
 from torch_semimarkov.triton_scan import semi_crf_triton_forward
@@ -367,18 +370,32 @@ def semi_crf_triton_forward(
     """
 ```
 
+**Performance comparison (forward-only, NVIDIA L40S):**
+
+Even when the edge tensor fits in memory, streaming is faster:
+
+| Configuration | triton_scan | streaming | Streaming Advantage |
+|---------------|-------------|-----------|---------------------|
+| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35× faster, 2,393× less memory |
+| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48× faster, 11,795× less memory |
+
 **Routing behavior:**
 
-| Context | Execution Path |
-|---------|----------------|
-| `requires_grad=False` + CUDA | Custom Triton kernel (recommended) |
-| `requires_grad=True` + CUDA | `torch.compile` fallback (can be flaky) |
-| CPU or Triton unavailable | PyTorch reference |
+| Context | Execution Path | Recommendation |
+|---------|----------------|----------------|
+| `requires_grad=False` + CUDA | Custom Triton kernel | OK for inference if edges pre-exist |
+| `requires_grad=True` + CUDA | `torch.compile` fallback | **Not recommended** - see warning |
+| CPU or Triton unavailable | PyTorch reference | Use streaming API instead |
 
-**Note:** The `torch.compile` path for training is a fallback and can be unreliable
-depending on PyTorch version and model complexity. For training workloads, use
-`SemiMarkovCRFHead` or `semi_crf_streaming_forward` instead, which use the streaming
-Triton kernel with native gradient support.
+> **Warning: torch.compile limitations for training**
+>
+> The `torch.compile` path for backward passes has critical limitations at production scales:
+> - **RecursionError**: Sequences longer than T≈1000 exceed Python's recursion limit in inductor
+> - **OOM during backward**: Compiled graphs require 2×+ memory for gradient buffers
+> - **Compilation time**: 20+ minutes for T=1000, essentially unusable
+>
+> For training, use `SemiMarkovCRFHead` or `semi_crf_streaming_forward`, which have
+> hand-written Triton backward kernels (no compilation overhead).
 
 **Example usage:**
 
@@ -421,11 +438,12 @@ class ViterbiResult(NamedTuple):
 
 **Recommended usage:**
 
-| Use case | API |
-|----------|-----|
-| Training (any T) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` |
-| Inference with pre-computed edges | `semi_crf_triton_forward` |
-| Very long sequences (T > 10K) | Streaming API (edges computed on-the-fly) |
+| Use case | API | Why |
+|----------|-----|-----|
+| Training (any T) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | Hand-written backward kernels, no torch.compile |
+| Inference (recommended) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | Faster AND less memory than triton_scan |
+| Inference with pre-existing edges | `semi_crf_triton_forward` | Only if edges already materialized externally |
+| Very long sequences (T > 10K) | Streaming API | Edge tensor cannot fit in memory |
 
 ## See Also
 

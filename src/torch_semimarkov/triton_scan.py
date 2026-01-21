@@ -3,18 +3,32 @@ r"""Fused Semi-Markov CRF forward scan with pre-computed edge potentials.
 This module provides optimized implementations of the forward scan for Semi-Markov
 CRFs when edge potentials are **pre-computed and materialized in GPU memory**.
 
+.. warning::
+    **Do NOT use this module for training.**
+
+    The ``torch.compile`` path for backward passes has critical limitations:
+
+    - **RecursionError**: Sequences longer than T≈1000 exceed Python's recursion
+      limit in inductor's topological sort
+    - **OOM during backward**: Compiled graphs require 2×+ memory for gradient
+      buffers, causing OOM even when forward pass succeeds
+    - **Compilation time**: 20+ minutes for T=1000, essentially unusable
+
+    For training, use :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`,
+    which has hand-written Triton backward kernels (no compilation overhead).
+
 .. important::
     **When to use this module vs. streaming API:**
 
-    Use ``triton_scan`` (this module) when:
-        - Edge tensor fits in GPU memory
-        - Edge potentials are pre-computed (e.g., from upstream encoder)
-        - Moderate sequence lengths (typically T < 10K)
+    Use ``triton_scan`` (this module) only when:
+        - Edge tensor is pre-computed from an external source
+        - Inference only (no gradients needed)
+        - Edge tensor already fits in GPU memory
 
-    Use ``streaming`` module when:
-        - Edge tensor is too large to materialize (T > 10K, large K)
-        - Edges follow the decomposable structure (content + transition)
-        - Very long sequences (T = 100K - 400K+)
+    Use ``streaming`` module (recommended) for:
+        - **Training** (always) - hand-written Triton backward kernels
+        - **Inference** (recommended) - faster than triton_scan even when edge fits
+        - **Very long sequences** (T > 10K) - edge tensor cannot fit
 
     **Memory comparison:**
 
@@ -31,6 +45,22 @@ CRFs when edge potentials are **pre-computed and materialized in GPU memory**.
     For the T=400K case, the edge tensor cannot fit in memory. Use the
     :mod:`~torch_semimarkov.streaming` module instead, which computes edges
     on-the-fly from O(T×C) cumulative scores.
+
+    **Performance comparison (forward-only, NVIDIA L40S):**
+
+    Even for inference, streaming is typically faster:
+
+    +-----------------------+---------------------+---------------------+
+    | Configuration         | triton_scan         | streaming           |
+    +=======================+=====================+=====================+
+    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           |
+    +-----------------------+---------------------+---------------------+
+    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          |
+    +-----------------------+---------------------+---------------------+
+
+    The streaming API is faster because computing edges on-the-fly from O(T×C)
+    cumulative scores is faster than loading O(T×K×C²) pre-computed edges from
+    memory (memory bandwidth is the bottleneck, not compute).
 
 API
 ---
@@ -63,11 +93,17 @@ The custom Triton kernel uses a fused scan that:
 Both ``"log"`` (logsumexp for partition function) and ``"max"`` (Viterbi for best
 path score) semirings are supported.
 
-.. note::
-    The hybrid approach gives optimal performance for both inference and training:
-    fast inference with the custom kernel, and efficient training with
-    automatic backward pass generation via ``torch.compile``. Note that torch.compile
-    can be flaky at times and generally recommend the streaming approach.
+.. warning::
+    **torch.compile is broken for training at production scales.**
+
+    While inference uses the fast custom Triton kernel, training attempts to use
+    ``torch.compile`` for backward passes, which fails in multiple ways:
+
+    - RecursionError with T > 1000 (inductor hits Python recursion limit)
+    - OOM during backward (compiled graphs need 2×+ memory)
+    - 20+ minute compilation times
+
+    **Always use the streaming API for training.**
 
 .. note::
     **Pointer arithmetic and int32 overflow:**
@@ -101,7 +137,7 @@ Examples::
 
 See Also
 --------
-:mod:`torch_semimarkov.streaming` : For sequences where edge tensor is too large
+:mod:`torch_semimarkov.streaming` : Recommended for both training and inference
 :class:`torch_semimarkov.SemiMarkov` : High-level API with marginals and sampling
 """
 
