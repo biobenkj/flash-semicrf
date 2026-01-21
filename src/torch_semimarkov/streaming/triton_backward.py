@@ -194,7 +194,7 @@ if HAS_TRITON:
             )  # (C_PAD, C_PAD) - this is transition.T
 
         # Initialize beta ring buffer at final positions
-        final_pos = seq_len - 1
+        final_pos = seq_len
         final_ring_idx = final_pos % K
         # Note: Use tl.range (not static_range) to avoid compile-time explosion for large K
         for k_init in tl.range(0, K):
@@ -216,7 +216,7 @@ if HAS_TRITON:
                 seg_end = T
 
             # Only process segments within sequence length
-            if seg_start < seq_len - 1:
+            if seg_start < seq_len:
                 # === Phase 1: Recompute alpha for this segment ===
                 # Load ring buffer state from checkpoint
                 # Then recompute forward through the segment
