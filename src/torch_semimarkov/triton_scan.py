@@ -169,7 +169,8 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
     # Main scan loop
     for n in range(1, N):
         # Number of valid durations at this position
-        k_eff = min(K - 1, n)
+        # max(1, ...) ensures K=1 still processes duration 1
+        k_eff = max(1, min(K - 1, n))
         dur = dur_arange[:k_eff]  # [1, 2, ..., k_eff] as tensor
         start = n - dur  # positions where segments start (tensor)
 
@@ -179,8 +180,9 @@ def semi_crf_forward_pytorch(edge, lengths, semiring="log"):
         beta_prev = beta_ring.index_select(0, ring_idx)  # (k_eff, batch, C)
         beta_prev = beta_prev.permute(1, 0, 2)  # (batch, k_eff, C)
 
-        # Get edge potentials
-        edge_slice = edge[:, start, dur, :, :]  # (batch, k_eff, C, C)
+        # Get edge potentials (clamp dur to valid index range for K=1 case)
+        dur_clamped = torch.clamp(dur, max=K - 1)
+        edge_slice = edge[:, start, dur_clamped, :, :]  # (batch, k_eff, C, C)
 
         # First reduction: over c_prev (source labels)
         if semiring == "log":
