@@ -346,7 +346,8 @@ class TestSemiMarkovCRFHeadGPU:
             gpu_config["T"],
             gpu_config["hidden_dim"],
             requires_grad=True,
-        ).cuda()
+            device="cuda",
+        )
         lengths = torch.full((gpu_config["batch"],), gpu_config["T"]).cuda()
         labels = torch.randint(
             0, gpu_config["num_classes"], (gpu_config["batch"], gpu_config["T"])
