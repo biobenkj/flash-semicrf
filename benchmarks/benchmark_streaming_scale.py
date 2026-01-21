@@ -152,7 +152,7 @@ def benchmark_scale(
             cum_scores.grad = None
             transition.grad = None
             duration_bias.grad = None
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
 
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -161,18 +161,18 @@ def benchmark_scale(
         backward_times = []
 
         for _ in range(repeats):
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
 
             start_fwd = time.perf_counter()
             partition = semi_crf_streaming_forward(
                 cum_scores, transition, duration_bias, lengths, config.K, use_triton=use_triton
             )
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             end_fwd = time.perf_counter()
 
             start_bwd = time.perf_counter()
             partition.sum().backward()
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             end_bwd = time.perf_counter()
 
             forward_times.append((end_fwd - start_fwd) * 1000)
