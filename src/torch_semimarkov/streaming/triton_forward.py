@@ -698,9 +698,6 @@ if HAS_TRITON:
             if semiring == "log"
             else semi_crf_streaming_scan_kernel_max
         )
-
-        # Ensure CUDA context is set for Triton kernel launch
-        torch.cuda.set_device(device)
         kernel[grid](
             cum_scores,
             transition,

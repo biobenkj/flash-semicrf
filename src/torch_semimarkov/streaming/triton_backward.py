@@ -700,9 +700,6 @@ if HAS_TRITON:
 
         # Launch kernel
         grid = (batch,)
-
-        # Ensure CUDA context is set for Triton kernel launch
-        torch.cuda.set_device(device)
         semi_crf_streaming_backward_kernel[grid](
             cum_scores,
             transition,
