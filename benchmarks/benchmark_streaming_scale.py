@@ -301,6 +301,7 @@ def main():
     print(f"\nRunning {len(configs)} scale configurations...")
 
     results = []
+    results_pytorch = []
     for config in configs:
         print(f"\n--- {config.name}: T={config.T:,}, K={config.K}, batch={config.batch} ---")
 
@@ -315,7 +316,22 @@ def main():
             print(f"{result.status}")
         results.append(result)
 
+        # Run PyTorch reference for comparison if requested
+        if args.pytorch:
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("  Running PyTorch reference...", end=" ", flush=True)
+            result_pytorch = benchmark_scale(config, device, args.warmup, args.repeats, use_triton=False)
+            if result_pytorch.status == "success":
+                print(f"OK ({result_pytorch.total_ms:.1f}ms, {result_pytorch.peak_memory_gb:.1f}GB)")
+            else:
+                print(f"{result_pytorch.status}")
+            results_pytorch.append(result_pytorch)
+
     print_scale_results(results)
+    if args.pytorch and results_pytorch:
+        print("\n\nPYTORCH REFERENCE RESULTS:")
+        print_scale_results(results_pytorch)
 
 
 if __name__ == "__main__":
