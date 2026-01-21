@@ -69,6 +69,21 @@ path score) semirings are supported.
     automatic backward pass generation via ``torch.compile``. Note that torch.compile
     can be flaky at times and generally recommend the streaming approach.
 
+.. note::
+    **Pointer arithmetic and int32 overflow:**
+
+    The Triton kernels use 64-bit integers for batch pointer arithmetic to avoid
+    overflow with large edge tensors. Triton's ``tl.program_id()`` returns int32
+    by default, and multiplying by the batch stride can overflow when:
+
+    .. code-block:: text
+
+        batch_idx × stride_eb > 2^31 (~2.1 billion)
+
+    For T=1000, K=100, C=24, the batch stride is ~57.5M elements, so overflow
+    occurs at batch ≥ 38. The streaming API avoids this issue entirely because
+    its input tensors are ~2,400× smaller per batch element (O(T×C) vs O(T×K×C²)).
+
 Examples::
 
     >>> from torch_semimarkov.triton_scan import semi_crf_triton_forward

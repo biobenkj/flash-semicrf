@@ -3,7 +3,7 @@
 
 Compares performance when the full edge tensor fits in GPU memory.
 
-- triton_scan: Uses pre-computed edge tensor (batch, T-1, K, C, C)
+- triton_scan: Uses pre-computed edge tensor (batch, T, K, C, C)
 - streaming: Computes edges on-the-fly from cum_scores (batch, T+1, C)
 
 Usage:
@@ -18,6 +18,29 @@ Usage:
 Requirements:
     - CUDA GPU
     - torch-semimarkov installed
+
+IMPORTANT: Lengths Convention Difference
+-----------------------------------------
+The two APIs have different conventions for how `lengths` relates to the final
+capture position in the DP scan:
+
+    streaming:   captures at t == lengths
+    triton_scan: captures at n where (n + 1) == lengths
+
+For a sequence of T timesteps (positions 0 to T-1), we want both APIs to compute
+the partition function over all valid segmentations ending at the final timestep.
+This means capturing at DP position T (which processes segments ending at T-1).
+
+To achieve this:
+    - streaming:   pass lengths = T, captures at t = T
+    - triton_scan: pass lengths = T + 1, captures at n = T
+
+This difference arises from how the final capture mask is implemented:
+    - streaming (triton_forward.py:331):   is_final = (t == seq_len)
+    - triton_scan (triton_scan.py:218):    mask_end = (lengths == (n + 1))
+
+The edge tensor must also have shape (batch, T, K, C, C) to support DP position T.
+Previously it was (batch, T-1, K, C, C), which only allowed positions up to T-1.
 """
 
 import argparse
@@ -54,26 +77,40 @@ def compute_edge_from_cumscores(
     This constructs the same edge tensor that the streaming kernel computes
     on-the-fly, allowing fair comparison between the two approaches.
 
+    The edge tensor uses the convention that at DP position n with duration k,
+    triton_scan reads edge[n-k, k]. A segment starting at position `start` with
+    duration k covers timesteps start to start+k-1, ending at position n-1
+    (where n = start + k).
+
+    For a sequence of length T (timesteps 0 to T-1), triton_scan:
+    - Loops n = 1, ..., N-1 where N = edge.shape[1] + 1
+    - Captures final at n where lengths == n + 1, i.e., n = T for lengths = T+1
+    - At n = T with k = 1, reads edge[T-1, 1] with content cum_scores[T] - cum_scores[T-1]
+
     Args:
         cum_scores: (batch, T+1, C) cumulative projected scores
         transition: (C, C) label transition matrix
         duration_bias: (K, C) duration-specific bias
 
     Returns:
-        edge: (batch, T-1, K, C, C) edge potentials
+        edge: (batch, T, K, C, C) edge potentials for DP positions 1 to T
     """
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
 
-    # Allocate edge tensor
+    # Allocate edge tensor with T positions (indices 0 to T-1)
+    # This allows DP position n up to T, accessing edge[n-k, k] for k >= 1
     edge = torch.full(
-        (batch, T - 1, K, C, C),
+        (batch, T, K, C, C),
         -1e9,
         device=cum_scores.device,
         dtype=cum_scores.dtype,
     )
 
-    for t_end in range(1, T):
+    # t_end represents the exclusive end position in cum_scores indexing
+    # For DP position n with duration k: n = t_end, start = t_end - k
+    # content = cum_scores[t_end] - cum_scores[start]
+    for t_end in range(1, T + 1):
         for k in range(1, min(K, t_end + 1)):
             t_start = t_end - k
 
@@ -180,15 +217,22 @@ def run_triton_scan_benchmark(
     warmup: int = 3,
     iterations: int = 10,
 ) -> BenchmarkResult:
-    """Benchmark triton_scan API (pre-computed edge tensor)."""
+    """Benchmark triton_scan API (pre-computed edge tensor).
+
+    Note: lengths should be the number of timesteps (T). Internally, triton_scan
+    uses lengths + 1 to capture at the correct DP position (matching streaming).
+    """
     # Memory for edge tensor
     memory_mb = edge.numel() * edge.element_size() / (1024 * 1024)
+
+    # triton_scan needs lengths + 1 to capture at position T (same as streaming)
+    triton_lengths = lengths + 1
 
     # Forward (inference)
     forward_time, partition = benchmark_forward(
         semi_crf_triton_forward,
         edge,
-        lengths,
+        triton_lengths,
         warmup=warmup,
         iterations=iterations,
         use_triton=True,
@@ -200,7 +244,7 @@ def run_triton_scan_benchmark(
         semi_crf_triton_forward,
         [edge_train],
         edge_train,
-        lengths,
+        triton_lengths,
         warmup=warmup,
         iterations=iterations,
         use_triton=True,
@@ -285,9 +329,18 @@ def verify_correctness(
     rtol: float = 1e-4,
     atol: float = 1e-4,
 ) -> tuple[bool, float]:
-    """Verify both methods produce the same result."""
+    """Verify both methods produce the same result.
+
+    Note on lengths convention:
+    - streaming: captures at t == lengths, so lengths = T means capture at t = T
+    - triton_scan: captures when n + 1 == lengths, so lengths = T means capture at n = T - 1
+
+    For both to capture at the same DP position T (final position for sequence of T timesteps),
+    we pass lengths to streaming and lengths + 1 to triton_scan.
+    """
     with torch.no_grad():
-        result_triton = semi_crf_triton_forward(edge, lengths, use_triton=True)
+        # triton_scan needs lengths + 1 to capture at the same position as streaming
+        result_triton = semi_crf_triton_forward(edge, lengths + 1, use_triton=True)
         result_streaming = semi_crf_streaming_forward(
             cum_scores, transition, duration_bias, lengths, K, use_triton=True
         )
@@ -296,6 +349,56 @@ def verify_correctness(
     is_close = torch.allclose(result_triton, result_streaming, rtol=rtol, atol=atol)
 
     return is_close, max_diff
+
+
+def debug_edge_tensor(
+    edge: torch.Tensor,
+    cum_scores: torch.Tensor,
+    transition: torch.Tensor,
+    duration_bias: torch.Tensor,
+    K: int,
+):
+    """Debug: print edge values at specific positions to verify convention."""
+    batch, T_plus_1, C = cum_scores.shape
+    T = T_plus_1 - 1
+
+    print("\n=== Edge Tensor Debug ===")
+    print(f"T={T}, K={K}, C={C}")
+    print(f"edge shape: {edge.shape}")
+    print(f"cum_scores shape: {cum_scores.shape}")
+
+    # Check a few positions
+    print("\nComparing edge values (n=DP position, k=duration, start=segment start):")
+    print("  triton_scan reads edge[start, k] at DP position n")
+    print("  streaming computes content = cum_scores[n] - cum_scores[start]")
+    print()
+
+    for n in [1, 2, 10, 50, 100]:  # DP positions triton_scan would access
+        if n >= T:
+            continue
+        for k in [1, 2, min(5, K - 1)]:  # durations
+            start = n - k
+            if start < 0 or k >= K:
+                continue
+
+            # What triton_scan reads at position (start, k)
+            edge_val = edge[0, start, k, 0, 0].item()
+
+            # What streaming kernel would compute for DP position n with duration k
+            # content = cum_scores[n] - cum_scores[n-k] = cum_scores[n] - cum_scores[start]
+            content = cum_scores[0, n, 0] - cum_scores[0, start, 0]
+            db = duration_bias[k, 0]
+            tr = transition[0, 0]  # transition[c_src=0, c_dst=0]
+            expected = (content + db + tr).item()
+
+            diff = abs(edge_val - expected)
+            marker = " <-- MISMATCH" if diff > 1e-5 else ""
+            print(
+                f"  n={n:3d}, k={k}, start={start:3d}: "
+                f"edge={edge_val:8.4f}, expected={expected:8.4f}, diff={diff:.2e}{marker}"
+            )
+
+    print("=== End Debug ===\n")
 
 
 @dataclass
@@ -312,8 +415,8 @@ class BatchScalingResult:
 
 def estimate_edge_memory_mb(batch: int, T: int, K: int, C: int) -> float:
     """Estimate memory for edge tensor in MB."""
-    # edge shape: (batch, T-1, K, C, C), float32
-    return batch * (T - 1) * K * C * C * 4 / (1024 * 1024)
+    # edge shape: (batch, T, K, C, C), float32
+    return batch * T * K * C * C * 4 / (1024 * 1024)
 
 
 def _reset_cuda_state(device: torch.device) -> None:
@@ -515,12 +618,14 @@ def run_batch_scaling_test(
 
         try:
             edge = compute_edge_from_cumscores(cum_scores, transition, duration_bias, K)
+            # triton_scan needs lengths + 1 to match streaming's capture position
+            triton_lengths = lengths + 1
 
             if mode == "forward":
                 time_ms, _ = benchmark_forward(
                     semi_crf_triton_forward,
                     edge,
-                    lengths,
+                    triton_lengths,
                     device=device,
                     warmup=warmup,
                     iterations=iterations,
@@ -532,7 +637,7 @@ def run_batch_scaling_test(
                     semi_crf_triton_forward,
                     [edge_train],
                     edge_train,
-                    lengths,
+                    triton_lengths,
                     device=device,
                     warmup=warmup,
                     iterations=iterations,
@@ -737,8 +842,8 @@ def main():
     parser.add_argument(
         "--batch-sizes",
         type=str,
-        default="1,2,4,8,16,32,64,128,256,512,1024",
-        help="Comma-separated batch sizes for scaling test (default: 1,2,4,...,1024)",
+        default="1,2,4,8,16,32,64,128,256,512,1024,2048,4096",
+        help="Comma-separated batch sizes for scaling test (default: 1,2,4,...,4096)",
     )
     parser.add_argument(
         "--scaling-mode",
@@ -842,6 +947,7 @@ def main():
     print(f"  Max difference: {max_diff:.2e}")
     if not is_correct:
         print("  WARNING: Results differ significantly!")
+        debug_edge_tensor(edge, cum_scores, transition, duration_bias, K)
     print()
 
     # Warmup CUDA
