@@ -1211,7 +1211,7 @@ class TestTritonBackwardDebug:
             for idx in idxs:
                 b, t, c = idx.tolist()
                 print(
-                    f"  [{b},{t},{c}]: PyTorch={cs_py.grad[b,t,c]:.4f}, Triton={cs_tr.grad[b,t,c]:.4f}, diff={cs_diff[b,t,c]:.4f}"
+                    f"  [{b}, {t}, {c}]: PyTorch={cs_py.grad[b, t, c]:.4f}, Triton={cs_tr.grad[b, t, c]:.4f}, diff={cs_diff[b, t, c]:.4f}"
                 )
 
         print("\n--- grad_transition statistics ---")
