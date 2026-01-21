@@ -8,7 +8,7 @@ CRFs when edge potentials are **pre-computed and materialized in GPU memory**.
 
     Use ``triton_scan`` (this module) when:
         - Edge tensor fits in GPU memory
-        - Edge potentials are pre-computed (e.g., from a neural network)
+        - Edge potentials are pre-computed (e.g., from upstream encoder)
         - Moderate sequence lengths (typically T < 10K)
 
     Use ``streaming`` module when:
@@ -48,7 +48,7 @@ Implementation
 --------------
 Three execution paths are provided, automatically selected based on context:
 
-1. **Custom Triton kernel** (GPU inference): Maximum performance (~45x faster),
+1. **Custom Triton kernel** (GPU inference): Maximum performance,
    used when ``requires_grad=False`` and CUDA is available.
 2. **torch.compile** (GPU training): Uses ``torch.compile`` to generate optimized
    Triton kernels for both forward AND backward passes automatically.
@@ -65,8 +65,9 @@ path score) semirings are supported.
 
 .. note::
     The hybrid approach gives optimal performance for both inference and training:
-    blazing fast inference with the custom kernel, and efficient training with
-    automatic backward pass generation via ``torch.compile``.
+    fast inference with the custom kernel, and efficient training with
+    automatic backward pass generation via ``torch.compile``. Note that torch.compile
+    can be flaky at times and generally recommend the streaming approach.
 
 Examples::
 
@@ -721,14 +722,14 @@ def semi_crf_triton_forward(
     optimal performance in both inference and training:
 
     - **Inference** (no gradients): Uses the custom Triton kernel for maximum
-      speed (~45x faster than naive PyTorch).
+      speed.
     - **Training** (with gradients): Uses ``torch.compile`` on the PyTorch
       implementation, which generates optimized Triton kernels for both forward
       AND backward passes automatically.
 
-    This hybrid approach gives you the best of both worlds: blazing fast inference
+    This hybrid approach gives you the best of both worlds: fast inference
     with the custom kernel, and efficient training with automatic backward
-    pass generation.
+    pass generation. However, torch.compile can be flaky at times.
 
     See :class:`~torch_semimarkov.SemiMarkov` for the full Semi-Markov CRF model
     with additional functionality like marginals and sampling.

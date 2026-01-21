@@ -16,6 +16,15 @@ Classes:
 Functions:
     :func:`create_duration_distribution`: Factory function to create distributions.
 
+Numerical Stability:
+    Most distributions include safeguards against numerical instability:
+
+    - **GeometricDuration**: Numerically stable for all parameter values.
+    - **PoissonDuration**: Stable; epsilon added to prevent ``log(0)``.
+    - **NegativeBinomialDuration**: Can produce non-finite values with very small
+      shape parameter :math:`r`. A runtime warning is emitted when this occurs.
+      See :class:`NegativeBinomialDuration` for mitigation strategies.
+
 Examples::
 
     >>> from torch_semimarkov.duration import LearnedDuration, GeometricDuration
@@ -32,6 +41,7 @@ See Also:
     :class:`~torch_semimarkov.nn.SemiMarkovCRFHead`: Uses duration distributions
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Union
@@ -130,6 +140,12 @@ class GeometricDuration(DurationDistribution):
     .. math::
         \log P(k) = \log(p) + (k-1) \cdot \log(1-p)
 
+    .. note::
+        This distribution is numerically stable for all parameter values. The
+        probability :math:`p` is constrained to :math:`(0, 1)` via sigmoid, and
+        a small epsilon (``1e-8``) is added before taking logs to prevent
+        ``log(0)`` at extreme values.
+
     Args:
         max_duration (int): Maximum segment duration :math:`K`.
         num_classes (int): Number of label classes :math:`C`.
@@ -200,13 +216,26 @@ class NegativeBinomialDuration(DurationDistribution):
     When :math:`r=1`, reduces to geometric distribution.
     Larger :math:`r` values create more peaked distributions around the mode.
 
+    .. warning::
+        Very small values of :math:`r` (e.g., ``init_log_r < -10``) can cause
+        numerical instability due to :func:`torch.lgamma` overflow in the binomial
+        coefficient computation. When this occurs, a :class:`UserWarning` is emitted
+        at runtime.
+
+        If you encounter non-finite values, consider:
+
+        - Using a larger ``init_log_r`` (e.g., ``-5.0`` or higher)
+        - Switching to :class:`GeometricDuration` which is numerically stable
+        - Clamping the learned ``log_r`` parameter during training
+
     Args:
         max_duration (int): Maximum segment duration :math:`K`.
         num_classes (int): Number of label classes :math:`C`.
         init_logit (float, optional): Initial logit for success probability.
             Default: ``0.0``
-        init_log_r (float, optional): Initial log of shape parameter.
-            Default: ``0.0`` (corresponds to :math:`r = 1`)
+        init_log_r (float, optional): Initial log of shape parameter. Values below
+            ``-10`` may cause numerical instability. Default: ``0.0`` (corresponds
+            to :math:`r = 1`)
         learn_rate (bool, optional): If ``True``, the rate parameter is learned.
             Default: ``True``
         learn_shape (bool, optional): If ``True``, the shape parameter is learned.
@@ -222,6 +251,10 @@ class NegativeBinomialDuration(DurationDistribution):
         >>> bias = dur()
         >>> bias.shape
         torch.Size([8, 4])
+
+    See Also:
+        :class:`GeometricDuration`: Equivalent to negative binomial with :math:`r=1`,
+            but numerically stable for all parameter values.
     """
 
     def __init__(
@@ -254,6 +287,11 @@ class NegativeBinomialDuration(DurationDistribution):
 
         Returns:
             Tensor: Log-probabilities of shape :math:`(K, C)`.
+
+        Warns:
+            UserWarning: If the output contains non-finite values (NaN or Inf),
+                typically caused by very small :math:`r` values. This check is
+                skipped during TorchScript compilation and ``torch.compile``.
         """
         p = torch.sigmoid(self.logit_p)  # (C,)
         r = torch.exp(self.log_r) + 1e-8  # (C,), ensure positive
@@ -282,6 +320,18 @@ class NegativeBinomialDuration(DurationDistribution):
             + (k_expanded - 1) * log_1_minus_p.unsqueeze(0)
         )
 
+        # Warn if numerical instability detected (common with very small r)
+        if not torch.jit.is_scripting() and not torch.compiler.is_compiling():
+            non_finite_count = (~torch.isfinite(log_prob)).sum().item()
+            if non_finite_count > 0:
+                r_min = r.min().item()
+                warnings.warn(
+                    f"NegativeBinomialDuration produced {non_finite_count} non-finite values. "
+                    f"This typically occurs when r is very small (current min r={r_min:.2e}). "
+                    f"Consider using a larger init_log_r or switching to GeometricDuration.",
+                    stacklevel=2,
+                )
+
         return log_prob
 
 
@@ -295,7 +345,9 @@ class PoissonDuration(DurationDistribution):
         P(k) \propto \frac{\lambda^k}{k!}
 
     .. note::
-        This is a shifted Poisson (k starts at 1, not 0).
+        This is a shifted Poisson (k starts at 1, not 0). A small epsilon (``1e-8``)
+        is added to :math:`\lambda` before taking the log to prevent ``log(0)``
+        when :math:`\lambda \to 0`.
 
     Args:
         max_duration (int): Maximum segment duration :math:`K`.
