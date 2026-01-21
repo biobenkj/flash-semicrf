@@ -361,7 +361,7 @@ if HAS_TRITON:
                 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
                     t = seg_end - 1 - t_offset
                     # Only process valid positions
-                    if t >= seg_start and t < seq_len - 1 and t >= 0:
+                    if t >= seg_start and t < seq_len and t >= 0:
                         # Get alpha[t] from buffer
                         local_t = t - seg_start
                         alpha_t = tl.load(
@@ -377,7 +377,7 @@ if HAS_TRITON:
                         for k in tl.range(1, tl.maximum(K, 2)):
                             end_pos = t + k
                             # Only process valid end positions
-                            if end_pos <= seq_len - 1 and end_pos <= T - 1:
+                            if end_pos <= seq_len and end_pos <= T:
                                 # Get beta[end_pos] from ring buffer
                                 end_ring_idx = end_pos % K
                                 beta_next = tl.load(
