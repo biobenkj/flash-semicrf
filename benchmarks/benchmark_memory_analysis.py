@@ -304,6 +304,35 @@ def main():
                         )
                         continue
 
+                    # Skip configs where K > T (max duration exceeds sequence length)
+                    # These waste memory on unreachable states
+                    if K > T:
+                        print(
+                            f"[{completed}/{total_configs}] SKIP T={T}, K={K}, C={C}, "
+                            f"{backend}/{semiring_name}/{phase}: K > T (unreachable durations)"
+                        )
+                        results.append(
+                            BenchmarkResult(
+                                T=T,
+                                K=K,
+                                C=C,
+                                B=args.B,
+                                KC=KC,
+                                backend=backend,
+                                semiring=semiring_name,
+                                phase=phase,
+                                time_ms_median=float("nan"),
+                                time_ms_iqr_low=float("nan"),
+                                time_ms_iqr_high=float("nan"),
+                                time_per_position_ms=float("nan"),
+                                peak_allocated_gb=float("nan"),
+                                peak_reserved_gb=float("nan"),
+                                status="skipped",
+                                error_msg=f"K={K} > T={T}: unreachable durations",
+                            )
+                        )
+                        continue
+
                     # Check if we should skip based on OOM history
                     if args.skip_adjacent_oom:
                         # Use backend-only key for memory estimation
