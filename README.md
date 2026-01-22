@@ -20,7 +20,7 @@ Semi-Markov CRFs are powerful models for sequences with natural segment structur
 
 Existing implementations navigate this through various tradeoffs—bounding $K$, chunked processing, or filtering heuristics. This package takes a different approach:
 
-Streaming the linear scan collapses memory to $O(KC)$—independent of sequence length.
+Streaming the linear scan reduces DP working memory to $O(KC)$, avoiding the $O(TKC^2)$ edge tensor (see [streaming internals](docs/streaming_internals.md) for details).
 
 This makes Semi-Markov CRF inference practical for long sequences—chromosome-scale genomics, multi-hour clinical recordings, or large document collections—without architectural compromises.
 
@@ -87,7 +87,7 @@ from torch_semimarkov import SemiMarkovCRFHead
 # Create Semi-CRF decoder (integrates with Transformer, Mamba, CNN, etc.)
 crf = SemiMarkovCRFHead(
     num_classes=24,      # C: number of segment labels
-    max_duration=100,    # K: maximum segment length
+    max_duration=100,    # K: ring buffer size; max segment length is K-1=99
     hidden_dim=512       # matches encoder output
 )
 
