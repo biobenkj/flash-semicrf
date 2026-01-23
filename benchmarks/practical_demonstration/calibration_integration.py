@@ -34,8 +34,6 @@ are derived from position marginals using derive_boundary_probs_from_positions()
 
 import numpy as np
 import torch
-from torch import Tensor
-
 
 # =============================================================================
 # INTEGRATION FOR GENCODE BENCHMARK (gencode_exon_intron.py)
@@ -59,40 +57,38 @@ def evaluate_with_calibration_gencode(
 ):
     """
     Extended evaluation that includes calibration metrics.
-    
+
     Add this function to gencode_exon_intron.py and call it after training
     to get calibration metrics alongside the standard metrics.
     """
     from calibration import (
         CalibrationEvaluator,
-        derive_boundary_probs_from_positions,
         compute_boundary_errors,
+        derive_boundary_probs_from_positions,
     )
-    
+
     model.eval()
-    
+
     # Standard metrics collection (same as before)
     all_predictions = []
     all_targets = []
-    all_pred_segments = []
-    all_true_segments = []
-    
+
     # Calibration data collection
     all_boundary_probs = []
     all_true_boundaries = []
     all_boundary_errors = []
-    
+
     with torch.no_grad():
         for batch in dataloader:
             sequence = batch["sequence"].to(device)
             labels = batch["labels"].to(device)
             lengths = batch["lengths"].to(device)
-            
+
             # Get hidden states from encoder
             hidden = model.encoder(sequence)
-            
+
             # Get boundary probabilities
-            if is_semicrf and hasattr(model.crf, 'compute_boundary_marginals'):
+            if is_semicrf and hasattr(model.crf, "compute_boundary_marginals"):
                 # Native semi-CRF boundary probabilities
                 # This uses UncertaintySemiMarkovCRFHead
                 boundary_probs = model.crf.compute_boundary_marginals(hidden, lengths)
@@ -106,39 +102,39 @@ def evaluate_with_calibration_gencode(
                     bp = derive_boundary_probs_from_positions(pos_p, method="transition")
                     boundary_probs.append(bp)
                 boundary_probs = boundary_probs  # List of arrays
-            
+
             # Decode for standard metrics
             result = model.decode(sequence, lengths)
-            
+
             for i in range(len(lengths)):
                 seq_len = lengths[i].item()
-                
+
                 # Standard metrics
                 pred_labels = np.zeros(seq_len, dtype=np.int64)
                 for seg in result.segments[i]:
-                    pred_labels[seg.start:seg.end+1] = seg.label
-                
+                    pred_labels[seg.start : seg.end + 1] = seg.label
+
                 true_labels = labels[i, :seq_len].cpu().numpy()
-                
+
                 all_predictions.append(pred_labels)
                 all_targets.append(true_labels)
-                
+
                 # Calibration metrics
                 # True boundaries: where labels change
                 true_bounds = np.zeros(seq_len, dtype=bool)
                 for j in range(1, seq_len):
-                    if true_labels[j] != true_labels[j-1]:
+                    if true_labels[j] != true_labels[j - 1]:
                         true_bounds[j] = True
-                
+
                 if isinstance(boundary_probs, torch.Tensor):
                     bp = boundary_probs[i, :seq_len].cpu().numpy()
                 else:
                     bp = boundary_probs[i]
-                
+
                 all_boundary_probs.append(bp)
                 all_true_boundaries.append(true_bounds)
                 all_boundary_errors.append(compute_boundary_errors(true_bounds))
-    
+
     # Compute calibration metrics
     evaluator = CalibrationEvaluator()
     calibration_results = evaluator.evaluate(
@@ -146,7 +142,7 @@ def evaluate_with_calibration_gencode(
         true_boundaries=all_true_boundaries,
         boundary_errors=all_boundary_errors,
     )
-    
+
     return calibration_results
 
 
@@ -160,49 +156,54 @@ def compare_calibration_gencode(
 ):
     """
     Compare calibration between linear CRF and semi-CRF on Gencode benchmark.
-    
+
     Call this after training both models.
     """
-    from calibration import print_calibration_comparison, plot_calibration_comparison
-    from torch.utils.data import DataLoader
-    from pathlib import Path
-    
+    # These imports would be used when integrating with actual benchmark:
+    # from pathlib import Path
+    # from torch.utils.data import DataLoader
+
     # This assumes you've already trained both models
     # In practice, you'd integrate this into the compare_models function
-    
+
     device = torch.device(device)
-    
+
     # Load test data
-    test_dataset = GencodeDataset(Path(data_dir) / "test.jsonl")
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    
+    # NOTE: GencodeDataset and collate_fn must be imported from gencode_exon_intron.py
+    # test_dataset = GencodeDataset(Path(data_dir) / "test.jsonl")
+    # test_loader = DataLoader(
+    #     test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
+    # )
+    _ = device  # Placeholder - uncomment above and use when integrating
+
     # Evaluate linear CRF (K=1)
     # linear_model = ... (your trained linear model)
     # linear_calibration = evaluate_with_calibration_gencode(
     #     linear_model, test_loader, device, is_semicrf=False
     # )
-    
+
     # Evaluate semi-CRF (K=500)
     # semicrf_model = ... (your trained semi-CRF model)
     # semicrf_calibration = evaluate_with_calibration_gencode(
     #     semicrf_model, test_loader, device, is_semicrf=True
     # )
-    
+
     # Print comparison
     # print_calibration_comparison(semicrf_calibration, linear_calibration)
-    
+
     # Plot comparison
     # plot_calibration_comparison(
     #     semicrf_calibration, linear_calibration,
     #     output_path="calibration_comparison_gencode.pdf"
     # )
-    
+
     pass  # Placeholder
 
 
 # =============================================================================
 # INTEGRATION FOR TIMIT BENCHMARK (timit_phoneme.py)
 # =============================================================================
+
 
 def evaluate_with_calibration_timit(
     model,  # TIMITModel
@@ -212,30 +213,30 @@ def evaluate_with_calibration_timit(
 ):
     """
     Extended evaluation that includes calibration metrics for TIMIT.
-    
+
     Add this function to timit_phoneme.py.
     """
     from calibration import (
         CalibrationEvaluator,
-        derive_boundary_probs_from_positions,
         compute_boundary_errors,
+        derive_boundary_probs_from_positions,
     )
-    
+
     model.eval()
-    
+
     all_boundary_probs = []
     all_true_boundaries = []
     all_boundary_errors = []
-    
+
     with torch.no_grad():
         for batch in dataloader:
             features = batch["features"].to(device)
             labels = batch["labels"].to(device)
             lengths = batch["lengths"].to(device)
-            
+
             hidden = model.encoder(features)
-            
-            if is_semicrf and hasattr(model.crf, 'compute_boundary_marginals'):
+
+            if is_semicrf and hasattr(model.crf, "compute_boundary_marginals"):
                 boundary_probs = model.crf.compute_boundary_marginals(hidden, lengths)
             else:
                 position_probs = model.crf.compute_position_marginals(hidden, lengths)
@@ -245,25 +246,25 @@ def evaluate_with_calibration_timit(
                     pos_p = position_probs[i, :seq_len].cpu().numpy()
                     bp = derive_boundary_probs_from_positions(pos_p, method="transition")
                     boundary_probs.append(bp)
-            
+
             for i in range(len(lengths)):
                 seq_len = lengths[i].item()
                 true_labels = labels[i, :seq_len].cpu().numpy()
-                
+
                 true_bounds = np.zeros(seq_len, dtype=bool)
                 for j in range(1, seq_len):
-                    if true_labels[j] != true_labels[j-1]:
+                    if true_labels[j] != true_labels[j - 1]:
                         true_bounds[j] = True
-                
+
                 if isinstance(boundary_probs, torch.Tensor):
                     bp = boundary_probs[i, :seq_len].cpu().numpy()
                 else:
                     bp = boundary_probs[i]
-                
+
                 all_boundary_probs.append(bp)
                 all_true_boundaries.append(true_bounds)
                 all_boundary_errors.append(compute_boundary_errors(true_bounds))
-    
+
     evaluator = CalibrationEvaluator()
     return evaluator.evaluate(
         boundary_probs=all_boundary_probs,
@@ -276,59 +277,61 @@ def evaluate_with_calibration_timit(
 # EXAMPLE: Modifying compare_models to include calibration
 # =============================================================================
 
+
 def compare_models_with_calibration(data_dir, **kwargs):
     """
     Example showing how to modify compare_models to include calibration.
-    
+
     This is a template - copy the relevant parts into your existing
     compare_models function in each benchmark file.
     """
-    from calibration import print_calibration_comparison, plot_calibration_comparison
-    
+    # NOTE: train_model, test_loader, device must be defined in your benchmark file
+    # The code below shows the pattern - uncomment and adapt when integrating
+    # from calibration import plot_calibration_comparison, print_calibration_comparison
+
     results = {}
     calibration_results = {}
-    
+
     # Train linear CRF
-    print("Training LINEAR CRF (K=1)")
-    linear_model, linear_metrics = train_model(data_dir, model_type="linear", **kwargs)
-    results["linear_crf"] = linear_metrics
-    
+    # print("Training LINEAR CRF (K=1)")
+    # linear_model, linear_metrics = train_model(data_dir, model_type="linear", **kwargs)
+    # results["linear_crf"] = linear_metrics
+
     # Evaluate calibration for linear CRF
     # Note: For linear CRF, we derive boundary probs from position marginals
-    linear_calibration = evaluate_with_calibration_gencode(  # or _timit
-        linear_model, test_loader, device, is_semicrf=False
-    )
-    calibration_results["linear_crf"] = linear_calibration
-    
-    # Train semi-CRF  
-    print("Training SEMI-CRF")
-    semicrf_model, semicrf_metrics = train_model(data_dir, model_type="semicrf", **kwargs)
-    results["semi_crf"] = semicrf_metrics
-    
+    # linear_calibration = evaluate_with_calibration_gencode(  # or _timit
+    #     linear_model, test_loader, device, is_semicrf=False
+    # )
+    # calibration_results["linear_crf"] = linear_calibration
+
+    # Train semi-CRF
+    # print("Training SEMI-CRF")
+    # semicrf_model, semicrf_metrics = train_model(data_dir, model_type="semicrf", **kwargs)
+    # results["semi_crf"] = semicrf_metrics
+
     # Evaluate calibration for semi-CRF
     # Note: Semi-CRF has native boundary probabilities
-    semicrf_calibration = evaluate_with_calibration_gencode(  # or _timit
-        semicrf_model, test_loader, device, is_semicrf=True
-    )
-    calibration_results["semi_crf"] = semicrf_calibration
-    
+    # semicrf_calibration = evaluate_with_calibration_gencode(  # or _timit
+    #     semicrf_model, test_loader, device, is_semicrf=True
+    # )
+    # calibration_results["semi_crf"] = semicrf_calibration
+
     # Print standard metrics comparison
     # ... (existing code)
-    
+
     # Print calibration comparison
-    print_calibration_comparison(
-        semicrf_calibration,
-        linear_calibration,
-        model_names=("Semi-CRF", "Linear CRF")
-    )
-    
+    # print_calibration_comparison(
+    #     semicrf_calibration, linear_calibration, model_names=("Semi-CRF", "Linear CRF")
+    # )
+
     # Generate calibration plots
-    plot_calibration_comparison(
-        semicrf_calibration,
-        linear_calibration,
-        output_path="calibration_comparison.pdf"
-    )
-    
+    # plot_calibration_comparison(
+    #     semicrf_calibration, linear_calibration, output_path="calibration_comparison.pdf"
+    # )
+
+    # Placeholder - uncomment above code when integrating
+    _ = data_dir, kwargs, results, calibration_results
+
     return results, calibration_results
 
 
@@ -345,7 +348,7 @@ Change this in your model class:
     # Before
     from torch_semimarkov import SemiMarkovCRFHead
     self.crf = SemiMarkovCRFHead(...)
-    
+
     # After
     from torch_semimarkov import UncertaintySemiMarkovCRFHead
     self.crf = UncertaintySemiMarkovCRFHead(...)

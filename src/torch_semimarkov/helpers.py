@@ -370,33 +370,59 @@ def score_gold_vectorized(
     duration_bias: torch.Tensor,
     max_duration: int,
 ) -> torch.Tensor:
-    r"""Vectorized gold sequence scoring without Python loops.
+    r"""score_gold_vectorized(cum_scores, labels, lengths, transition, duration_bias, max_duration) -> Tensor
 
-    Computes the score of gold segmentations by extracting segments from
-    per-position labels and summing content, duration, and transition scores.
+    Compute the score of gold segmentations in a vectorized manner.
 
-    This is a vectorized replacement for the loop-based ``_score_gold`` method,
-    providing significant speedup for batches with many segments.
+    Extracts segments from per-position labels (where label changes indicate
+    segment boundaries) and sums content, duration, and transition scores.
+    This is a vectorized replacement for loop-based scoring, providing
+    significant speedup for batches with many segments.
+
+    The score for a segmentation is:
+
+    .. math::
+        \text{score} = \sum_i \text{content}_i + \sum_i \text{duration}_i + \sum_i \text{transition}_i
+
+    where each segment :math:`i` at positions ``[start, end]`` with label :math:`c` contributes:
+
+    - Content: :math:`\text{cum\_scores}[\text{end}+1, c] - \text{cum\_scores}[\text{start}, c]`
+    - Duration: :math:`\text{duration\_bias}[\min(d, K-1), c]` where :math:`d = \text{end} - \text{start} + 1`
+    - Transition: :math:`\text{transition}[\text{prev\_label}, c]` (except first segment)
 
     Args:
         cum_scores (Tensor): Cumulative projected scores of shape
             :math:`(\text{batch}, T+1, C)`.
         labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`.
+            Segment boundaries are detected where labels change.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-        transition (Tensor): Transition scores of shape :math:`(C, C)`.
-        duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
-        max_duration (int): Maximum segment duration (K).
+        transition (Tensor): Transition scores of shape :math:`(C, C)` where
+            ``transition[i, j]`` is the score for transitioning from label ``i``
+            to label ``j``.
+        duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)` where
+            ``duration_bias[k, c]`` is the bias for a segment of duration ``k`` with
+            label ``c``.
+        max_duration (int): Maximum segment duration :math:`K`.
 
     Returns:
         Tensor: Gold sequence scores of shape :math:`(\text{batch},)`.
 
-    Note:
-        Segments are identified by label changes. A segment at positions
-        ``[start, end]`` (inclusive) with label ``c`` contributes:
+    Examples::
 
-        - Content: ``cum_scores[end+1, c] - cum_scores[start, c]``
-        - Duration: ``duration_bias[min(duration, K-1), c]`` (duration_bias[k] stores bias for duration k)
-        - Transition: ``transition[prev_label, c]`` (except first segment)
+        >>> batch, T, C, K = 2, 10, 4, 5
+        >>> cum_scores = torch.randn(batch, T + 1, C)
+        >>> labels = torch.randint(0, C, (batch, T))
+        >>> lengths = torch.full((batch,), T)
+        >>> transition = torch.randn(C, C)
+        >>> duration_bias = torch.randn(K, C)
+        >>> scores = score_gold_vectorized(
+        ...     cum_scores, labels, lengths, transition, duration_bias, K
+        ... )
+        >>> scores.shape
+        torch.Size([2])
+
+    See Also:
+        :meth:`~torch_semimarkov.nn.SemiMarkovCRFHead.compute_loss`: Uses this for NLL computation
     """
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1

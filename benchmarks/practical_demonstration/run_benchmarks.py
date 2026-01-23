@@ -51,7 +51,7 @@ import numpy as np
 # Conditional matplotlib import
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
+
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -62,15 +62,16 @@ logger = logging.getLogger(__name__)
 
 # Colorblind-safe palette (IBM Design)
 COLORS = {
-    "semi_crf": "#DC267F",   # Pink/Magenta
+    "semi_crf": "#DC267F",  # Pink/Magenta
     "linear_crf": "#648FFF",  # Blue
-    "highlight": "#FFB000",   # Gold
+    "highlight": "#FFB000",  # Gold
 }
 
 
 # =============================================================================
 # Plotting Functions
 # =============================================================================
+
 
 def plot_comparison_bar(
     results: dict[str, Any],
@@ -111,10 +112,24 @@ def plot_comparison_bar(
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    bars1 = ax.bar(x - width/2, linear_vals, width, label="Linear CRF (K=1)",
-                   color=COLORS["linear_crf"], edgecolor="black", linewidth=0.5)
-    bars2 = ax.bar(x + width/2, semi_vals, width, label="Semi-CRF",
-                   color=COLORS["semi_crf"], edgecolor="black", linewidth=0.5)
+    bars1 = ax.bar(
+        x - width / 2,
+        linear_vals,
+        width,
+        label="Linear CRF (K=1)",
+        color=COLORS["linear_crf"],
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        semi_vals,
+        width,
+        label="Semi-CRF",
+        color=COLORS["semi_crf"],
+        edgecolor="black",
+        linewidth=0.5,
+    )
 
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(title, fontsize=14, fontweight="bold")
@@ -126,12 +141,17 @@ def plot_comparison_bar(
     ax.set_axisbelow(True)
 
     # Add value labels on bars
-    for bar in bars1 + bars2:
+    for bar in list(bars1) + list(bars2):
         height = bar.get_height()
-        ax.annotate(f"{height:.3f}",
-                   xy=(bar.get_x() + bar.get_width() / 2, height),
-                   xytext=(0, 3), textcoords="offset points",
-                   ha="center", va="bottom", fontsize=9)
+        ax.annotate(
+            f"{height:.3f}",
+            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
 
     # Add PER for TIMIT (inverted - lower is better)
     if task == "timit":
@@ -141,13 +161,27 @@ def plot_comparison_bar(
         semi_per = semi.get("phone_error_rate", 0)
 
         # Add PER bars on secondary axis
-        ax.bar(per_x - width/2, 0, width)  # Placeholder
-        ax.bar(per_x + width/2, 0, width)  # Placeholder
+        ax.bar(per_x - width / 2, 0, width)  # Placeholder
+        ax.bar(per_x + width / 2, 0, width)  # Placeholder
 
-        ax2.bar(per_x - width/2, linear_per, width, color=COLORS["linear_crf"],
-               edgecolor="black", linewidth=0.5, alpha=0.7)
-        ax2.bar(per_x + width/2, semi_per, width, color=COLORS["semi_crf"],
-               edgecolor="black", linewidth=0.5, alpha=0.7)
+        ax2.bar(
+            per_x - width / 2,
+            linear_per,
+            width,
+            color=COLORS["linear_crf"],
+            edgecolor="black",
+            linewidth=0.5,
+            alpha=0.7,
+        )
+        ax2.bar(
+            per_x + width / 2,
+            semi_per,
+            width,
+            color=COLORS["semi_crf"],
+            edgecolor="black",
+            linewidth=0.5,
+            alpha=0.7,
+        )
 
         ax2.set_ylabel("Phone Error Rate (↓)", fontsize=12)
         ax2.set_ylim(0, 1.0)
@@ -200,10 +234,24 @@ def plot_boundary_tolerance(
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    ax.plot(tolerances, linear_vals, "o--", color=COLORS["linear_crf"],
-            label="Linear CRF (K=1)", linewidth=2, markersize=8)
-    ax.plot(tolerances, semi_vals, "o-", color=COLORS["semi_crf"],
-            label="Semi-CRF", linewidth=2, markersize=8)
+    ax.plot(
+        tolerances,
+        linear_vals,
+        "o--",
+        color=COLORS["linear_crf"],
+        label="Linear CRF (K=1)",
+        linewidth=2,
+        markersize=8,
+    )
+    ax.plot(
+        tolerances,
+        semi_vals,
+        "o-",
+        color=COLORS["semi_crf"],
+        label="Semi-CRF",
+        linewidth=2,
+        markersize=8,
+    )
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel("Boundary F1", fontsize=12)
@@ -217,11 +265,14 @@ def plot_boundary_tolerance(
     if len(linear_vals) > 0 and len(semi_vals) > 0:
         delta = semi_vals[0] - linear_vals[0]
         if delta > 0:
-            ax.annotate(f"+{delta:.3f}",
-                       xy=(0, semi_vals[0]),
-                       xytext=(0.5, semi_vals[0] + 0.05),
-                       fontsize=10, color=COLORS["semi_crf"],
-                       arrowprops=dict(arrowstyle="->", color=COLORS["semi_crf"]))
+            ax.annotate(
+                f"+{delta:.3f}",
+                xy=(0, semi_vals[0]),
+                xytext=(0.5, semi_vals[0] + 0.05),
+                fontsize=10,
+                color=COLORS["semi_crf"],
+                arrowprops={"arrowstyle": "->", "color": COLORS["semi_crf"]},
+            )
 
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,10 +319,24 @@ def plot_duration_kl(
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    bars1 = ax.bar(x - width/2, linear_vals, width, label="Linear CRF (K=1)",
-                   color=COLORS["linear_crf"], edgecolor="black", linewidth=0.5)
-    bars2 = ax.bar(x + width/2, semi_vals, width, label="Semi-CRF",
-                   color=COLORS["semi_crf"], edgecolor="black", linewidth=0.5)
+    ax.bar(
+        x - width / 2,
+        linear_vals,
+        width,
+        label="Linear CRF (K=1)",
+        color=COLORS["linear_crf"],
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    ax.bar(
+        x + width / 2,
+        semi_vals,
+        width,
+        label="Semi-CRF",
+        color=COLORS["semi_crf"],
+        edgecolor="black",
+        linewidth=0.5,
+    )
 
     ax.set_ylabel("KL Divergence (lower = better)", fontsize=12)
     ax.set_title("GENCODE: Duration Distribution Calibration", fontsize=14, fontweight="bold")
@@ -353,6 +418,7 @@ def generate_comparison_table(results: dict[str, Any], task: str) -> str:
 # =============================================================================
 # Benchmark Runners
 # =============================================================================
+
 
 def run_gencode_benchmark(
     data_dir: Path,
@@ -514,22 +580,30 @@ def plot_from_json(json_path: Path, output_dir: Path = None) -> None:
 # CLI
 # =============================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    parser.add_argument("--task", choices=["gencode", "timit", "all", "plot"],
-                       required=True, help="Which benchmark to run")
+    parser.add_argument(
+        "--task",
+        choices=["gencode", "timit", "all", "plot"],
+        required=True,
+        help="Which benchmark to run",
+    )
     parser.add_argument("--data-dir", type=Path, help="Data directory (for single task)")
     parser.add_argument("--gencode-dir", type=Path, help="GENCODE data directory (for --task all)")
     parser.add_argument("--timit-dir", type=Path, help="TIMIT data directory (for --task all)")
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory")
 
     # Training parameters
-    parser.add_argument("--max-duration", type=int, default=None,
-                       help="Max segment duration (default: 500 for GENCODE, 30 for TIMIT)")
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=None,
+        help="Max segment duration (default: 500 for GENCODE, 30 for TIMIT)",
+    )
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-layers", type=int, default=3, help="TIMIT only")
     parser.add_argument("--epochs", type=int, default=50)

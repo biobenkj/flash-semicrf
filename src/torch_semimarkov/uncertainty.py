@@ -57,16 +57,17 @@ class UncertaintyMixin:
         self,
         hidden_states: Tensor,
         lengths: Tensor,
-        use_streaming: bool = True,
+        backend: str = "auto",
         normalize: bool = True,
+        use_streaming: Optional[bool] = None,
     ) -> Tensor:
-        r"""compute_boundary_marginals(hidden_states, lengths, use_streaming=True, normalize=True) -> Tensor
+        r"""compute_boundary_marginals(hidden_states, lengths, backend="auto", normalize=True) -> Tensor
 
         Compute :math:`P(\text{boundary at position } t)` for each position.
 
-        For streaming mode (:math:`T \geq 10K`): Uses gradient of :math:`\log Z` w.r.t.
-        cumulative scores. For exact mode (:math:`T < 10K`): Uses
-        :meth:`SemiMarkov.marginals` if edges fit in memory.
+        For streaming mode: Uses gradient of :math:`\log Z` w.r.t.
+        cumulative scores. For exact mode: Uses :meth:`SemiMarkov.marginals`
+        if edges fit in memory.
 
         The gradient of the log partition function w.r.t. the cumulative scores
         encodes information about which positions contribute to the partition,
@@ -76,15 +77,38 @@ class UncertaintyMixin:
             hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
                 or :math:`(\text{batch}, T, C)`.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            use_streaming (bool, optional): If ``True``, use streaming gradient-based method.
-                Default: ``True``
+            backend (str, optional): Backend selection mode:
+
+                - ``"auto"``: Select based on memory heuristic (default)
+                - ``"streaming"``: Force streaming gradient-based method
+                - ``"exact"``: Force exact marginals via edge tensor
+
             normalize (bool, optional): If ``True``, normalize to :math:`[0, 1]` range.
                 Default: ``True``
+            use_streaming (bool, optional): Deprecated. Use ``backend`` instead.
+                If provided, ``True`` maps to ``backend="streaming"`` and
+                ``False`` maps to ``backend="exact"``.
 
         Returns:
             Tensor: Boundary probabilities of shape :math:`(\text{batch}, T)`.
         """
-        if use_streaming:
+        _, T, _ = hidden_states.shape
+
+        # Backward compatibility: map use_streaming to backend
+        if use_streaming is not None:
+            backend = "streaming" if use_streaming else "exact"
+
+        # Select backend
+        if backend == "auto":
+            backend_type, _ = self._select_backend(T, "log", False)
+        elif backend == "streaming":
+            backend_type = "streaming"
+        elif backend == "exact":
+            backend_type = "exact"
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'streaming', or 'exact'.")
+
+        if backend_type == "streaming":
             return self._compute_boundary_marginals_streaming(hidden_states, lengths, normalize)
         else:
             return self._compute_boundary_marginals_exact(hidden_states, lengths, normalize)
@@ -95,19 +119,29 @@ class UncertaintyMixin:
         lengths: Tensor,
         normalize: bool = True,
     ) -> Tensor:
-        r"""Compute boundary marginals via streaming gradient method.
+        r"""_compute_boundary_marginals_streaming(hidden_states, lengths, normalize=True) -> Tensor
 
-        Uses the fact that :math:`\nabla_{\text{cum\_scores}} \log Z` encodes marginal
-        information from the forward-backward algorithm.
+        Compute boundary marginals via streaming gradient method.
+
+        Uses automatic differentiation to compute :math:`\nabla_{\text{cum\_scores}} \log Z`,
+        which encodes marginal information from the forward-backward algorithm.
+        Large gradient magnitudes at position :math:`t` indicate that :math:`t` is
+        informative for the partition function, correlating with segment boundaries.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
-                or :math:`(\text{batch}, T, C)`.
+            hidden_states (Tensor): Encoder output of shape
+                :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            normalize (bool, optional): If ``True``, normalize to :math:`[0, 1]`. Default: ``True``
+            normalize (bool, optional): If ``True``, normalize to :math:`[0, 1]` range
+                per sequence. Default: ``True``
 
         Returns:
-            Tensor: Boundary signal of shape :math:`(\text{batch}, T)`.
+            Tensor: Boundary signal of shape :math:`(\text{batch}, T)`. Higher values
+            indicate higher boundary probability.
+
+        .. note::
+            Works with any sequence length via streaming API. Memory is :math:`O(KC)`
+            independent of :math:`T`.
         """
         batch, T, _ = hidden_states.shape
 
@@ -168,26 +202,33 @@ class UncertaintyMixin:
         lengths: Tensor,
         normalize: bool = True,
     ) -> Tensor:
-        r"""Compute boundary marginals via exact edge marginals (:math:`T < 10K`).
+        r"""_compute_boundary_marginals_exact(hidden_states, lengths, normalize=True) -> Tensor
 
-        Uses :meth:`SemiMarkov.marginals` which requires materializing edge tensor.
+        Compute boundary marginals via exact edge marginals.
+
+        Uses :meth:`~torch_semimarkov.SemiMarkov.marginals` to compute exact
+        posterior marginals over all edge potentials, then aggregates to get
+        the probability of a segment boundary at each position.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
-                or :math:`(\text{batch}, T, C)`.
+            hidden_states (Tensor): Encoder output of shape
+                :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            normalize (bool, optional): If ``True``, normalize to :math:`[0, 1]`. Default: ``True``
+            normalize (bool, optional): If ``True``, normalize to :math:`[0, 1]` range
+                per sequence. Default: ``True``
 
         Returns:
             Tensor: Boundary probabilities of shape :math:`(\text{batch}, T)`.
 
         .. warning::
-            Will OOM for large T - use streaming method instead.
+            Requires materializing the full edge tensor with :math:`O(TKC^2)` memory.
+            Use streaming method for :math:`T > 10K`.
+
+        See Also:
+            :meth:`_compute_boundary_marginals_streaming`: Streaming alternative
         """
         from .semimarkov import SemiMarkov
         from .semirings import LogSemiring
-
-        batch, T, _ = hidden_states.shape
 
         # Project to label space
         if self.projection is not None:
@@ -200,17 +241,13 @@ class UncertaintyMixin:
 
         # Compute marginals
         model = SemiMarkov(LogSemiring)
-        edge_marginals = model.marginals(edge, lengths=lengths)
+        # Edge tensor has T positions (0..T-1), SemiMarkov expects N=T+1 for lengths
+        edge_marginals = model.marginals(edge, lengths=lengths + 1)
 
         # Aggregate to boundary probability
-        # edge_marginals[b, n, k, c_dest, c_src] = P(segment ending at n+k with label c_dest)
-        # Sum over k, c_dest, c_src to get P(any boundary at position n)
-        boundary_probs = edge_marginals.sum(dim=(2, 3, 4))  # (batch, T-1)
-
-        # Pad to length T (position 0 is always a boundary start)
-        boundary_probs = torch.cat(
-            [torch.ones(batch, 1, device=boundary_probs.device), boundary_probs], dim=1
-        )
+        # edge_marginals[b, n, k, c_dest, c_src] = P(segment starting at n with label c_dest)
+        # Sum over k, c_dest, c_src to get P(any segment start at position n)
+        boundary_probs = edge_marginals.sum(dim=(2, 3, 4))  # (batch, T)
 
         if normalize:
             max_val = boundary_probs.max(dim=-1, keepdim=True)[0] + 1e-8
@@ -219,31 +256,50 @@ class UncertaintyMixin:
         return boundary_probs
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
-        r"""Build edge tensor from scores (for exact marginals).
+        r"""_build_edge_tensor(scores, lengths) -> Tensor
+
+        Build the full edge potential tensor for exact inference.
+
+        Constructs edge potentials for all valid ``(position, duration, label_src, label_dst)``
+        combinations. Each edge represents a segment starting at position ``n`` with
+        duration ``k`` transitioning from ``c_src`` to ``c_dst``:
+
+        .. math::
+            \text{edge}[n, k, c_{\text{dst}}, c_{\text{src}}] =
+            \text{content}[n, k, c_{\text{dst}}] + \text{duration\_bias}[k, c_{\text{dst}}]
+            + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
 
         Args:
             scores (Tensor): Projected scores of shape :math:`(\text{batch}, T, C)`.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
 
         Returns:
-            Tensor: Edge potentials of shape :math:`(\text{batch}, T-1, K, C, C)`.
+            Tensor: Edge potentials of shape :math:`(\text{batch}, T, K, C, C)`.
 
         .. warning::
-            This is :math:`O(T \times K \times C^2)` memory and will OOM for large T!
+            Memory complexity is :math:`O(T \times K \times C^2)`. For genome-scale
+            sequences (:math:`T > 10K`), use the streaming backend instead.
+
+        .. note::
+            The edge tensor has ``T`` positions (not ``T-1``) to match the streaming
+            API which can start segments at any position ``0`` to ``T-1``.
+            Zero-centering is applied before cumsum to prevent magnitude drift.
         """
         batch, T, C = scores.shape
         K = self.max_duration
 
         # Cumulative scores for content computation
+        # Zero-center before cumsum to match streaming preprocessing
+        scores_centered = scores.float() - scores.float().mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float32, device=scores.device)
-        cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
+        cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)
 
-        # Build edge tensor
+        # Build edge tensor with T positions (streaming can access positions 0 to T-1)
         edge = torch.full(
-            (batch, T - 1, K, C, C), float("-inf"), dtype=torch.float32, device=scores.device
+            (batch, T, K, C, C), float("-inf"), dtype=torch.float32, device=scores.device
         )
 
-        for n in range(T - 1):
+        for n in range(T):
             for k in range(1, max(min(K, T - n + 1), 2)):  # max ensures K=1 processes duration 1
                 # Content score for segment [n, n+k)
                 content = cum_scores[:, n + k, :] - cum_scores[:, n, :]  # (batch, C)
@@ -567,11 +623,13 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         hidden_dim: Optional[int] = None,
         init_scale: float = 0.1,
         duration_distribution: Optional[Union[str, DurationDistribution]] = None,
+        edge_memory_threshold: float = 8e9,
     ):
         nn.Module.__init__(self)
 
         self.num_classes = num_classes
         self.max_duration = max_duration
+        self.edge_memory_threshold = edge_memory_threshold
 
         # CRF parameters
         self.transition = nn.Parameter(torch.randn(num_classes, num_classes) * init_scale)
@@ -599,13 +657,120 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         """
         return self.duration_dist()
 
+    def _should_use_streaming(self, T: int) -> bool:
+        r"""_should_use_streaming(T) -> bool
+
+        Determine whether to use streaming backend based on memory heuristics.
+
+        The streaming backend uses :math:`O(KC)` memory (ring buffer), while the
+        exact backend requires :math:`O(TKC^2)` memory (edge tensor). This method
+        returns ``True`` when the edge tensor would exceed the memory threshold.
+
+        Args:
+            T (int): Sequence length.
+
+        Returns:
+            bool: ``True`` if streaming backend should be used, ``False`` for exact.
+
+        .. note::
+            The default threshold is 8GB. Streaming is recommended when
+            :math:`T \times K \times C^2 \times 4 > 8 \times 10^9` bytes.
+        """
+        K = self.max_duration
+        C = self.num_classes
+
+        # Edge tensor size in bytes: T * K * C * C * 4 (float32)
+        edge_tensor_bytes = T * K * C * C * 4
+
+        return edge_tensor_bytes > self.edge_memory_threshold
+
+    def _select_backend(self, T: int, semiring: str, use_triton: bool) -> tuple[str, bool]:
+        r"""_select_backend(T, semiring, use_triton) -> tuple[str, bool]
+
+        Select backend based on memory heuristics and semiring requirements.
+
+        The streaming backend supports only ``"log"`` and ``"max"`` semirings.
+        Other semirings (e.g., :class:`~torch_semimarkov.semirings.EntropySemiring`)
+        require the exact backend which materializes the full edge tensor.
+
+        Args:
+            T (int): Sequence length.
+            semiring (str): Semiring name (``"log"``, ``"max"``, or others).
+            use_triton (bool): Whether Triton acceleration is requested.
+
+        Returns:
+            tuple[str, bool]: A tuple containing:
+
+            - **backend_type** (str): Either ``"streaming"`` or ``"exact"``.
+            - **use_triton_final** (bool): Whether to use Triton (only for streaming).
+
+        Raises:
+            ValueError: If semiring requires exact backend but edge tensor exceeds
+                memory threshold.
+        """
+        # Semirings beyond log/max require exact backend
+        if semiring not in ("log", "max"):
+            if self._should_use_streaming(T):
+                K, C = self.max_duration, self.num_classes
+                raise ValueError(
+                    f"Semiring '{semiring}' requires exact backend, but T={T}, K={K}, C={C} "
+                    f"would require ~{T * K * C * C * 4 / 1e9:.1f}GB edge tensor. "
+                    f"Use 'log' or 'max' semiring for streaming, or reduce T/K/C."
+                )
+            return "exact", False
+
+        # Heuristic-based automatic selection
+        if self._should_use_streaming(T):
+            return "streaming", use_triton
+        else:
+            return "exact", False
+
+    def _forward_exact(self, scores: Tensor, lengths: Tensor, semiring: str) -> Tensor:
+        r"""_forward_exact(scores, lengths, semiring) -> Tensor
+
+        Compute partition function via exact edge tensor inference.
+
+        Uses :class:`~torch_semimarkov.SemiMarkov` with full semiring support.
+        Materializes the complete edge tensor which enables arbitrary semirings
+        but has :math:`O(TKC^2)` memory complexity.
+
+        Args:
+            scores (Tensor): Projected scores of shape :math:`(\text{batch}, T, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            semiring (str): Semiring name (``"log"`` or ``"max"``).
+
+        Returns:
+            Tensor: Partition function values of shape :math:`(\text{batch},)`.
+
+        .. warning::
+            Requires materializing the full edge tensor. Will OOM for large ``T``.
+            Use the streaming backend for genome-scale sequences.
+
+        See Also:
+            :class:`~torch_semimarkov.SemiMarkov`: Underlying inference engine
+        """
+        from .semimarkov import SemiMarkov
+        from .semirings import LogSemiring, MaxSemiring
+
+        SEMIRING_MAP = {"log": LogSemiring, "max": MaxSemiring}
+        semiring_cls = SEMIRING_MAP[semiring]
+
+        # Build edge tensor (O(T*K*C^2) memory)
+        edge = self._build_edge_tensor(scores, lengths)
+
+        model = SemiMarkov(semiring_cls)
+        # Edge tensor has T positions (0..T-1), SemiMarkov expects N=T+1 for lengths
+        result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
+        return result[0].squeeze(0)
+
     def forward(
         self,
         hidden_states: Tensor,
         lengths: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
     ) -> dict:
-        r"""forward(hidden_states, lengths, use_triton=True) -> dict
+        r"""forward(hidden_states, lengths, use_triton=True, backend="auto") -> dict
 
         Compute partition function from encoder hidden states.
 
@@ -614,6 +779,11 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
                 if projection is enabled, or :math:`(\text{batch}, T, C)` if projection is ``None``.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            backend (str, optional): Backend selection mode:
+
+                - ``"auto"``: Select based on memory heuristic (default)
+                - ``"streaming"``: Force streaming backend (genome-scale)
+                - ``"exact"``: Force exact backend via ``semimarkov.py``
 
         Returns:
             dict: Dictionary containing:
@@ -629,6 +799,16 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         else:
             scores = hidden_states
 
+        # Select backend
+        if backend == "auto":
+            backend_type, use_triton_final = self._select_backend(T, "log", use_triton)
+        elif backend == "streaming":
+            backend_type, use_triton_final = "streaming", use_triton
+        elif backend == "exact":
+            backend_type, use_triton_final = "exact", False
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'streaming', or 'exact'.")
+
         # Build cumulative scores for prefix-sum edge retrieval
         # Zero-center before cumsum to prevent magnitude drift at long sequences
         scores_centered = scores.float() - scores.float().mean(dim=1, keepdim=True)
@@ -637,16 +817,20 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         )
         cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)
 
-        # Compute partition function via streaming algorithm
-        partition = semi_crf_streaming_forward(
-            cum_scores,
-            self.transition,
-            self.duration_bias,
-            lengths,
-            self.max_duration,
-            semiring="log",
-            use_triton=use_triton,
-        )
+        if backend_type == "streaming":
+            # Compute partition function via streaming algorithm
+            partition = semi_crf_streaming_forward(
+                cum_scores,
+                self.transition,
+                self.duration_bias,
+                lengths,
+                self.max_duration,
+                semiring="log",
+                use_triton=use_triton_final,
+            )
+        else:
+            # Use exact backend via semimarkov.py
+            partition = self._forward_exact(scores, lengths, "log")
 
         return {"partition": partition, "cum_scores": cum_scores}
 
@@ -656,9 +840,10 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         lengths: Tensor,
         labels: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
         reduction: str = "mean",
     ) -> Tensor:
-        r"""compute_loss(hidden_states, lengths, labels, use_triton=True, reduction="mean") -> Tensor
+        r"""compute_loss(hidden_states, lengths, labels, use_triton=True, backend="auto", reduction="mean") -> Tensor
 
         Compute negative log-likelihood loss.
 
@@ -675,6 +860,8 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`.
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            backend (str, optional): Backend selection mode: ``"auto"``, ``"streaming"``,
+                or ``"exact"``. Default: ``"auto"``
             reduction (str, optional): Reduction mode: ``"mean"``, ``"sum"``, or ``"none"``.
                 Default: ``"mean"``
 
@@ -682,7 +869,7 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
             Tensor: NLL loss. Scalar if reduction is ``"mean"`` or ``"sum"``,
             shape :math:`(\text{batch},)` if ``"none"``.
         """
-        result = self.forward(hidden_states, lengths, use_triton)
+        result = self.forward(hidden_states, lengths, use_triton, backend)
         partition = result["partition"]
         cum_scores = result["cum_scores"]
 
@@ -704,9 +891,12 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         labels: Tensor,
         lengths: Tensor,
     ) -> Tensor:
-        r"""Score the gold segmentation.
+        r"""_score_gold(cum_scores, labels, lengths) -> Tensor
 
-        Extracts segments from per-position labels and computes:
+        Score the gold segmentation using vectorized computation.
+
+        Extracts segments from per-position labels (where label changes indicate
+        segment boundaries) and computes the total score:
 
         .. math::
             \text{score} = \sum_i \text{content}_i + \sum_i \text{duration\_bias}_i + \sum_i \text{transition}_i
@@ -718,6 +908,9 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
 
         Returns:
             Tensor: Gold sequence scores of shape :math:`(\text{batch},)`.
+
+        See Also:
+            :func:`~torch_semimarkov.helpers.score_gold_vectorized`: Underlying implementation
         """
         return score_gold_vectorized(
             cum_scores=cum_scores,
@@ -733,8 +926,9 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         hidden_states: Tensor,
         lengths: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
     ) -> Tensor:
-        r"""decode(hidden_states, lengths, use_triton=True) -> Tensor
+        r"""decode(hidden_states, lengths, use_triton=True, backend="auto") -> Tensor
 
         Decode best segmentation using Viterbi algorithm.
 
@@ -746,6 +940,8 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
                 or :math:`(\text{batch}, T, C)`.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            backend (str, optional): Backend selection mode: ``"auto"``, ``"streaming"``,
+                or ``"exact"``. Default: ``"auto"``
 
         Returns:
             Tensor: Best score (max over all segmentations) of shape :math:`(\text{batch},)`.
@@ -757,20 +953,34 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         else:
             scores = hidden_states
 
+        # Select backend
+        if backend == "auto":
+            backend_type, use_triton_final = self._select_backend(T, "max", use_triton)
+        elif backend == "streaming":
+            backend_type, use_triton_final = "streaming", use_triton
+        elif backend == "exact":
+            backend_type, use_triton_final = "exact", False
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Use 'auto', 'streaming', or 'exact'.")
+
         cum_scores = torch.zeros(
             batch, T + 1, self.num_classes, dtype=torch.float32, device=scores.device
         )
         cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
 
-        max_score = semi_crf_streaming_forward(
-            cum_scores,
-            self.transition,
-            self.duration_bias,
-            lengths,
-            self.max_duration,
-            semiring="max",
-            use_triton=use_triton,
-        )
+        if backend_type == "streaming":
+            max_score = semi_crf_streaming_forward(
+                cum_scores,
+                self.transition,
+                self.duration_bias,
+                lengths,
+                self.max_duration,
+                semiring="max",
+                use_triton=use_triton_final,
+            )
+        else:
+            # Use exact backend via semimarkov.py
+            max_score = self._forward_exact(scores, lengths, "max")
 
         return max_score
 
@@ -843,7 +1053,26 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         cum_scores: Tensor,
         seq_len: int,
     ) -> list[Segment]:
-        """Traceback for a single sequence to recover optimal segmentation."""
+        r"""_traceback_single(cum_scores, seq_len) -> list[Segment]
+
+        Perform Viterbi traceback to recover the optimal segmentation path.
+
+        Runs the forward pass with backpointer storage, then traces back from
+        the final position to reconstruct the optimal segmentation.
+
+        Args:
+            cum_scores (Tensor): Cumulative scores of shape :math:`(1, T+1, C)`.
+            seq_len (int): Actual sequence length.
+
+        Returns:
+            list[Segment]: List of :class:`~torch_semimarkov.helpers.Segment` objects
+            forming the optimal segmentation, ordered from start to end.
+
+        .. note::
+            This method allocates :math:`O(T \times C)` memory for backpointers.
+            For very long sequences, use :meth:`decode` which returns only the
+            score without traceback.
+        """
         device = cum_scores.device
         C = self.num_classes
         K = self.max_duration
@@ -912,7 +1141,27 @@ class UncertaintySemiMarkovCRFHead(UncertaintyMixin, nn.Module):
         label: int,
         prev_label: Optional[int],
     ) -> float:
-        """Compute the score contribution of a single segment."""
+        r"""_compute_segment_score(cum_scores, start, end, label, prev_label) -> float
+
+        Compute the score contribution of a single segment.
+
+        The segment score is the sum of content, duration bias, and transition:
+
+        .. math::
+            \text{score} = (\text{cum}[\text{end}+1, c] - \text{cum}[\text{start}, c])
+            + \text{dur\_bias}[k, c] + \text{trans}[c_{\text{prev}}, c]
+
+        Args:
+            cum_scores (Tensor): Cumulative scores of shape :math:`(T+1, C)`.
+            start (int): Segment start position (inclusive).
+            end (int): Segment end position (inclusive).
+            label (int): Segment label (class index).
+            prev_label (int, optional): Previous segment's label for transition.
+                ``None`` for the first segment.
+
+        Returns:
+            float: Total score contribution of this segment.
+        """
         content = (cum_scores[end + 1, label] - cum_scores[start, label]).item()
 
         duration = end - start + 1

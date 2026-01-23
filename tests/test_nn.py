@@ -4,6 +4,199 @@ import pytest
 import torch
 
 from torch_semimarkov import SemiMarkovCRFHead, semi_crf_streaming_forward
+from torch_semimarkov.uncertainty import UncertaintySemiMarkovCRFHead
+
+
+class TestBackendRouting:
+    """Tests for T-based backend routing heuristic."""
+
+    def test_should_use_streaming_small_tensor(self):
+        """Test heuristic returns False for small edge tensors."""
+        # T=1000, K=100, C=24 -> 230MB edge tensor
+        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100)
+        assert crf._should_use_streaming(1000) is False
+
+    def test_should_use_streaming_large_tensor(self):
+        """Test heuristic returns True for large edge tensors."""
+        # T=50000, K=100, C=24 -> 11.5GB edge tensor (exceeds 8GB threshold)
+        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100)
+        assert crf._should_use_streaming(50000) is True
+
+    def test_should_use_streaming_custom_threshold(self):
+        """Test heuristic respects custom threshold."""
+        # T=5000, K=100, C=24 -> 1.15GB edge tensor
+        # With 1GB threshold, should use streaming
+        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=1e9)
+        assert crf._should_use_streaming(5000) is True
+
+        # With 8GB threshold, should use exact
+        crf2 = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=8e9)
+        assert crf2._should_use_streaming(5000) is False
+
+    def test_select_backend_auto_small(self):
+        """Test auto backend selection for small sequences."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        backend_type, use_triton = crf._select_backend(T=100, semiring="log", use_triton=True)
+        assert backend_type == "exact"
+        assert use_triton is False  # Exact backend doesn't use Triton
+
+    def test_select_backend_auto_large(self):
+        """Test auto backend selection for large sequences."""
+        # With small threshold to force streaming
+        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=1e6)
+        backend_type, use_triton = crf._select_backend(T=1000, semiring="log", use_triton=True)
+        assert backend_type == "streaming"
+        assert use_triton is True
+
+    def test_select_backend_semiring_constraint(self):
+        """Test that non-log/max semirings require exact backend."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        backend_type, use_triton = crf._select_backend(T=100, semiring="entropy", use_triton=True)
+        assert backend_type == "exact"
+        assert use_triton is False
+
+    def test_select_backend_semiring_error_large_t(self):
+        """Test error when semiring requires exact but T is too large."""
+        # With small threshold to force streaming
+        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=1e6)
+        with pytest.raises(ValueError, match="requires exact backend"):
+            crf._select_backend(T=1000, semiring="entropy", use_triton=True)
+
+    def test_forward_backend_auto(self):
+        """Test forward with auto backend selection."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        # Auto should select exact for small T
+        result = crf(hidden_states, lengths, backend="auto", use_triton=False)
+        assert result["partition"].shape == (2,)
+
+    def test_forward_backend_streaming(self):
+        """Test forward with forced streaming backend."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result = crf(hidden_states, lengths, backend="streaming", use_triton=False)
+        assert result["partition"].shape == (2,)
+
+    def test_forward_backend_exact(self):
+        """Test forward with forced exact backend."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result = crf(hidden_states, lengths, backend="exact", use_triton=False)
+        assert result["partition"].shape == (2,)
+
+    def test_forward_backend_invalid(self):
+        """Test forward with invalid backend raises error."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        with pytest.raises(ValueError, match="Unknown backend"):
+            crf(hidden_states, lengths, backend="invalid")
+
+    def test_streaming_exact_equivalence(self):
+        """Test that streaming and exact backends produce same results."""
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result_streaming = crf(hidden_states, lengths, backend="streaming", use_triton=False)
+        result_exact = crf(hidden_states, lengths, backend="exact", use_triton=False)
+
+        torch.testing.assert_close(
+            result_streaming["partition"],
+            result_exact["partition"],
+            rtol=1e-4,
+            atol=1e-4,
+        )
+
+    def test_decode_backend_routing(self):
+        """Test decode respects backend parameter."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        score_streaming = crf.decode(hidden_states, lengths, backend="streaming", use_triton=False)
+        score_exact = crf.decode(hidden_states, lengths, backend="exact", use_triton=False)
+
+        torch.testing.assert_close(score_streaming, score_exact, rtol=1e-4, atol=1e-4)
+
+    def test_compute_loss_backend_routing(self):
+        """Test compute_loss respects backend parameter."""
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss_streaming = crf.compute_loss(
+            hidden_states, lengths, labels, backend="streaming", use_triton=False
+        )
+        loss_exact = crf.compute_loss(
+            hidden_states, lengths, labels, backend="exact", use_triton=False
+        )
+
+        torch.testing.assert_close(loss_streaming, loss_exact, rtol=1e-4, atol=1e-4)
+
+
+class TestUncertaintyBackendRouting:
+    """Tests for backend routing in UncertaintySemiMarkovCRFHead."""
+
+    def test_should_use_streaming(self):
+        """Test heuristic in uncertainty module."""
+        crf = UncertaintySemiMarkovCRFHead(num_classes=24, max_duration=100)
+        assert crf._should_use_streaming(1000) is False
+        assert crf._should_use_streaming(50000) is True
+
+    def test_forward_backend_auto(self):
+        """Test uncertainty forward with auto backend."""
+        crf = UncertaintySemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result = crf(hidden_states, lengths, backend="auto", use_triton=False)
+        assert result["partition"].shape == (2,)
+
+    def test_compute_loss_backend_routing(self):
+        """Test uncertainty compute_loss backend parameter."""
+        torch.manual_seed(42)
+        crf = UncertaintySemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss_streaming = crf.compute_loss(
+            hidden_states, lengths, labels, backend="streaming", use_triton=False
+        )
+        loss_exact = crf.compute_loss(
+            hidden_states, lengths, labels, backend="exact", use_triton=False
+        )
+
+        torch.testing.assert_close(loss_streaming, loss_exact, rtol=1e-4, atol=1e-4)
+
+    def test_compute_boundary_marginals_backend(self):
+        """Test compute_boundary_marginals backend parameter."""
+        crf = UncertaintySemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        # Both backends should produce valid boundary marginals
+        marginals_streaming = crf.compute_boundary_marginals(
+            hidden_states, lengths, backend="streaming"
+        )
+        marginals_exact = crf.compute_boundary_marginals(hidden_states, lengths, backend="exact")
+
+        assert marginals_streaming.shape == (2, 20)
+        assert marginals_exact.shape == (2, 20)
 
 
 class TestSemiMarkovCRFHead:

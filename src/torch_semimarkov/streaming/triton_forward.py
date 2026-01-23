@@ -36,16 +36,16 @@ except ImportError:
 def _next_power_of_2(n: int) -> int:
     r"""_next_power_of_2(n) -> int
 
-    Return the smallest power of 2 greater than or equal to n.
+    Compute the smallest power of 2 greater than or equal to n.
 
-    This is used for padding tensor dimensions to powers of 2, which is
-    required for efficient Triton kernel execution.
+    Used for padding tensor dimensions to powers of 2, which is required
+    for efficient Triton kernel execution with vectorized loads.
 
     Args:
-        n (int): Input value.
+        n (int): Input value (must be positive for meaningful result).
 
     Returns:
-        int: Smallest power of 2 >= n.
+        int: Smallest power of 2 :math:`\geq n`. Returns 1 for :math:`n \leq 0`.
 
     Examples::
 
@@ -193,7 +193,9 @@ if HAS_TRITON:
             # Loop over valid segment durations k = 1, 2, ..., min(K-1, t)
             # tl.maximum ensures K=1 processes at least one duration
             for k in tl.range(1, tl.maximum(K, 2)):
-                k_valid = (k <= t) & (k <= K - 1)
+                # For K=1: k=1 is valid (maps to duration_bias[0])
+                # For K>1: k=1..K-1 are valid
+                k_valid = (k <= t) & (k <= tl.maximum(K - 1, 1))
                 start_pos = t - k
 
                 # Ring index for alpha[start_pos]
@@ -225,8 +227,10 @@ if HAS_TRITON:
                 content_score = cum_end - cum_start  # (C_PAD,)
 
                 # Load duration bias
+                # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
+                dur_idx = tl.minimum(k, K - 1)
                 dur_bias = tl.load(
-                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )  # (C_PAD,)
@@ -437,7 +441,9 @@ if HAS_TRITON:
 
             # tl.maximum ensures K=1 processes at least one duration
             for k in tl.range(1, tl.maximum(K, 2)):
-                k_valid = (k <= t) & (k <= K - 1)
+                # For K=1: k=1 is valid (maps to duration_bias[0])
+                # For K>1: k=1..K-1 are valid
+                k_valid = (k <= t) & (k <= tl.maximum(K - 1, 1))
                 start_pos = t - k
                 ring_k_idx = start_pos % K
 
@@ -461,8 +467,10 @@ if HAS_TRITON:
                 )
 
                 content_score = cum_end - cum_start
+                # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
+                dur_idx = tl.minimum(k, K - 1)
                 dur_bias = tl.load(
-                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )

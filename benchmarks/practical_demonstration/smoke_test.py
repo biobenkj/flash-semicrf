@@ -22,23 +22,23 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-
 
 # =============================================================================
 # Test Infrastructure
 # =============================================================================
 
+
 @dataclass
 class TestResult:
     """Result of a single test."""
+
     name: str
     passed: bool
     duration: float
@@ -69,6 +69,7 @@ class TestRunner:
             self._print_result(result)
             if self.verbose:
                 import traceback
+
                 traceback.print_exc()
             return False
 
@@ -97,6 +98,7 @@ class TestRunner:
 # =============================================================================
 # Synthetic Data Generation
 # =============================================================================
+
 
 def generate_synthetic_genomic_data(
     num_samples: int = 20,
@@ -247,12 +249,13 @@ def collate_fn(batch):
 # Import Tests
 # =============================================================================
 
+
 def test_library_imports():
     """Test that torch_semimarkov imports correctly."""
     from torch_semimarkov import (
+        Segment,
         SemiMarkovCRFHead,
         UncertaintySemiMarkovCRFHead,
-        Segment,
         ViterbiResult,
     )
 
@@ -266,12 +269,8 @@ def test_gencode_imports():
     """Test that GENCODE benchmark module imports correctly."""
     # These are the key components used in the benchmark
     from gencode.gencode_exon_intron import (
-        NUM_CLASSES,
         LABEL_NAMES,
-        BiLSTMEncoder,
-        ExonIntronModel,
-        compute_position_metrics,
-        compute_boundary_metrics,
+        NUM_CLASSES,
     )
 
     assert NUM_CLASSES == 5
@@ -282,10 +281,8 @@ def test_timit_imports():
     """Test that TIMIT benchmark module imports correctly."""
     from timit.timit_phoneme import (
         NUM_PHONES,
-        PHONES_39,
         PHONE_61_TO_39,
-        BiLSTMEncoder,
-        TIMITModel,
+        PHONES_39,
     )
 
     # Verify 39-phone set is correct
@@ -294,6 +291,7 @@ def test_timit_imports():
 
     # Verify all 61 phones have mappings
     from timit.timit_phoneme import TIMIT_61_PHONES
+
     for phone in TIMIT_61_PHONES:
         assert phone in PHONE_61_TO_39, f"Phone '{phone}' missing from mapping"
 
@@ -305,10 +303,8 @@ def test_timit_imports():
 def test_calibration_imports():
     """Test that calibration module imports correctly."""
     from calibration import (
-        compute_ece,
-        compute_mce,
         compute_brier_score,
-        derive_boundary_probs_from_positions,
+        compute_ece,
     )
 
     assert callable(compute_ece)
@@ -318,6 +314,7 @@ def test_calibration_imports():
 # =============================================================================
 # Model Tests
 # =============================================================================
+
 
 def test_semicrf_head_basic():
     """Test SemiMarkovCRFHead basic functionality."""
@@ -414,6 +411,7 @@ def test_linear_crf_baseline():
 # Training Pipeline Tests
 # =============================================================================
 
+
 def test_gencode_training_pipeline():
     """Test GENCODE-style training pipeline end-to-end."""
     from gencode.gencode_exon_intron import BiLSTMEncoder, ExonIntronModel
@@ -439,7 +437,7 @@ def test_gencode_training_pipeline():
 
     # Train for 2 epochs
     model.train()
-    for epoch in range(2):
+    for _epoch in range(2):
         epoch_loss = 0
         for batch in dataloader:
             optimizer.zero_grad()
@@ -466,7 +464,7 @@ def test_gencode_training_pipeline():
 
 def test_timit_training_pipeline():
     """Test TIMIT-style training pipeline end-to-end."""
-    from timit.timit_phoneme import BiLSTMEncoder, TIMITModel, NUM_PHONES
+    from timit.timit_phoneme import NUM_PHONES, BiLSTMEncoder, TIMITModel
 
     # Generate synthetic acoustic data
     features, labels, lengths = generate_synthetic_acoustic_data(
@@ -489,7 +487,7 @@ def test_timit_training_pipeline():
 
     # Train for 2 epochs
     model.train()
-    for epoch in range(2):
+    for _epoch in range(2):
         epoch_loss = 0
         for batch in dataloader:
             optimizer.zero_grad()
@@ -545,12 +543,8 @@ def test_linear_vs_semicrf_comparison():
 
     # Both should compute loss without error
     for batch in dataloader:
-        loss1 = linear_model.compute_loss(
-            batch["sequence"], batch["lengths"], batch["labels"]
-        )
-        loss2 = semi_model.compute_loss(
-            batch["sequence"], batch["lengths"], batch["labels"]
-        )
+        loss1 = linear_model.compute_loss(batch["sequence"], batch["lengths"], batch["labels"])
+        loss2 = semi_model.compute_loss(batch["sequence"], batch["lengths"], batch["labels"])
 
         assert not torch.isnan(loss1)
         assert not torch.isnan(loss2)
@@ -560,6 +554,7 @@ def test_linear_vs_semicrf_comparison():
 # =============================================================================
 # Evaluation Metrics Tests
 # =============================================================================
+
 
 def test_position_metrics():
     """Test position-level F1 computation."""
@@ -572,7 +567,7 @@ def test_position_metrics():
     ]
     targets = [
         np.array([0, 0, 1, 1, 2, 2, 3]),  # One wrong
-        np.array([0, 1, 1, 2, 2]),        # All correct
+        np.array([0, 1, 1, 2, 2]),  # All correct
     ]
 
     metrics = compute_position_metrics(predictions, targets, num_classes=5)
@@ -592,7 +587,7 @@ def test_boundary_metrics():
     ]
     targets = [
         np.array([0, 0, 0, 1, 1, 1, 2, 2]),  # Perfect match
-        np.array([0, 0, 0, 1, 2]),            # One boundary off
+        np.array([0, 0, 0, 1, 2]),  # One boundary off
     ]
 
     metrics = compute_boundary_metrics(predictions, targets)
@@ -624,7 +619,7 @@ def test_phone_error_rate():
 
 def test_calibration_metrics():
     """Test calibration metric computation."""
-    from calibration import compute_ece, compute_brier_score
+    from calibration import compute_brier_score, compute_ece
 
     # Generate synthetic probabilities and labels
     n = 100
@@ -661,6 +656,7 @@ def test_boundary_derivation():
 # Segment Convention Tests
 # =============================================================================
 
+
 def test_segment_end_convention():
     """Verify segment end convention (inclusive end)."""
     from torch_semimarkov import SemiMarkovCRFHead
@@ -692,17 +688,20 @@ def test_segment_end_convention():
             # Segments should be contiguous
             for j in range(len(segs) - 1):
                 # With inclusive end: seg[j].end + 1 == seg[j+1].start
-                assert segs[j].end + 1 == segs[j + 1].start, \
-                    f"Gap between segments: {segs[j]} and {segs[j+1]}"
+                assert (
+                    segs[j].end + 1 == segs[j + 1].start
+                ), f"Gap between segments: {segs[j]} and {segs[j+1]}"
 
             # Last segment should end at seq_length - 1 (inclusive)
-            assert segs[-1].end == seq_length - 1, \
-                f"Last segment ends at {segs[-1].end}, expected {seq_length - 1}"
+            assert (
+                segs[-1].end == seq_length - 1
+            ), f"Last segment ends at {segs[-1].end}, expected {seq_length - 1}"
 
 
 # =============================================================================
 # Main Test Runner
 # =============================================================================
+
 
 def run_gencode_tests(runner: TestRunner):
     """Run GENCODE-specific tests."""
@@ -753,8 +752,12 @@ def run_calibration_tests(runner: TestRunner):
 def main():
     parser = argparse.ArgumentParser(description="Smoke test for practical demonstrations")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("tests", nargs="*", default=["all"],
-                       help="Which tests to run: gencode, timit, calibration, or all (default)")
+    parser.add_argument(
+        "tests",
+        nargs="*",
+        default=["all"],
+        help="Which tests to run: gencode, timit, calibration, or all (default)",
+    )
 
     args = parser.parse_args()
 
