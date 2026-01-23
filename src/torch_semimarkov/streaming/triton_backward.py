@@ -878,11 +878,21 @@ if HAS_TRITON:
                 Each value represents the probability that a segment starts
                 at that position.
 
+        .. note::
+            Requires CUDA and Triton. For CPU computation, use
+            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`.
+
         Example::
 
-            >>> # After forward pass
+            >>> # Setup (on CUDA)
+            >>> cum_scores = torch.zeros(2, 101, 4, device='cuda')
+            >>> cum_scores[:, 1:] = torch.cumsum(torch.randn(2, 100, 4, device='cuda'), dim=1)
+            >>> transition = torch.randn(4, 4, device='cuda')
+            >>> duration_bias = torch.randn(10, 4, device='cuda')  # K=10
+            >>> lengths = torch.tensor([100, 80], device='cuda')
+            >>> # Forward pass to get checkpoints
             >>> log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            ...     cum_scores, transition, duration_bias, lengths
+            ...     cum_scores, transition, duration_bias, lengths, K=10
             ... )
             >>> # Compute boundary marginals
             >>> marginals = launch_streaming_triton_marginals(
@@ -890,10 +900,12 @@ if HAS_TRITON:
             ...     log_Z, ring_ckpts, interval
             ... )
             >>> marginals.shape
-            torch.Size([batch, T])
+            torch.Size([2, 100])
 
         See Also:
             :func:`launch_streaming_triton_backward`: Full backward pass with gradients
+            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+                PyTorch reference implementation (CPU compatible)
         """
         batch = cum_scores.shape[0]
         # Use ones for grad_output since we only want marginals, not scaled gradients

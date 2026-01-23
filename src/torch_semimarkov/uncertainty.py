@@ -155,9 +155,19 @@ class UncertaintyMixin:
             Works with any sequence length via streaming API. Memory is :math:`O(KC)`
             independent of :math:`T`. Compute is 2x forward pass (forward + backward).
 
+        Example::
+
+            >>> model = UncertaintySemiMarkovCRFHead(num_classes=4, max_duration=10, hidden_dim=64)
+            >>> hidden = torch.randn(2, 100, 64)
+            >>> lengths = torch.tensor([100, 80])
+            >>> marginals = model._compute_boundary_marginals_streaming(hidden, lengths)
+            >>> marginals.shape
+            torch.Size([2, 100])
+
         See Also:
             :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
                 Underlying implementation
+            :meth:`_compute_boundary_marginals_exact`: Exact method (requires edge tensor)
         """
         from .streaming import semi_crf_streaming_marginals_pytorch
 

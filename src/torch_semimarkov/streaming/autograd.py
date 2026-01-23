@@ -241,7 +241,8 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
 
         # Use Triton backward kernel for gradient computation
         # The kernel already scales by grad_output internally
-        grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end = (
+        # Note: launch_streaming_triton_backward returns 6 values; the 6th (boundary_marginals) is unused here
+        grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end, _ = (
             launch_streaming_triton_backward(
                 cum_scores,
                 transition,
