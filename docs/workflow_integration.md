@@ -591,27 +591,48 @@ def extract_segments(labels):
 
 ## Performance tips
 
-1. **Use the Triton kernel** for both inference and training on GPU:
+1. **Use `SemiMarkovCRFHead` for most use cases** (recommended):
+   ```python
+   from torch_semimarkov import SemiMarkovCRFHead
+
+   # Create CRF head with automatic backend selection
+   crf = SemiMarkovCRFHead(num_classes=C, max_duration=K, hidden_dim=hidden_dim)
+
+   # Forward pass (auto-selects streaming vs exact based on memory)
+   result = crf(hidden_states, lengths)
+   partition = result['partition']
+
+   # Training with loss
+   loss = crf.compute_loss(hidden_states, lengths, labels)
+
+   # Force specific backend if needed
+   result = crf(hidden_states, lengths, backend="streaming")  # For genome-scale
+   result = crf(hidden_states, lengths, backend="exact")      # For small T
+   ```
+
+2. **For very long sequences (T > 10K)**, the streaming API is essential:
+   ```python
+   from torch_semimarkov.streaming import semi_crf_streaming_forward
+
+   # Streaming: compute edges on-the-fly (O(KC) memory)
+   partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
+   partition.sum().backward()  # Hand-written Triton backward kernel
+   ```
+
+3. **Use `triton_scan` only for inference with pre-computed edges**:
    ```python
    from torch_semimarkov.triton_scan import semi_crf_triton_forward
 
-   # Inference: uses fast custom Triton kernel (~45x speedup)
+   # Only use if you already have edge tensor from external source
    log_Z = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
-
-   # Training: uses torch.compile for efficient backward
-   edge_train = edge.cuda().requires_grad_(True)
-   log_Z = semi_crf_triton_forward(edge_train, lengths.cuda())
-   log_Z.sum().backward()
 
    # Viterbi decoding (max semiring)
    viterbi = semi_crf_triton_forward(edge.cuda(), lengths.cuda(), semiring="max")
    ```
 
-   The kernel automatically routes to the optimal path:
-   - **Inference** (`requires_grad=False`): Custom Triton kernel
-   - **Training** (`requires_grad=True`): `torch.compile` for automatic backward
+   > **Warning**: Do NOT use triton_scan for training. Use `SemiMarkovCRFHead` or the streaming API instead.
 
-2. **Choose K carefully**: Memory and compute scale with K. Use empirical
+4. **Choose K carefully**: Memory and compute scale with K. Use empirical
    quantiles (p95/p99) of segment lengths rather than maximum.
 
 3. **Batch similar lengths together** to minimize padding waste.

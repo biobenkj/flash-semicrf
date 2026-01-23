@@ -120,7 +120,7 @@ content_score = cum_scores[t, c_dst] - cum_scores[t-k, c_dst]
 
 ### Code Location
 
-From [triton_forward.py:209-235](torch-semimarkov/src/torch_semimarkov/streaming/triton_forward.py#L209-L235):
+From [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py) (kernel implementation):
 
 ```python
 # Content score via cumsum difference
@@ -168,7 +168,7 @@ Forward recurrence:
 
 ### Kernel Entry Point
 
-From [triton_forward.py:72-343](torch-semimarkov/src/torch_semimarkov/streaming/triton_forward.py#L72-L343):
+From [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py):
 
 ```python
 @triton.jit
@@ -247,7 +247,7 @@ At each checkpoint position `i × S`, we save the entire ring buffer state.
 
 ### Checkpoint Interval Calculation
 
-From [pytorch_reference.py:25-45](torch-semimarkov/src/torch_semimarkov/streaming/pytorch_reference.py#L25-L45):
+From [pytorch_reference.py:25-45](../src/torch_semimarkov/streaming/pytorch_reference.py#L25-L45):
 
 ```python
 def _compute_checkpoint_interval(T: int, K: int) -> int:
@@ -279,7 +279,7 @@ if should_checkpoint:
 
 ### Two-Phase Algorithm
 
-From [triton_backward.py:42-555](torch-semimarkov/src/torch_semimarkov/streaming/triton_backward.py#L42-L555):
+From [triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py):
 
 The backward pass processes segments in reverse order:
 
@@ -362,7 +362,7 @@ There are two types of parameters:
 
 ### The Einsum Pattern
 
-From [autograd.py:134-145](torch-semimarkov/src/torch_semimarkov/streaming/autograd.py#L134-L145):
+From [autograd.py:139-146](../src/torch_semimarkov/streaming/autograd.py#L139-L146):
 
 ```python
 # Per-batch: scale each batch element

@@ -18,6 +18,7 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_dim: int = None,        # Optional: projection from encoder dim
         init_scale: float = 0.1,       # Parameter initialization scale
         duration_distribution: str = None,  # "learned", "geometric", "poisson", etc.
+        edge_memory_threshold: float = 8e9,  # Memory threshold for backend selection (8GB)
     ):
         """
         CRF head for Semi-Markov sequence labeling.
@@ -31,9 +32,16 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_states,  # (batch, T, hidden_dim) or (batch, T, C)
         lengths,        # (batch,) sequence lengths
         use_triton=True,
+        backend="auto",  # "auto", "streaming", or "exact"
     ) -> dict:
         """
         Compute partition function.
+
+        Args:
+            backend: Backend selection mode:
+                - "auto": Select based on memory heuristic (default)
+                - "streaming": Force streaming backend (genome-scale)
+                - "exact": Force exact backend via semimarkov.py
 
         Returns:
             dict with 'partition' (batch,) and 'cum_scores' (batch, T+1, C)
@@ -45,6 +53,7 @@ class SemiMarkovCRFHead(nn.Module):
         lengths,
         labels,         # (batch, T) per-position labels
         use_triton=True,
+        backend="auto",  # "auto", "streaming", or "exact"
         reduction="mean",
     ) -> Tensor:
         """Compute negative log-likelihood loss."""
@@ -54,6 +63,7 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_states,
         lengths,
         use_triton=True,
+        backend="auto",  # "auto", "streaming", or "exact"
     ) -> Tensor:
         """Viterbi decoding - returns best score (batch,)."""
 
@@ -116,13 +126,21 @@ class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead):
         self,
         hidden_states,
         lengths,
-        use_streaming=True,
+        backend="auto",  # "auto", "streaming", or "exact"
         normalize=True,
     ) -> Tensor:
         """
         P(boundary at position t) for each position.
 
+        Args:
+            backend: Backend selection mode:
+                - "auto": Select based on memory heuristic (default)
+                - "streaming": Force streaming forward-backward algorithm
+                - "exact": Force exact marginals via edge tensor
+
         Returns: (batch, T) boundary probabilities
+
+        Note: use_streaming parameter is deprecated, use backend instead.
         """
 
     def compute_position_marginals(
@@ -171,8 +189,11 @@ from torch_semimarkov import UncertaintySemiMarkovCRFHead
 
 model = UncertaintySemiMarkovCRFHead(num_classes=24, max_duration=100, hidden_dim=512)
 
-# Boundary confidence for decision support
+# Boundary confidence for decision support (auto-selects streaming for large T)
 boundary_probs = model.compute_boundary_marginals(hidden, lengths)
+
+# Force streaming backend for genome-scale sequences
+boundary_probs = model.compute_boundary_marginals(hidden, lengths, backend="streaming")
 
 # Uncertainty-weighted training for active learning
 loss = model.compute_loss_uncertainty_weighted(hidden, lengths, labels)
@@ -281,18 +302,28 @@ from torch_semimarkov.semirings import LogSemiring, MaxSemiring
 class SemiMarkov(semiring):
     def logpartition(
         self,
-        log_potentials,  # (batch, T-1, K, C, C) edge potentials
+        log_potentials,  # (batch, N-1, K, C, C) edge potentials
         lengths=None,    # (batch,) sequence lengths
         force_grad=False,
+        use_linear_scan=None,  # None=auto, True=O(N) scan, False=O(log N) tree
+        use_vectorized=False,  # If True, O(TKC) memory but 2-3x faster
+        use_banded=False,      # Prototype: banded matrix optimization
     ) -> Tuple[Tensor, List[Tensor], None]:
         """
-        Compute log partition function using streaming linear scan.
+        Compute log partition function.
 
-        Memory: O(KC) via ring buffer, independent of sequence length T.
+        Algorithm selection (use_linear_scan):
+            - None (default): Auto-select based on KC > 200
+            - True: O(N) linear scan with O(KC) ring buffer memory
+            - False: O(log N) binary tree (WARNING: O((KC)³) memory per matmul)
+
+        Memory modes:
+            - use_vectorized=False (default): O(KC) streaming ring buffer
+            - use_vectorized=True: O(TKC) but 2-3x faster
 
         Returns:
-            v: (batch,) log partition values
-            edges: list of edge marginals (for gradient computation)
+            v: (ssize, batch,) log partition values
+            edges: list containing input potentials for gradient computation
             charts: None (streaming scan does not store charts)
         """
 
@@ -304,7 +335,7 @@ class SemiMarkov(semiring):
         """
         Compute edge marginals via backward pass.
 
-        Returns: (batch, T-1, K, C, C) marginal probabilities
+        Returns: (batch, N-1, K, C, C) marginal probabilities
         """
 
     @staticmethod
@@ -316,10 +347,10 @@ class SemiMarkov(semiring):
             init: (C,) initial state distribution
             trans_z: (C, C) state transition matrix
             trans_l: (C, K) duration distribution per state
-            emission: (batch, T, K, C) emission scores
+            emission: (batch, N, K, C) emission scores
 
         Returns:
-            edge: (batch, T, K, C, C) edge potentials
+            edge: (batch, N, K, C, C) edge potentials
         """
 ```
 

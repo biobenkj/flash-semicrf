@@ -7,7 +7,31 @@ This project provides GPU-accelerated semi-CRF inference backends using custom T
 | Backend | Time | DP memory | Best for |
 |---------|------|-----------|----------|
 | `streaming` (recommended) | O(TKC²) | O(KC) | **Default** - Training and inference |
+| `exact` | O(TKC²) | O(TKC²) | Full semiring support via `SemiMarkov` class |
 | `triton_scan` | O(TKC²) | O(TKC²) | Inference only, when edge tensor pre-exists |
+
+## Selecting Backends via SemiMarkovCRFHead
+
+The `SemiMarkovCRFHead` class supports automatic and manual backend selection via the `backend` parameter:
+
+```python
+from torch_semimarkov import SemiMarkovCRFHead
+
+crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, hidden_dim=512)
+
+# Automatic selection (default) - uses streaming for large T
+result = crf.forward(hidden, lengths, backend="auto")
+
+# Force streaming backend (recommended for genome-scale)
+result = crf.forward(hidden, lengths, backend="streaming")
+
+# Force exact backend (for semirings beyond log/max)
+result = crf.forward(hidden, lengths, backend="exact")
+```
+
+The automatic backend selection uses a memory threshold (default 8GB) to decide:
+- If the edge tensor would exceed the threshold, use streaming
+- Otherwise, use exact backend via `SemiMarkov.logpartition()`
 
 ## Recommendation
 

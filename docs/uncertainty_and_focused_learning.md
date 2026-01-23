@@ -67,10 +67,11 @@ This gradient is computed during the backward pass of the streaming algorithm, s
 
 | Method | Memory | Sequence Length | API |
 |--------|--------|-----------------|-----|
-| **Streaming** (gradient-based) | O(KC) | Any (T >= 10K+) | `use_streaming=True` |
-| **Exact** (forward-backward) | O(T×K×C²) | T < 10K | `use_streaming=False` |
+| **Streaming** (gradient-based) | O(KC) | Any (T >= 10K+) | `backend="streaming"` |
+| **Exact** (forward-backward) | O(T×K×C²) | T < 10K | `backend="exact"` |
+| **Auto** (recommended) | varies | Any | `backend="auto"` (default) |
 
-For clinical applications, **streaming is the default** because it scales to any sequence length.
+For clinical applications, **streaming is the default** because it scales to any sequence length. The `backend="auto"` option automatically selects the best backend based on memory heuristics.
 
 ## Computing uncertainty at scale
 
@@ -87,15 +88,17 @@ model = UncertaintySemiMarkovCRFHead(
     hidden_dim=64
 )
 
-# For clinical-scale sequences (T >= 10K), use streaming
+# Automatic backend selection (recommended - uses streaming for large T)
+boundary_probs = model.compute_boundary_marginals(hidden_states, lengths)
+
+# Force streaming backend for clinical-scale sequences (T >= 10K)
 boundary_probs = model.compute_boundary_marginals(
-    hidden_states, lengths, use_streaming=True
+    hidden_states, lengths, backend="streaming"
 )
 
-# For short sequences (T < 10K), exact method is also available
-# (but streaming works fine too)
+# Force exact backend for short sequences (T < 10K) when you need exact marginals
 boundary_probs = model.compute_boundary_marginals(
-    hidden_states, lengths, use_streaming=False
+    hidden_states, lengths, backend="exact"
 )
 ```
 
@@ -136,11 +139,18 @@ Compute P(boundary at position t) for each position.
 boundary_probs = model.compute_boundary_marginals(
     hidden_states,       # (batch, T, hidden_dim)
     lengths,             # (batch,) sequence lengths
-    use_streaming=True,  # Use streaming method (required for T >= 10K)
+    backend="auto",      # "auto", "streaming", or "exact"
     normalize=True       # Normalize to [0, 1] range
 )
 # Returns: (batch, T) tensor of boundary probabilities
 ```
+
+**Backend selection:**
+- `"auto"` (default): Automatically selects based on memory heuristic
+- `"streaming"`: Force streaming gradient-based method (required for T >= 10K)
+- `"exact"`: Force exact marginals via edge tensor (T < 10K only)
+
+> **Note**: The `use_streaming` parameter is deprecated. Use `backend` instead.
 
 **Interpretation:**
 - High values (close to 1): Strong evidence for boundary at this position
@@ -342,7 +352,7 @@ model = UncertaintySemiMarkovCRFHead(
 
 # Must use streaming for genomics-scale sequences
 boundary_probs = model.compute_boundary_marginals(
-    hidden_states, lengths, use_streaming=True
+    hidden_states, lengths, backend="streaming"
 )
 
 # Identify uncertain exon-intron boundaries
@@ -416,10 +426,13 @@ For long sequences (T > 100K):
 **Solution**: Use streaming method:
 ```python
 # Don't do this for T >= 10K:
-# boundary_probs = model.compute_boundary_marginals(hidden, lengths, use_streaming=False)
+# boundary_probs = model.compute_boundary_marginals(hidden, lengths, backend="exact")
 
-# Do this instead:
-boundary_probs = model.compute_boundary_marginals(hidden, lengths, use_streaming=True)
+# Do this instead (auto-selects streaming for large T):
+boundary_probs = model.compute_boundary_marginals(hidden, lengths)
+
+# Or explicitly force streaming:
+boundary_probs = model.compute_boundary_marginals(hidden, lengths, backend="streaming")
 ```
 
 ### Numerical instability
@@ -458,7 +471,7 @@ assert torch.allclose(position_marginals.sum(dim=-1), torch.ones(...))
 
 ### Exact methods fail for short sequences
 
-**Problem**: `compute_entropy_exact` or `use_streaming=False` produces errors.
+**Problem**: `compute_entropy_exact` or `backend="exact"` produces errors.
 
 **Solution**: The exact methods require careful edge tensor construction. Some edge cases may produce NaN values. For production use, prefer streaming methods which are more robust:
 
