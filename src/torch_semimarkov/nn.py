@@ -5,23 +5,17 @@ kernels, making them easy to integrate with PyTorch Lightning and other training
 frameworks.
 
 Classes:
-    :class:`SemiMarkovCRFHead`: Basic CRF head for sequence labeling.
-    :class:`UncertaintySemiMarkovCRFHead`: Extended CRF head with uncertainty
-        quantification methods for clinical applications.
+    :class:`SemiMarkovCRFHead`: CRF head for sequence labeling.
 
 For clinical applications requiring boundary uncertainty or focused learning,
-use :class:`UncertaintySemiMarkovCRFHead` which provides:
-
-- :meth:`~UncertaintyMixin.compute_boundary_marginals`: :math:`P(\text{boundary at position } t)`
-- :meth:`~UncertaintyMixin.compute_position_marginals`: :math:`P(\text{label}=c \text{ at position } t)`
-- :meth:`~UncertaintyMixin.compute_entropy_streaming`: Approximate entropy for uncertainty
-- :meth:`~UncertaintyMixin.compute_loss_uncertainty_weighted`: Uncertainty-weighted loss for active learning
+see :class:`~torch_semimarkov.uncertainty.UncertaintySemiMarkovCRFHead` which
+extends this class with uncertainty methods.
 
 Examples::
 
-    >>> from torch_semimarkov import UncertaintySemiMarkovCRFHead
-    >>> model = UncertaintySemiMarkovCRFHead(num_classes=5, max_duration=100, hidden_dim=64)
-    >>> boundary_probs = model.compute_boundary_marginals(hidden, lengths)
+    >>> from torch_semimarkov import SemiMarkovCRFHead
+    >>> model = SemiMarkovCRFHead(num_classes=5, max_duration=100, hidden_dim=64)
+    >>> result = model.forward(hidden, lengths)
 
 See Also:
     :mod:`torch_semimarkov.uncertainty`: Uncertainty quantification module
@@ -39,9 +33,6 @@ from .helpers import Segment, ViterbiResult, score_gold_vectorized
 from .streaming import semi_crf_streaming_forward
 from .streaming.constants import NEG_INF
 from .streaming.pytorch_reference import compute_edge_block_streaming
-
-# Re-export uncertainty module for convenience
-from .uncertainty import UncertaintyMixin, UncertaintySemiMarkovCRFHead
 from .validation import (
     validate_device_consistency,
     validate_hidden_states,
@@ -51,8 +42,6 @@ from .validation import (
 
 __all__ = [
     "SemiMarkovCRFHead",
-    "UncertaintyMixin",
-    "UncertaintySemiMarkovCRFHead",
     "Segment",
     "ViterbiResult",
 ]
@@ -186,10 +175,16 @@ class SemiMarkovCRFHead(nn.Module):
 
     @property
     def duration_bias(self) -> Tensor:
-        """Duration bias tensor of shape (K, C).
+        r"""duration_bias() -> Tensor
 
-        This property provides backward compatibility. Internally calls
-        ``self.duration_dist()`` to compute the duration bias.
+        Duration bias tensor for segment scoring.
+
+        Returns the duration bias of shape :math:`(K, C)` where ``K`` is the
+        maximum duration and ``C`` is the number of classes. This property
+        provides backward compatibility - internally calls ``self.duration_dist()``.
+
+        Returns:
+            Tensor: Duration bias tensor of shape :math:`(K, C)`.
         """
         return self.duration_dist()
 
@@ -626,7 +621,9 @@ class SemiMarkovCRFHead(nn.Module):
         lengths: Tensor,
         max_traceback_length: int = 10000,
     ) -> ViterbiResult:
-        r"""Decode best segmentation with full path reconstruction.
+        r"""decode_with_traceback(hidden_states, lengths, max_traceback_length=10000) -> ViterbiResult
+
+        Decode best segmentation with full path reconstruction.
 
         Computes the maximum-scoring segmentation using Viterbi algorithm
         and returns both the score and the actual segment boundaries.
@@ -641,15 +638,16 @@ class SemiMarkovCRFHead(nn.Module):
 
         Returns:
             ViterbiResult: Named tuple containing:
-                - **scores** (Tensor): Best scores of shape :math:`(\text{batch},)`.
-                - **segments** (List[List[Segment]]): Per-batch segment lists.
 
-        Note:
+            - **scores** (Tensor): Best scores of shape :math:`(\text{batch},)`.
+            - **segments** (List[List[Segment]]): Per-batch segment lists.
+
+        .. note::
             For very long sequences (T > max_traceback_length), traceback requires
-            O(T × C) memory which may not be feasible. In such cases, the returned
-            segments list will be empty but scores are still computed.
+            :math:`O(T \times C)` memory which may not be feasible. In such cases, the
+            returned segments list will be empty but scores are still computed.
 
-        Example::
+        Examples::
 
             >>> result = crf.decode_with_traceback(hidden_states, lengths)
             >>> print(f"Score: {result.scores[0].item():.2f}")
