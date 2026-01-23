@@ -159,34 +159,46 @@ class TestStreamingVsExactConsistency:
         )
 
     def test_marginals_correlation(self, small_model):
-        """Streaming and exact marginals should be correlated for short sequences.
-
-        Note: They won't be exactly equal because they use different
-        computational approaches, but they should capture similar patterns.
-        """
+        """Streaming and exact marginals should have correlation > 0.95."""
         batch, T = 1, 15
         torch.manual_seed(42)
         hidden = torch.randn(batch, T, 16)
         lengths = torch.full((batch,), T)
 
         streaming_marginals = small_model.compute_boundary_marginals(
-            hidden, lengths, use_streaming=True, normalize=True
+            hidden, lengths, backend="streaming", normalize=False
         )
         exact_marginals = small_model.compute_boundary_marginals(
-            hidden, lengths, use_streaming=False, normalize=True
+            hidden, lengths, backend="exact", normalize=False
         )
 
         # Both should be valid
         assert torch.isfinite(streaming_marginals).all()
         assert torch.isfinite(exact_marginals).all()
 
-        # Compute correlation (should be positive for reasonable implementations)
-        # Note: Due to different computational methods, exact match isn't expected
+        # Compute Pearson correlation - should be very high since both compute true marginals
         streaming_flat = streaming_marginals.flatten()
         exact_flat = exact_marginals.flatten()
 
-        # At minimum, verify shapes match and values are reasonable
-        assert streaming_flat.shape == exact_flat.shape
+        correlation = torch.corrcoef(torch.stack([streaming_flat, exact_flat]))[0, 1]
+        assert correlation > 0.95, f"Correlation {correlation:.3f} < 0.95"
+
+    def test_near_identical_values(self, small_model):
+        """Streaming and exact marginals should be nearly identical (not just correlated)."""
+        batch, T = 1, 15
+        torch.manual_seed(42)
+        hidden = torch.randn(batch, T, 16)
+        lengths = torch.full((batch,), T)
+
+        streaming_marginals = small_model.compute_boundary_marginals(
+            hidden, lengths, backend="streaming", normalize=False
+        )
+        exact_marginals = small_model.compute_boundary_marginals(
+            hidden, lengths, backend="exact", normalize=False
+        )
+
+        # Values should be nearly identical
+        torch.testing.assert_close(streaming_marginals, exact_marginals, rtol=0.01, atol=1e-5)
 
 
 class TestPositionMarginals:

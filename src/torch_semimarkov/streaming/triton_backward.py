@@ -60,6 +60,7 @@ if HAS_TRITON:
         grad_db_workspace_ptr,  # (batch, K, C) - per-batch accumulator, no atomic needed
         grad_proj_start_ptr,  # (batch, T, C) - gradient for proj_start (only if HAS_BOUNDARIES)
         grad_proj_end_ptr,  # (batch, T, C) - gradient for proj_end (only if HAS_BOUNDARIES)
+        boundary_marginals_ptr,  # (batch, T) - output for boundary marginals (if RETURN_BOUNDARY_MARGINALS)
         # Dimensions
         batch_size,
         T: tl.constexpr,  # max sequence length
@@ -71,6 +72,7 @@ if HAS_TRITON:
         SEGMENT_SIZE: tl.constexpr,  # = CHECKPOINT_INTERVAL + K
         HAS_BOUNDARIES: tl.constexpr,  # whether boundary projections are provided
         HAS_DURATION_TRANSITIONS: tl.constexpr,  # whether transitions are (K, C, C)
+        RETURN_BOUNDARY_MARGINALS: tl.constexpr,  # whether to accumulate boundary marginals
         # Strides for cum_scores (batch, T+1, C)
         stride_cs_b,
         stride_cs_t,
@@ -112,6 +114,9 @@ if HAS_TRITON:
         stride_gdbw_b,
         stride_gdbw_k,
         stride_gdbw_c,
+        # Strides for boundary_marginals (batch, T) - only used if RETURN_BOUNDARY_MARGINALS
+        stride_bm_b,
+        stride_bm_t,
     ):
         r"""Streaming Semi-CRF backward kernel with gradient computation.
 
@@ -452,6 +457,21 @@ if HAS_TRITON:
                                 marginal = tl.exp(log_marginal)  # (C_PAD, C_PAD)
                                 marginal = tl.where(c_mask_2d, marginal, 0.0)
 
+                                # === Accumulate boundary marginals (if requested) ===
+                                if RETURN_BOUNDARY_MARGINALS:
+                                    # Sum over both c_dst and c_src to get scalar marginal
+                                    # for this (t, k) pair. This is the probability contribution
+                                    # of segments starting at position t with duration k.
+                                    marginal_sum_all = tl.sum(marginal)
+                                    # Accumulate to boundary_marginals[batch_idx, t]
+                                    # Uses atomic_add because multiple k values write to same t
+                                    tl.atomic_add(
+                                        boundary_marginals_ptr
+                                        + batch_idx * stride_bm_b
+                                        + t * stride_bm_t,
+                                        marginal_sum_all,
+                                    )
+
                                 # === Accumulate gradients ===
                                 # Note: For shared parameters (transition, duration_bias), we accumulate
                                 # unscaled marginals. The scaling by grad_output.sum() is done after the
@@ -564,8 +584,9 @@ if HAS_TRITON:
         grad_output: torch.Tensor,
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+        return_boundary_marginals: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None, return_boundary_marginals=False) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
 
         Launch the Triton backward kernel with proper buffer allocation.
 
@@ -589,9 +610,11 @@ if HAS_TRITON:
                 :math:`(\text{batch}, T, C)`. Default: ``None``
             proj_end (Tensor, optional): End boundary scores of shape
                 :math:`(\text{batch}, T, C)`. Default: ``None``
+            return_boundary_marginals (bool, optional): If ``True``, also compute
+                and return boundary marginals. Default: ``False``
 
         Returns:
-            tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of gradients:
+            tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of:
                 - **grad_cum_scores** (Tensor): Shape :math:`(\text{batch}, T+1, C)`.
                 - **grad_transition** (Tensor): Shape :math:`(C, C)` or :math:`(K, C, C)`.
                 - **grad_duration_bias** (Tensor): Shape :math:`(K, C)`.
@@ -599,6 +622,8 @@ if HAS_TRITON:
                   if boundaries provided.
                 - **grad_proj_end** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
                   if boundaries provided.
+                - **boundary_marginals** (Tensor or None): Shape :math:`(\text{batch}, T)`
+                  if ``return_boundary_marginals=True``.
         """
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
@@ -670,6 +695,14 @@ if HAS_TRITON:
             grad_tr_workspace = torch.zeros(batch, C, C, device=device, dtype=dtype)
         grad_db_workspace = torch.zeros(batch, K, C, device=device, dtype=dtype)
 
+        # Allocate boundary marginals output if requested
+        if return_boundary_marginals:
+            boundary_marginals = torch.zeros(batch, T, device=device, dtype=dtype)
+            stride_bm_b, stride_bm_t = boundary_marginals.stride()
+        else:
+            boundary_marginals = grad_cum_scores[:, :T, 0]  # Dummy (won't be written)
+            stride_bm_b, stride_bm_t = 0, 0
+
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
 
@@ -719,6 +752,7 @@ if HAS_TRITON:
                 grad_db_workspace,
                 grad_ps_for_kernel,
                 grad_pe_for_kernel,
+                boundary_marginals,
                 batch,
                 T,
                 K,
@@ -729,6 +763,7 @@ if HAS_TRITON:
                 segment_size,
                 has_boundaries,  # HAS_BOUNDARIES constexpr
                 has_duration_transitions,  # HAS_DURATION_TRANSITIONS constexpr
+                return_boundary_marginals,  # RETURN_BOUNDARY_MARGINALS constexpr
                 stride_cs_b,
                 stride_cs_t,
                 stride_cs_c,
@@ -760,6 +795,8 @@ if HAS_TRITON:
                 stride_gdbw_b,
                 stride_gdbw_k,
                 stride_gdbw_c,
+                stride_bm_b,
+                stride_bm_t,
             )
 
         # Compute weighted sum of per-batch gradients for shared parameters.
@@ -787,4 +824,89 @@ if HAS_TRITON:
 
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output)
 
-        return grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end
+        return (
+            grad_cum_scores,
+            grad_transition,
+            grad_duration_bias,
+            grad_proj_start,
+            grad_proj_end,
+            boundary_marginals if return_boundary_marginals else None,
+        )
+
+    def launch_streaming_triton_marginals(
+        cum_scores: torch.Tensor,
+        transition: torch.Tensor,
+        duration_bias: torch.Tensor,
+        lengths: torch.Tensor,
+        log_Z: torch.Tensor,
+        ring_checkpoints: torch.Tensor,
+        checkpoint_interval: int,
+        proj_start: torch.Tensor = None,
+        proj_end: torch.Tensor = None,
+    ) -> torch.Tensor:
+        r"""launch_streaming_triton_marginals(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, proj_start=None, proj_end=None) -> Tensor
+
+        Compute boundary marginals via Triton backward kernel.
+
+        This is a convenience wrapper that runs the backward kernel with
+        ``return_boundary_marginals=True`` and discards the gradient outputs.
+        The boundary marginal at position t represents the probability that
+        a segment starts at that position.
+
+        Args:
+            cum_scores (Tensor): Cumulative projected scores of shape
+                :math:`(\text{batch}, T+1, C)`.
+            transition (Tensor): Transition scores of shape :math:`(C, C)` for
+                static transitions, or :math:`(K, C, C)` for duration-dependent.
+            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
+            ring_checkpoints (Tensor): Saved ring buffer states of shape
+                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+            checkpoint_interval (int): Interval used during forward pass.
+            proj_start (Tensor, optional): Start boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
+            proj_end (Tensor, optional): End boundary scores of shape
+                :math:`(\text{batch}, T, C)`. Default: ``None``
+
+        Returns:
+            Tensor: Boundary marginals of shape :math:`(\text{batch}, T)`.
+                Each value represents the probability that a segment starts
+                at that position.
+
+        Example::
+
+            >>> # After forward pass
+            >>> log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+            ...     cum_scores, transition, duration_bias, lengths
+            ... )
+            >>> # Compute boundary marginals
+            >>> marginals = launch_streaming_triton_marginals(
+            ...     cum_scores, transition, duration_bias, lengths,
+            ...     log_Z, ring_ckpts, interval
+            ... )
+            >>> marginals.shape
+            torch.Size([batch, T])
+
+        See Also:
+            :func:`launch_streaming_triton_backward`: Full backward pass with gradients
+        """
+        batch = cum_scores.shape[0]
+        # Use ones for grad_output since we only want marginals, not scaled gradients
+        grad_output = torch.ones(batch, device=cum_scores.device, dtype=cum_scores.dtype)
+
+        _, _, _, _, _, boundary_marginals = launch_streaming_triton_backward(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            log_Z,
+            ring_checkpoints,
+            checkpoint_interval,
+            grad_output,
+            proj_start,
+            proj_end,
+            return_boundary_marginals=True,
+        )
+
+        return boundary_marginals

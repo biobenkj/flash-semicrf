@@ -185,18 +185,24 @@ class TestUncertaintyBackendRouting:
 
     def test_compute_boundary_marginals_backend(self):
         """Test compute_boundary_marginals backend parameter."""
+        torch.manual_seed(42)
         crf = UncertaintySemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
         hidden_states = torch.randn(2, 20, 16)
         lengths = torch.full((2,), 20)
 
         # Both backends should produce valid boundary marginals
         marginals_streaming = crf.compute_boundary_marginals(
-            hidden_states, lengths, backend="streaming"
+            hidden_states, lengths, backend="streaming", normalize=False
         )
-        marginals_exact = crf.compute_boundary_marginals(hidden_states, lengths, backend="exact")
+        marginals_exact = crf.compute_boundary_marginals(
+            hidden_states, lengths, backend="exact", normalize=False
+        )
 
         assert marginals_streaming.shape == (2, 20)
         assert marginals_exact.shape == (2, 20)
+
+        # Streaming and exact should produce near-identical values
+        torch.testing.assert_close(marginals_streaming, marginals_exact, rtol=0.01, atol=1e-5)
 
 
 class TestSemiMarkovCRFHead:

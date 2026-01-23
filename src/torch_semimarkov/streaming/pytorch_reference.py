@@ -523,3 +523,224 @@ def semi_crf_streaming_backward_pytorch(
                 )
 
     return grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end
+
+
+def semi_crf_streaming_marginals_pytorch(
+    cum_scores: torch.Tensor,
+    transition: torch.Tensor,
+    duration_bias: torch.Tensor,
+    lengths: torch.Tensor,
+    K: int,
+    proj_start: Optional[torch.Tensor] = None,
+    proj_end: Optional[torch.Tensor] = None,
+    checkpoint_interval: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""semi_crf_streaming_marginals_pytorch(cum_scores, transition, duration_bias, lengths, K, proj_start=None, proj_end=None, checkpoint_interval=None) -> tuple[Tensor, Tensor]
+
+    Compute boundary marginals via streaming forward-backward algorithm.
+
+    This function computes the true boundary marginals :math:`P(\text{segment starts at position } t)`
+    using the forward-backward algorithm with O(KC) memory. It runs a forward pass to compute
+    alpha values and partition function, then a backward pass to compute beta values and
+    accumulate marginals.
+
+    The boundary marginal at position t is:
+
+    .. math::
+        P(\text{boundary at } t) = \sum_{k, c_{\text{dst}}, c_{\text{src}}}
+        P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}])
+
+    where each segment probability is computed via the forward-backward algorithm:
+
+    .. math::
+        P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}]) =
+        \frac{\exp(\alpha[t, c_{\text{src}}] + \text{edge}[t, k, c_{\text{dst}}, c_{\text{src}}]
+        + \beta[t+k, c_{\text{dst}}])}{\exp(\log Z)}
+
+    Args:
+        cum_scores (Tensor): Cumulative projected scores of shape
+            :math:`(\text{batch}, T+1, C)`.
+        transition (Tensor): Label transition scores of shape :math:`(C, C)` for
+            static transitions, or :math:`(K, C, C)` for duration-dependent transitions.
+        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
+        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+        K (int): Maximum segment duration.
+        proj_start (Tensor, optional): Start boundary scores of shape
+            :math:`(\text{batch}, T, C)`. Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape
+            :math:`(\text{batch}, T, C)`. Default: ``None``
+        checkpoint_interval (int, optional): Interval for saving ring buffer state.
+            If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
+
+    Returns:
+        tuple[Tensor, Tensor]: Tuple of:
+            - **boundary_marginals** (Tensor): Boundary probabilities of shape
+              :math:`(\text{batch}, T)`. Each value represents the probability
+              that a segment starts at that position.
+            - **log_Z** (Tensor): Log partition values of shape :math:`(\text{batch},)`.
+
+    Example::
+
+        >>> cum_scores = torch.zeros(2, 101, 4)  # batch=2, T=100, C=4
+        >>> cum_scores[:, 1:] = torch.cumsum(torch.randn(2, 100, 4), dim=1)
+        >>> transition = torch.randn(4, 4)
+        >>> duration_bias = torch.randn(10, 4)  # K=10
+        >>> lengths = torch.tensor([100, 80])
+        >>> boundary_marginals, log_Z = semi_crf_streaming_marginals_pytorch(
+        ...     cum_scores, transition, duration_bias, lengths, K=10
+        ... )
+        >>> boundary_marginals.shape
+        torch.Size([2, 100])
+
+    See Also:
+        :func:`semi_crf_streaming_forward_pytorch`: Forward pass only
+        :func:`semi_crf_streaming_backward_pytorch`: Backward pass for gradients
+    """
+    batch, T_plus_1, C = cum_scores.shape
+    T = T_plus_1 - 1
+    device = cum_scores.device
+    dtype = cum_scores.dtype
+
+    # === Phase 1: Forward pass ===
+    log_Z, ring_checkpoints, effective_interval = semi_crf_streaming_forward_pytorch(
+        cum_scores,
+        transition,
+        duration_bias,
+        lengths,
+        K,
+        semiring="log",
+        proj_start=proj_start,
+        proj_end=proj_end,
+        checkpoint_interval=checkpoint_interval,
+    )
+
+    # === Phase 2: Backward pass to compute marginals ===
+    effective_interval = max(effective_interval, K)
+
+    # Initialize boundary marginals accumulator
+    boundary_marginals = torch.zeros(batch, T, device=device, dtype=dtype)
+
+    # Segment buffer for alpha values
+    segment_size = effective_interval + K
+    alpha_segment = torch.full((batch, segment_size, C), NEG_INF, device=device, dtype=dtype)
+
+    # Beta ring buffer
+    beta_ring = torch.full((batch, K, C), NEG_INF, device=device, dtype=dtype)
+
+    # Initialize beta at final positions
+    for b in range(batch):
+        final_ring_idx = lengths[b].item() % K
+        beta_ring[b, final_ring_idx, :] = 0.0
+
+    num_checkpoints = ring_checkpoints.shape[1]
+
+    # Process segments in reverse order
+    for ckpt_idx in range(num_checkpoints - 1, -1, -1):
+        seg_start = ckpt_idx * effective_interval
+        seg_end = min((ckpt_idx + 1) * effective_interval, T)
+
+        # Clear segment buffer
+        alpha_segment.fill_(NEG_INF)
+
+        # === Phase 2a: Recompute alpha from checkpoint's ring buffer state ===
+        alpha_ring = ring_checkpoints[:, ckpt_idx, :, :].clone()
+
+        # Store alpha[seg_start] at local position 0
+        alpha_segment[:, 0, :] = alpha_ring[:, seg_start % K, :]
+
+        # Recompute alpha for positions seg_start+1 to seg_end-1
+        for t in range(seg_start + 1, seg_end):
+            active_mask = t < lengths
+
+            k_eff = min(K - 1, t)
+            scores_all = []
+
+            for k in range(1, max(k_eff + 1, 2)):
+                start = t - k
+                ring_idx = start % K
+                alpha_prev = alpha_ring[:, ring_idx, :]
+
+                edge_block = compute_edge_block_streaming(
+                    cum_scores, transition, duration_bias, start, k, proj_start, proj_end
+                )
+
+                scores = alpha_prev.unsqueeze(-2) + edge_block
+                scores_all.append(scores)
+
+            if scores_all:
+                scores_stacked = torch.stack(scores_all, dim=1)
+                scores_over_src = torch.logsumexp(scores_stacked, dim=-1)
+                alpha_t = torch.logsumexp(scores_over_src, dim=1)
+
+                alpha_ring[:, t % K, :] = torch.where(
+                    active_mask.view(batch, 1), alpha_t, alpha_ring[:, t % K, :]
+                )
+
+                local_t = t - seg_start
+                alpha_segment[:, local_t, :] = torch.where(
+                    active_mask.view(batch, 1), alpha_t, alpha_segment[:, local_t, :]
+                )
+
+        # === Phase 2b: Compute beta backward and accumulate marginals ===
+        for t in range(seg_end - 1, seg_start - 1, -1):
+            local_t = t - seg_start
+            alpha_t = alpha_segment[:, local_t, :]
+
+            active_mask = t < lengths
+            if not active_mask.any():
+                continue
+
+            max_k = min(K - 1, T - t)
+            new_beta_scores = []
+
+            for k in range(1, max(max_k + 1, 2)):
+                end_pos = t + k
+                valid_mask = (end_pos <= lengths) & active_mask
+
+                if not valid_mask.any():
+                    continue
+
+                ring_k_idx = end_pos % K
+                beta_next = beta_ring[:, ring_k_idx, :]
+
+                edge_block = compute_edge_block_streaming(
+                    cum_scores, transition, duration_bias, t, k, proj_start, proj_end
+                )
+
+                # Compute marginal probability for this segment
+                log_marginal = (
+                    alpha_t.unsqueeze(-2)  # (batch, 1, C_src)
+                    + edge_block  # (batch, C_dest, C_src)
+                    + beta_next.unsqueeze(-1)  # (batch, C_dest, 1)
+                    - log_Z.view(batch, 1, 1)
+                )
+                marginal = torch.exp(log_marginal)
+                marginal = torch.where(
+                    valid_mask.view(batch, 1, 1), marginal, torch.zeros_like(marginal)
+                )
+
+                # Accumulate boundary marginal: sum over k, c_dest, c_src
+                # All segments starting at position t contribute to boundary_marginals[:, t]
+                boundary_marginals[:, t] += marginal.sum(dim=(1, 2))
+
+                # === Beta contribution (same as backward pass) ===
+                scores_for_beta = edge_block + beta_next.unsqueeze(-1)
+                scores_for_beta = torch.where(
+                    valid_mask.view(batch, 1, 1),
+                    scores_for_beta,
+                    torch.full_like(scores_for_beta, NEG_INF),
+                )
+                new_beta_scores.append(scores_for_beta)
+
+            # Update beta ring buffer
+            if new_beta_scores:
+                stacked = torch.stack(new_beta_scores, dim=1)
+                over_dest = torch.logsumexp(stacked, dim=-2)
+                new_beta = torch.logsumexp(over_dest, dim=1)
+
+                ring_t_idx = t % K
+                beta_ring[:, ring_t_idx, :] = torch.where(
+                    active_mask.view(batch, 1), new_beta, beta_ring[:, ring_t_idx, :]
+                )
+
+    return boundary_marginals, log_Z

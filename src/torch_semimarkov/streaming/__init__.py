@@ -160,6 +160,7 @@ from .pytorch_reference import (
     compute_edge_block_streaming,
     semi_crf_streaming_backward_pytorch,
     semi_crf_streaming_forward_pytorch,
+    semi_crf_streaming_marginals_pytorch,
 )
 
 # Re-export HAS_TRITON for external checks
@@ -170,7 +171,10 @@ except ImportError:
 
 # Conditionally export Triton launchers
 if HAS_TRITON:
-    from .triton_backward import launch_streaming_triton_backward
+    from .triton_backward import (
+        launch_streaming_triton_backward,
+        launch_streaming_triton_marginals,
+    )
     from .triton_forward import launch_streaming_triton_kernel
 
 __all__ = [
@@ -182,6 +186,7 @@ __all__ = [
     # PyTorch reference implementations
     "semi_crf_streaming_forward_pytorch",
     "semi_crf_streaming_backward_pytorch",
+    "semi_crf_streaming_marginals_pytorch",
     "compute_edge_block_streaming",
     # Utilities
     "_compute_checkpoint_interval",
@@ -189,5 +194,6 @@ __all__ = [
     "HAS_TRITON",
     # Triton launchers (conditionally available)
     "launch_streaming_triton_backward",
+    "launch_streaming_triton_marginals",
     "launch_streaming_triton_kernel",
 ]

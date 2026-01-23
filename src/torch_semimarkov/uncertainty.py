@@ -128,12 +128,17 @@ class UncertaintyMixin:
     ) -> Tensor:
         r"""_compute_boundary_marginals_streaming(hidden_states, lengths, normalize=True) -> Tensor
 
-        Compute boundary marginals via streaming gradient method.
+        Compute boundary marginals via streaming forward-backward algorithm.
 
-        Uses automatic differentiation to compute :math:`\nabla_{\text{cum\_scores}} \log Z`,
-        which encodes marginal information from the forward-backward algorithm.
-        Large gradient magnitudes at position :math:`t` indicate that :math:`t` is
-        informative for the partition function, correlating with segment boundaries.
+        Uses the forward-backward algorithm with :math:`O(KC)` memory to compute
+        true boundary marginals :math:`P(\text{segment starts at position } t)`.
+        This matches the exact method but scales to any sequence length.
+
+        The boundary marginal at position t is:
+
+        .. math::
+            P(\text{boundary at } t) = \sum_{k, c_{\text{dst}}, c_{\text{src}}}
+            P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}])
 
         Args:
             hidden_states (Tensor): Encoder output of shape
@@ -143,13 +148,19 @@ class UncertaintyMixin:
                 per sequence. Default: ``True``
 
         Returns:
-            Tensor: Boundary signal of shape :math:`(\text{batch}, T)`. Higher values
-            indicate higher boundary probability.
+            Tensor: Boundary probabilities of shape :math:`(\text{batch}, T)`.
+                Each value represents the probability that a segment starts at that position.
 
         .. note::
             Works with any sequence length via streaming API. Memory is :math:`O(KC)`
-            independent of :math:`T`.
+            independent of :math:`T`. Compute is 2x forward pass (forward + backward).
+
+        See Also:
+            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+                Underlying implementation
         """
+        from .streaming import semi_crf_streaming_marginals_pytorch
+
         batch, T, _ = hidden_states.shape
 
         # Project to label space if needed
@@ -159,49 +170,36 @@ class UncertaintyMixin:
         else:
             scores = hidden_states
 
-        # Use enable_grad() to ensure gradient computation works even if called
-        # from within a no_grad() context (e.g., from compute_loss_uncertainty_weighted)
-        with torch.enable_grad():
-            # Create a fresh tensor with gradients
-            cum_scores = torch.zeros(
-                batch,
-                T + 1,
-                self.num_classes,
-                dtype=torch.float32,
-                device=scores.device,
-            )
-            cum_scores[:, 1:] = torch.cumsum(scores.float().detach(), dim=1)
-            cum_scores = cum_scores.requires_grad_(True)
+        # Zero-center scores to match exact method preprocessing (see nn.py _build_edge_tensor)
+        scores_float = scores.float().detach()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
 
-            # Forward pass
-            partition = semi_crf_streaming_forward(
-                cum_scores,
-                self.transition.detach(),
-                self.duration_bias.detach(),
-                lengths,
-                self.max_duration,
-                semiring="log",
-                use_triton=False,  # Use PyTorch for reliable gradients
-            )
+        # Build cumulative scores
+        cum_scores = torch.zeros(
+            batch,
+            T + 1,
+            self.num_classes,
+            dtype=torch.float32,
+            device=scores.device,
+        )
+        cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
-            # Backward to get marginals
-            partition.sum().backward()
-
-        # Extract gradient (encodes marginal information)
-        grad = cum_scores.grad  # (batch, T+1, C)
-
-        # Boundary probability approximation:
-        # Large gradient magnitude at position t suggests t is informative for
-        # the partition function, which correlates with segment boundaries.
-        # We use the absolute gradient summed over classes.
-        boundary_signal = grad[:, 1:].abs().sum(dim=-1)  # (batch, T)
+        # Compute true boundary marginals via forward-backward algorithm
+        boundary_probs, _ = semi_crf_streaming_marginals_pytorch(
+            cum_scores,
+            self.transition.detach(),
+            self.duration_bias.detach(),
+            lengths,
+            self.max_duration,
+        )
 
         if normalize:
             # Normalize per sequence to [0, 1]
-            max_val = boundary_signal.max(dim=-1, keepdim=True)[0] + 1e-8
-            boundary_signal = boundary_signal / max_val
+            max_val = boundary_probs.max(dim=-1, keepdim=True)[0] + 1e-8
+            boundary_probs = boundary_probs / max_val
 
-        return boundary_signal
+        return boundary_probs
 
     def _compute_boundary_marginals_exact(
         self,
@@ -302,6 +300,11 @@ class UncertaintyMixin:
             # Make scores require grad
             scores_for_grad = scores.detach().requires_grad_(True)
 
+            # Zero-center scores to match exact method preprocessing (see nn.py _build_edge_tensor)
+            scores_centered = scores_for_grad.float()
+            if T > 1:
+                scores_centered = scores_centered - scores_centered.mean(dim=1, keepdim=True)
+
             # Build cumulative scores
             cum_scores = torch.zeros(
                 batch,
@@ -310,7 +313,7 @@ class UncertaintyMixin:
                 dtype=torch.float32,
                 device=scores_for_grad.device,
             )
-            cum_scores[:, 1:] = torch.cumsum(scores_for_grad.float(), dim=1)
+            cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)
 
             # Forward pass
             partition = semi_crf_streaming_forward(
