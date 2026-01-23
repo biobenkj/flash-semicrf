@@ -61,7 +61,7 @@ class TestTritonMarginalsBasic:
 
         # Triton (need forward pass first for checkpoints)
         log_Z_triton, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -128,7 +128,7 @@ class TestTritonMarginalsBasic:
 
         # Triton
         log_Z_triton, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -188,7 +188,7 @@ class TestTritonMarginalsEdgeCases:
 
         # Triton
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -243,7 +243,7 @@ class TestTritonMarginalsEdgeCases:
 
         # Triton
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -298,7 +298,7 @@ class TestTritonMarginalsEdgeCases:
 
         # Triton
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -353,7 +353,7 @@ class TestTritonMarginalsEdgeCases:
 
         # Triton
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
             cum_scores,
@@ -406,8 +406,8 @@ class TestTritonMarginalsIntegration:
         # Verify shape
         assert marginals_streaming.shape == (batch, T)
 
-        # Verify on correct device
-        assert marginals_streaming.device == cuda_device
+        # Verify on correct device (compare type, not exact device index)
+        assert marginals_streaming.device.type == cuda_device.type
 
         # Verify values are reasonable (probabilities should be positive)
         assert (marginals_streaming >= 0).all()
@@ -480,7 +480,7 @@ class TestBackwardCompatibility:
 
         # Forward
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
 
         # Backward with return_boundary_marginals=False (default)
@@ -540,7 +540,7 @@ class TestBackwardCompatibility:
 
         # Forward
         log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths
+            cum_scores, transition, duration_bias, lengths, K
         )
 
         # Backward with return_boundary_marginals=True

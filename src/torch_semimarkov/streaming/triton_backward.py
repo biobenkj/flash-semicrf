@@ -295,8 +295,10 @@ if HAS_TRITON:
                                 )
                                 content_score = cum_end - cum_start
 
+                                # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
+                                dur_idx = tl.minimum(k, K - 1)
                                 dur_bias = tl.load(
-                                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
@@ -406,8 +408,10 @@ if HAS_TRITON:
                                 )
                                 content_score = cum_end - cum_start
 
+                                # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
+                                dur_idx = tl.minimum(k, K - 1)
                                 dur_bias = tl.load(
-                                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
