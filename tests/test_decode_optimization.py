@@ -310,3 +310,176 @@ class TestBackpointerTraceback:
             # Verify scores match
             seg_sum = sum(seg.score for seg in result.segments[b])
             assert abs(seg_sum - result.scores[b].item()) < 1e-4
+
+
+# GPU-specific tests for Triton backpointer kernel
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required for Triton backpointer tests"
+)
+class TestTritonBackpointers:
+    """Test Triton backpointer kernel matches PyTorch reference."""
+
+    @pytest.fixture
+    def cuda_device(self):
+        """Fixture to get CUDA device."""
+        return torch.device("cuda")
+
+    @pytest.mark.parametrize(
+        "K,T,C,batch",
+        [
+            (8, 50, 4, 2),
+            (1, 30, 4, 2),  # K=1 linear CRF
+            (16, 100, 8, 4),
+            (30, 30, 4, 2),  # K=T
+        ],
+    )
+    def test_triton_backpointers_match_pytorch(self, cuda_device, K, T, C, batch):
+        """Verify Triton bp_k, bp_c, final_labels match PyTorch reference."""
+        from torch_semimarkov.streaming import (
+            HAS_TRITON,
+            semi_crf_streaming_viterbi_with_backpointers,
+        )
+
+        if not HAS_TRITON:
+            pytest.skip("Triton not available")
+
+        from torch_semimarkov.streaming import semi_crf_streaming_viterbi_triton
+
+        torch.manual_seed(42)
+
+        # Build inputs on GPU
+        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
+        cum_scores[:, 1:, :] = torch.cumsum(
+            torch.randn(batch, T, C, device=cuda_device, dtype=torch.float32), dim=1
+        )
+        transition = torch.randn(C, C, device=cuda_device, dtype=torch.float32) * 0.1
+        duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
+        lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
+
+        # PyTorch reference
+        scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        # Triton
+        scores_tri, bp_k_tri, bp_c_tri, final_tri = semi_crf_streaming_viterbi_triton(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        # Compare scores
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+
+        # Compare final labels
+        assert torch.equal(final_tri, final_ref), "final_labels mismatch"
+
+        # Compare backpointers for valid positions
+        # Note: backpointers may differ for ties, but the path they define should be valid
+        # For simplicity, we check that they're equal (deterministic tie-breaking)
+        for b in range(batch):
+            seq_len = lengths[b].item()
+            assert torch.equal(
+                bp_k_tri[b, :seq_len], bp_k_ref[b, :seq_len]
+            ), f"bp_k mismatch at batch {b}"
+            assert torch.equal(
+                bp_c_tri[b, :seq_len], bp_c_ref[b, :seq_len]
+            ), f"bp_c mismatch at batch {b}"
+
+    def test_triton_backpointers_variable_lengths(self, cuda_device):
+        """Test Triton backpointers with variable length sequences."""
+        from torch_semimarkov.streaming import HAS_TRITON
+
+        if not HAS_TRITON:
+            pytest.skip("Triton not available")
+
+        from torch_semimarkov.streaming import (
+            semi_crf_streaming_viterbi_triton,
+            semi_crf_streaming_viterbi_with_backpointers,
+        )
+
+        torch.manual_seed(42)
+        batch, T, C, K = 4, 50, 4, 8
+
+        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
+        cum_scores[:, 1:, :] = torch.cumsum(
+            torch.randn(batch, T, C, device=cuda_device, dtype=torch.float32), dim=1
+        )
+        transition = torch.randn(C, C, device=cuda_device, dtype=torch.float32) * 0.1
+        duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
+        lengths = torch.tensor([50, 40, 30, 20], device=cuda_device, dtype=torch.long)
+
+        scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+        scores_tri, bp_k_tri, bp_c_tri, final_tri = semi_crf_streaming_viterbi_triton(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+        assert torch.equal(final_tri, final_ref)
+
+        # Compare valid positions for each batch
+        for b in range(batch):
+            L = lengths[b].item()
+            assert torch.equal(bp_k_tri[b, :L], bp_k_ref[b, :L]), f"bp_k mismatch batch {b}"
+            assert torch.equal(bp_c_tri[b, :L], bp_c_ref[b, :L]), f"bp_c mismatch batch {b}"
+
+    def test_decode_uses_triton_on_gpu(self, cuda_device):
+        """Verify decode_with_traceback uses Triton path on CUDA."""
+        from torch_semimarkov.streaming import HAS_TRITON
+
+        if not HAS_TRITON:
+            pytest.skip("Triton not available")
+
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8).to(cuda_device)
+        hidden = torch.randn(2, 30, 4, device=cuda_device)
+        lengths = torch.tensor([30, 25], device=cuda_device)
+
+        # Both paths should produce identical results
+        result_triton = crf.decode_with_traceback(hidden, lengths, use_triton=True)
+        result_pytorch = crf.decode_with_traceback(hidden, lengths, use_triton=False)
+
+        # Scores should match
+        torch.testing.assert_close(
+            result_triton.scores, result_pytorch.scores, rtol=1e-4, atol=1e-4
+        )
+
+        # Segments should be identical
+        for b in range(2):
+            triton_segs = result_triton.segments[b]
+            pytorch_segs = result_pytorch.segments[b]
+
+            assert len(triton_segs) == len(pytorch_segs), f"Batch {b}: segment count mismatch"
+
+            for i, (ts, ps) in enumerate(zip(triton_segs, pytorch_segs, strict=True)):
+                assert ts.start == ps.start, f"Batch {b}, seg {i}: start mismatch"
+                assert ts.end == ps.end, f"Batch {b}, seg {i}: end mismatch"
+                assert ts.label == ps.label, f"Batch {b}, seg {i}: label mismatch"
+
+    @pytest.mark.parametrize(
+        "K,T,C",
+        [
+            (1, 30, 4),  # K=1 linear CRF
+            (8, 50, 4),  # Standard semi-CRF
+            (16, 100, 8),  # Larger configuration
+        ],
+    )
+    def test_triton_decode_segment_scores_sum_to_viterbi(self, cuda_device, K, T, C):
+        """Verify segment scores sum to Viterbi score when using Triton."""
+        from torch_semimarkov.streaming import HAS_TRITON
+
+        if not HAS_TRITON:
+            pytest.skip("Triton not available")
+
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(num_classes=C, max_duration=K).to(cuda_device)
+        hidden = torch.randn(2, T, C, device=cuda_device)
+        lengths = torch.tensor([T, T - 5], device=cuda_device)
+
+        result = crf.decode_with_traceback(hidden, lengths, use_triton=True)
+
+        for b in range(2):
+            seg_sum = sum(seg.score for seg in result.segments[b])
+            assert (
+                abs(seg_sum - result.scores[b].item()) < 1e-4
+            ), f"Batch {b}: segment sum {seg_sum} != Viterbi score {result.scores[b].item()}"

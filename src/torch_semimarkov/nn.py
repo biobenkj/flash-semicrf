@@ -31,9 +31,14 @@ from torch import Tensor
 from .duration import DurationDistribution, LearnedDuration, create_duration_distribution
 from .helpers import Segment, ViterbiResult, score_gold_vectorized
 from .streaming import (
+    HAS_TRITON,
     semi_crf_streaming_forward,
     semi_crf_streaming_viterbi_with_backpointers,
 )
+
+# Conditionally import Triton viterbi for GPU acceleration
+if HAS_TRITON:
+    from .streaming import semi_crf_streaming_viterbi_triton
 from .streaming.constants import NEG_INF
 from .streaming.pytorch_reference import compute_edge_block_streaming
 from .validation import (
@@ -689,14 +694,26 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Use fast backpointer-based traceback when possible
         if any_needs_traceback:
+            # Determine if we can use Triton (GPU path)
+            can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+
             # Get max scores AND backpointers in a single forward pass
-            max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_with_backpointers(
-                cum_scores,
-                self.transition,
-                self.duration_bias,
-                lengths,
-                self.max_duration,
-            )
+            if can_use_triton:
+                max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_triton(
+                    cum_scores,
+                    self.transition,
+                    self.duration_bias,
+                    lengths,
+                    self.max_duration,
+                )
+            else:
+                max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_with_backpointers(
+                    cum_scores,
+                    self.transition,
+                    self.duration_bias,
+                    lengths,
+                    self.max_duration,
+                )
 
             # Fast O(T) traceback using backpointers
             all_segments = self._traceback_from_backpointers(

@@ -176,7 +176,11 @@ if HAS_TRITON:
         launch_streaming_triton_backward,
         launch_streaming_triton_marginals,
     )
-    from .triton_forward import launch_streaming_triton_kernel
+    from .triton_forward import (
+        launch_streaming_triton_kernel,
+        launch_streaming_triton_kernel_max_bp,
+        semi_crf_streaming_viterbi_triton,
+    )
 
 __all__ = [
     # Main API
@@ -198,4 +202,6 @@ __all__ = [
     "launch_streaming_triton_backward",
     "launch_streaming_triton_marginals",
     "launch_streaming_triton_kernel",
+    "launch_streaming_triton_kernel_max_bp",
+    "semi_crf_streaming_viterbi_triton",
 ]
