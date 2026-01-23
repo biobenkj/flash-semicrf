@@ -6,6 +6,18 @@ This is the classic benchmark for demonstrating Semi-CRF advantages over linear 
 TIMIT has been used since the original Semi-CRF paper (Sarawagi & Cohen, 2004) and
 provides a well-studied setting with published baselines.
 
+Three-Way Model Comparison:
+    This benchmark supports comparing three CRF implementations:
+
+    1. **pytorch-crf** (optional): External linear CRF library baseline
+    2. **torch-semimarkov K=1**: Linear CRF via Triton streaming kernel
+    3. **torch-semimarkov K>1**: Full semi-CRF with duration modeling
+
+    The comparison validates that:
+    - K=1 Triton matches pytorch-crf accuracy (correctness)
+    - K=1 Triton is faster than pytorch-crf (performance)
+    - Semi-CRF improves on linear CRF (duration modeling value)
+
 Why Semi-CRFs help on TIMIT:
     - Phonemes have characteristic durations (vowels longer than stops)
     - Duration is linguistically meaningful and predictable
@@ -28,6 +40,7 @@ Metrics:
     - Phone Error Rate (PER): Levenshtein distance / reference phones
     - Boundary F1: Exact match and within-tolerance
     - Segment F1: Full segment match (start, end, label)
+    - Training/inference timing
 
 Historical context:
     - Sarawagi & Cohen (2004): Semi-CRF improved ~1-2% over linear CRF
@@ -36,6 +49,9 @@ Historical context:
 
 Requirements:
     pip install torchaudio librosa soundfile
+
+    Optional (for three-way comparison with external baseline):
+    pip install pytorch-crf
 
 Note on data access:
     TIMIT requires a license from LDC (Linguistic Data Consortium).
@@ -60,15 +76,21 @@ Usage:
         --timit-dir /path/to/TIMIT \
         --output-dir data/timit_benchmark/
 
-    # Train and evaluate
+    # Train a specific model type
     python timit_phoneme.py train \
         --data-dir data/timit_benchmark/ \
         --model semicrf \
         --max-duration 30
 
-    # Compare linear CRF vs semi-CRF
+    # Model types: pytorch-crf, linear (K=1 Triton), semicrf (K>1)
+    python timit_phoneme.py train --model pytorch-crf ...
+    python timit_phoneme.py train --model linear ...
+    python timit_phoneme.py train --model semicrf ...
+
+    # Three-way comparison (or two-way if pytorch-crf not installed)
     python timit_phoneme.py compare \
-        --data-dir data/timit_benchmark/
+        --data-dir data/timit_benchmark/ \
+        --output-json results/timit_comparison.json
 """
 
 from __future__ import annotations
@@ -76,6 +98,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +125,14 @@ try:
     HAS_SOUNDFILE = importlib.util.find_spec("soundfile") is not None
 except ImportError:
     HAS_SOUNDFILE = False
+
+try:
+    from torchcrf import CRF as TorchCRF
+
+    HAS_TORCHCRF = True
+except ImportError:
+    HAS_TORCHCRF = False
+    TorchCRF = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -906,6 +937,78 @@ class TIMITModel(nn.Module):
         return self.crf.decode_with_traceback(hidden, lengths)
 
 
+class TIMITModelPytorchCRF(nn.Module):
+    """
+    TIMIT model using pytorch-crf for baseline comparison.
+
+    Uses the same BiLSTMEncoder but replaces SemiMarkovCRFHead with torchcrf.CRF.
+    This enables fair comparison between pytorch-crf and torch-semimarkov K=1.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        num_classes: int = NUM_PHONES,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        if not HAS_TORCHCRF:
+            raise ImportError(
+                "pytorch-crf required for this model. Install with: pip install pytorch-crf"
+            )
+        self.encoder = encoder
+        self.emission_proj = nn.Linear(hidden_dim, num_classes)
+        self.crf = TorchCRF(num_classes, batch_first=True)
+
+    def forward(self, features: Tensor, _lengths: Tensor) -> Tensor:
+        """Forward pass returning emission scores."""
+        hidden = self.encoder(features)
+        return self.emission_proj(hidden)
+
+    def compute_loss(
+        self,
+        features: Tensor,
+        lengths: Tensor,
+        labels: Tensor,
+        **_kwargs,
+    ) -> Tensor:
+        """
+        Compute NLL loss using pytorch-crf.
+
+        Args:
+            features: Input features (batch, T, input_dim)
+            lengths: Sequence lengths (batch,)
+            labels: Per-position labels (batch, T)
+            **_kwargs: Ignored (for API compatibility with TIMITModel)
+        """
+        hidden = self.encoder(features)
+        emissions = self.emission_proj(hidden)
+
+        # pytorch-crf expects mask of shape (batch, seq_len)
+        _, seq_len = features.shape[:2]
+        mask = torch.arange(seq_len, device=features.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # pytorch-crf.forward() returns log-likelihood, we want NLL
+        log_likelihood = self.crf(emissions, labels, mask=mask, reduction="mean")
+        return -log_likelihood
+
+    def decode(self, features: Tensor, lengths: Tensor) -> list[list[int]]:
+        """
+        Viterbi decode to get best label sequences.
+
+        Returns:
+            List of label sequences (one per batch element).
+        """
+        hidden = self.encoder(features)
+        emissions = self.emission_proj(hidden)
+
+        _, seq_len = features.shape[:2]
+        mask = torch.arange(seq_len, device=features.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # Returns list of lists (batch_size x variable_length)
+        return self.crf.decode(emissions, mask=mask)
+
+
 # =============================================================================
 # Evaluation Metrics
 # =============================================================================
@@ -1085,6 +1188,10 @@ class TIMITMetrics:
     segment_precision: float
     segment_recall: float
     segment_f1: float
+    # Timing metrics (optional, set during training)
+    training_time_per_epoch: float = 0.0  # seconds
+    total_training_time: float = 0.0  # seconds
+    inference_time: float = 0.0  # seconds for full test set
 
     def to_dict(self) -> dict:
         """Convert metrics to JSON-serializable dict."""
@@ -1097,6 +1204,9 @@ class TIMITMetrics:
             "segment_precision": self.segment_precision,
             "segment_recall": self.segment_recall,
             "segment_f1": self.segment_f1,
+            "training_time_per_epoch": self.training_time_per_epoch,
+            "total_training_time": self.total_training_time,
+            "inference_time": self.inference_time,
         }
 
 
@@ -1106,17 +1216,23 @@ class TIMITMetrics:
 
 
 def train_epoch(
-    model: TIMITModel,
+    model: TIMITModel | TIMITModelPytorchCRF,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     backend: str = "streaming",
     use_triton: bool = True,
-) -> float:
-    """Train for one epoch."""
+) -> tuple[float, float]:
+    """Train for one epoch.
+
+    Returns:
+        Tuple of (average_loss, elapsed_time_seconds).
+    """
     model.train()
     total_loss = 0
     num_batches = 0
+
+    start_time = time.perf_counter()
 
     for batch in dataloader:
         features = batch["features"].to(device)
@@ -1133,22 +1249,32 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
-    return total_loss / num_batches
+    elapsed = time.perf_counter() - start_time
+    return total_loss / num_batches, elapsed
 
 
 @torch.no_grad()
 def evaluate(
-    model: TIMITModel,
+    model: TIMITModel | TIMITModelPytorchCRF,
     dataloader: DataLoader,
     device: torch.device,
-) -> TIMITMetrics:
-    """Evaluate model."""
+) -> tuple[TIMITMetrics, float]:
+    """Evaluate model.
+
+    Returns:
+        Tuple of (metrics, elapsed_time_seconds).
+    """
     model.eval()
 
     all_predictions = []
     all_references = []
     all_pred_segments = []
     all_true_segments = []
+
+    # Check if this is a pytorch-crf model (returns list) vs TIMITModel (returns ViterbiResult)
+    is_pytorch_crf = isinstance(model, TIMITModelPytorchCRF)
+
+    start_time = time.perf_counter()
 
     for batch in dataloader:
         features = batch["features"].to(device)
@@ -1160,30 +1286,42 @@ def evaluate(
         for i in range(len(lengths)):
             seq_len = lengths[i].item()
 
-            # Get predicted labels
-            # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
-            # Convert to exclusive for iteration: range(start, end+1)
-            pred_labels = [0] * seq_len
-            for seg in result.segments[i]:
-                for j in range(seg.start, min(seg.end + 1, seq_len)):
-                    pred_labels[j] = seg.label
+            if is_pytorch_crf:
+                # pytorch-crf returns list of label sequences directly
+                pred_labels = result[i][:seq_len]
+            else:
+                # TIMITModel returns ViterbiResult with segments
+                # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
+                # Convert to exclusive for iteration: range(start, end+1)
+                pred_labels = [0] * seq_len
+                for seg in result.segments[i]:
+                    for j in range(seg.start, min(seg.end + 1, seq_len)):
+                        pred_labels[j] = seg.label
 
             ref_labels = labels[i, :seq_len].cpu().tolist()
 
             all_predictions.append(pred_labels)
             all_references.append(ref_labels)
 
-            pred_segs = [SegmentAnnotation(s.start, s.end + 1, s.label) for s in result.segments[i]]
+            if is_pytorch_crf:
+                # Convert frame-level predictions to segments for segment metrics
+                pred_segs = labels_to_segments(pred_labels)
+            else:
+                pred_segs = [
+                    SegmentAnnotation(s.start, s.end + 1, s.label) for s in result.segments[i]
+                ]
             true_segs = labels_to_segments(ref_labels)
 
             all_pred_segments.append(pred_segs)
             all_true_segments.append(true_segs)
 
+    elapsed = time.perf_counter() - start_time
+
     per = compute_phone_error_rate(all_predictions, all_references)
     boundary_metrics = compute_boundary_metrics(all_predictions, all_references)
     segment_metrics = compute_segment_metrics(all_pred_segments, all_true_segments)
 
-    return TIMITMetrics(
+    metrics = TIMITMetrics(
         phone_error_rate=per,
         boundary_precision=boundary_metrics["boundary_precision"],
         boundary_recall=boundary_metrics["boundary_recall"],
@@ -1197,11 +1335,12 @@ def evaluate(
         segment_recall=segment_metrics["segment_recall"],
         segment_f1=segment_metrics["segment_f1"],
     )
+    return metrics, elapsed
 
 
 def train_model(
     data_dir: Path,
-    model_type: Literal["linear", "semicrf"] = "semicrf",
+    model_type: Literal["pytorch-crf", "linear", "semicrf"] = "semicrf",
     max_duration: int = 30,
     hidden_dim: int = 256,
     num_layers: int = 3,
@@ -1212,7 +1351,7 @@ def train_model(
     backend: str = "streaming",
     use_triton: bool = True,
     log_every: int = 1,
-) -> tuple[TIMITModel, TIMITMetrics]:
+) -> tuple[TIMITModel | TIMITModelPytorchCRF, TIMITMetrics]:
     """Train a model and return it with metrics."""
     device = torch.device(device)
 
@@ -1246,12 +1385,30 @@ def train_model(
         num_layers=num_layers,
     )
 
-    k = 1 if model_type == "linear" else max_duration
-    model = TIMITModel(
-        encoder=encoder,
-        max_duration=k,
-        hidden_dim=hidden_dim,
-    ).to(device)
+    if model_type == "pytorch-crf":
+        if not HAS_TORCHCRF:
+            raise ImportError(
+                "pytorch-crf required for this model type. " "Install with: pip install pytorch-crf"
+            )
+        model = TIMITModelPytorchCRF(
+            encoder=encoder,
+            hidden_dim=hidden_dim,
+        ).to(device)
+        k = 1  # For logging purposes
+    elif model_type == "linear":
+        k = 1
+        model = TIMITModel(
+            encoder=encoder,
+            max_duration=k,
+            hidden_dim=hidden_dim,
+        ).to(device)
+    else:  # semicrf
+        k = max_duration
+        model = TIMITModel(
+            encoder=encoder,
+            max_duration=k,
+            hidden_dim=hidden_dim,
+        ).to(device)
 
     logger.info(
         f"Model: {model_type}, K={k}, params={sum(p.numel() for p in model.parameters()):,}"
@@ -1262,42 +1419,71 @@ def train_model(
 
     best_per = float("inf")
     best_metrics = None
+    total_train_time = 0.0
+    epoch_times = []
 
     for epoch in range(epochs):
-        train_loss = train_epoch(
+        train_loss, epoch_time = train_epoch(
             model, train_loader, optimizer, device, backend=backend, use_triton=use_triton
         )
+        total_train_time += epoch_time
+        epoch_times.append(epoch_time)
         scheduler.step()
 
         if (epoch + 1) % log_every == 0 or epoch == epochs - 1:
-            test_metrics = evaluate(model, test_loader, device)
+            test_metrics, inference_time = evaluate(model, test_loader, device)
 
             logger.info(
                 f"Epoch {epoch+1}/{epochs} | Loss: {train_loss:.4f} | "
                 f"PER: {test_metrics.phone_error_rate:.4f} | "
                 f"Boundary F1: {test_metrics.boundary_f1:.4f} | "
-                f"Segment F1: {test_metrics.segment_f1:.4f}"
+                f"Segment F1: {test_metrics.segment_f1:.4f} | "
+                f"Train: {epoch_time:.1f}s | Infer: {inference_time:.1f}s"
             )
 
             if test_metrics.phone_error_rate < best_per:
                 best_per = test_metrics.phone_error_rate
+                # Update metrics with timing info
+                test_metrics.total_training_time = total_train_time
+                test_metrics.training_time_per_epoch = sum(epoch_times) / len(epoch_times)
+                test_metrics.inference_time = inference_time
                 best_metrics = test_metrics
 
     return model, best_metrics
 
 
 def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
-    """Compare linear CRF vs semi-CRF."""
+    """
+    Compare CRF models: pytorch-crf (optional), linear CRF (K=1), and semi-CRF.
+
+    If pytorch-crf is installed, runs a three-way comparison. Otherwise, runs
+    a two-way comparison between torch-semimarkov K=1 and K>1.
+    """
     results = {}
 
+    # 1. pytorch-crf baseline (optional - skip if not installed)
+    if HAS_TORCHCRF:
+        logger.info("=" * 60)
+        logger.info("Training PYTORCH-CRF (external library baseline)")
+        logger.info("=" * 60)
+        _, pytorch_crf_metrics = train_model(data_dir, model_type="pytorch-crf", **kwargs)
+        results["pytorch_crf"] = pytorch_crf_metrics
+    else:
+        logger.warning("=" * 60)
+        logger.warning("pytorch-crf not installed, skipping baseline comparison")
+        logger.warning("Install with: pip install pytorch-crf")
+        logger.warning("=" * 60)
+
+    # 2. torch-semimarkov K=1 (linear CRF via Triton streaming)
     logger.info("=" * 60)
-    logger.info("Training LINEAR CRF (K=1)")
+    logger.info("Training LINEAR CRF (torch-semimarkov K=1, Triton)")
     logger.info("=" * 60)
     _, linear_metrics = train_model(data_dir, model_type="linear", **kwargs)
-    results["linear_crf"] = linear_metrics
+    results["linear_crf_triton"] = linear_metrics
 
+    # 3. torch-semimarkov K>1 (semi-CRF)
     logger.info("=" * 60)
-    logger.info(f"Training SEMI-CRF (K={max_duration})")
+    logger.info(f"Training SEMI-CRF (torch-semimarkov K={max_duration})")
     logger.info("=" * 60)
     _, semicrf_metrics = train_model(
         data_dir, model_type="semicrf", max_duration=max_duration, **kwargs
@@ -1306,28 +1492,104 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
 
     # Print comparison
     logger.info("\n" + "=" * 60)
-    logger.info("COMPARISON: Linear CRF vs Semi-CRF")
+    if HAS_TORCHCRF:
+        logger.info("COMPARISON: pytorch-crf vs K=1 Triton vs Semi-CRF")
+    else:
+        logger.info("COMPARISON: K=1 Triton vs Semi-CRF")
     logger.info("=" * 60)
 
-    print(f"\n{'Metric':<25} {'Linear CRF':>15} {'Semi-CRF':>15} {'Δ':>12}")
-    print("-" * 67)
+    if HAS_TORCHCRF:
+        # Three-way comparison
+        print(
+            f"\n{'Metric':<25} {'pytorch-crf':>15} {'K=1 Triton':>15} "
+            f"{'Semi-CRF':>15} {'Δ vs baseline':>15}"
+        )
+        print("-" * 85)
 
-    # PER (lower is better)
-    l_per = results["linear_crf"].phone_error_rate
-    s_per = results["semi_crf"].phone_error_rate
-    print(f"{'Phone Error Rate':<25} {l_per:>15.4f} {s_per:>15.4f} {s_per - l_per:>+12.4f}")
+        # PER (lower is better)
+        p_per = results["pytorch_crf"].phone_error_rate
+        l_per = results["linear_crf_triton"].phone_error_rate
+        s_per = results["semi_crf"].phone_error_rate
+        print(
+            f"{'Phone Error Rate':<25} {p_per:>15.4f} {l_per:>15.4f} "
+            f"{s_per:>15.4f} {s_per - p_per:>+15.4f}"
+        )
 
-    # F1 scores (higher is better)
-    for metric in ["boundary_f1", "segment_f1"]:
-        l_val = getattr(results["linear_crf"], metric)
-        s_val = getattr(results["semi_crf"], metric)
-        print(f"{metric:<25} {l_val:>15.4f} {s_val:>15.4f} {s_val - l_val:>+12.4f}")
+        # F1 scores (higher is better)
+        for metric in ["boundary_f1", "segment_f1"]:
+            p_val = getattr(results["pytorch_crf"], metric)
+            l_val = getattr(results["linear_crf_triton"], metric)
+            s_val = getattr(results["semi_crf"], metric)
+            print(
+                f"{metric:<25} {p_val:>15.4f} {l_val:>15.4f} "
+                f"{s_val:>15.4f} {s_val - p_val:>+15.4f}"
+            )
 
-    print("\nBoundary F1 at different tolerances:")
-    for tol in [0, 1, 2]:
-        l_val = results["linear_crf"].boundary_f1_tolerances.get(tol, 0)
-        s_val = results["semi_crf"].boundary_f1_tolerances.get(tol, 0)
-        print(f"  tol={tol:<2} {l_val:>15.4f} {s_val:>15.4f} {s_val - l_val:>+12.4f}")
+        print("\nBoundary F1 at different tolerances:")
+        for tol in [0, 1, 2]:
+            p_val = results["pytorch_crf"].boundary_f1_tolerances.get(tol, 0)
+            l_val = results["linear_crf_triton"].boundary_f1_tolerances.get(tol, 0)
+            s_val = results["semi_crf"].boundary_f1_tolerances.get(tol, 0)
+            print(
+                f"  tol={tol:<2} {p_val:>15.4f} {l_val:>15.4f} "
+                f"{s_val:>15.4f} {s_val - p_val:>+15.4f}"
+            )
+
+        # Timing metrics
+        print("\nTiming (lower is better):")
+        p_time = results["pytorch_crf"].training_time_per_epoch
+        l_time = results["linear_crf_triton"].training_time_per_epoch
+        s_time = results["semi_crf"].training_time_per_epoch
+        print(
+            f"{'Train time (s/epoch)':<25} {p_time:>15.2f} {l_time:>15.2f} "
+            f"{s_time:>15.2f} {l_time - p_time:>+15.2f}*"
+        )
+        p_infer = results["pytorch_crf"].inference_time
+        l_infer = results["linear_crf_triton"].inference_time
+        s_infer = results["semi_crf"].inference_time
+        print(
+            f"{'Inference time (s)':<25} {p_infer:>15.2f} {l_infer:>15.2f} "
+            f"{s_infer:>15.2f} {l_infer - p_infer:>+15.2f}*"
+        )
+        print("* Δ shows K=1 Triton vs pytorch-crf (negative = faster)")
+
+        # Note about K=1 vs pytorch-crf equivalence
+        print("\nNote: K=1 Triton and pytorch-crf should produce similar accuracy")
+        print("(validates that K=1 is a correct linear CRF implementation)")
+    else:
+        # Two-way comparison (no pytorch-crf)
+        print(f"\n{'Metric':<25} {'K=1 Triton':>15} {'Semi-CRF':>15} {'Δ':>12}")
+        print("-" * 67)
+
+        # PER (lower is better)
+        l_per = results["linear_crf_triton"].phone_error_rate
+        s_per = results["semi_crf"].phone_error_rate
+        print(f"{'Phone Error Rate':<25} {l_per:>15.4f} {s_per:>15.4f} {s_per - l_per:>+12.4f}")
+
+        # F1 scores (higher is better)
+        for metric in ["boundary_f1", "segment_f1"]:
+            l_val = getattr(results["linear_crf_triton"], metric)
+            s_val = getattr(results["semi_crf"], metric)
+            print(f"{metric:<25} {l_val:>15.4f} {s_val:>15.4f} {s_val - l_val:>+12.4f}")
+
+        print("\nBoundary F1 at different tolerances:")
+        for tol in [0, 1, 2]:
+            l_val = results["linear_crf_triton"].boundary_f1_tolerances.get(tol, 0)
+            s_val = results["semi_crf"].boundary_f1_tolerances.get(tol, 0)
+            print(f"  tol={tol:<2} {l_val:>15.4f} {s_val:>15.4f} {s_val - l_val:>+12.4f}")
+
+        # Timing metrics
+        print("\nTiming (lower is better):")
+        l_time = results["linear_crf_triton"].training_time_per_epoch
+        s_time = results["semi_crf"].training_time_per_epoch
+        print(
+            f"{'Train time (s/epoch)':<25} {l_time:>15.2f} {s_time:>15.2f} {s_time - l_time:>+12.2f}"
+        )
+        l_infer = results["linear_crf_triton"].inference_time
+        s_infer = results["semi_crf"].inference_time
+        print(
+            f"{'Inference time (s)':<25} {l_infer:>15.2f} {s_infer:>15.2f} {s_infer - l_infer:>+12.2f}"
+        )
 
     return results
 
@@ -1356,7 +1618,12 @@ def main():
     # Train
     train_parser = subparsers.add_parser("train", help="Train a model")
     train_parser.add_argument("--data-dir", type=Path, required=True)
-    train_parser.add_argument("--model", choices=["linear", "semicrf"], default="semicrf")
+    train_parser.add_argument(
+        "--model",
+        choices=["pytorch-crf", "linear", "semicrf"],
+        default="semicrf",
+        help="Model type: pytorch-crf (external lib), linear (K=1 Triton), semicrf (K>1)",
+    )
     train_parser.add_argument("--max-duration", type=int, default=30)
     train_parser.add_argument("--hidden-dim", type=int, default=256)
     train_parser.add_argument("--num-layers", type=int, default=3)
@@ -1382,7 +1649,10 @@ def main():
     )
 
     # Compare
-    compare_parser = subparsers.add_parser("compare", help="Compare linear CRF vs semi-CRF")
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="Compare CRF models (pytorch-crf if installed, K=1 Triton, Semi-CRF)",
+    )
     compare_parser.add_argument("--data-dir", type=Path, required=True)
     compare_parser.add_argument("--max-duration", type=int, default=30)
     compare_parser.add_argument("--hidden-dim", type=int, default=256)
@@ -1446,9 +1716,12 @@ def main():
                     "epochs": args.epochs,
                     "batch_size": args.batch_size,
                 },
-                "linear_crf": results["linear_crf"].to_dict(),
+                "linear_crf_triton": results["linear_crf_triton"].to_dict(),
                 "semi_crf": results["semi_crf"].to_dict(),
             }
+            # Include pytorch-crf results if available
+            if "pytorch_crf" in results:
+                output["pytorch_crf"] = results["pytorch_crf"].to_dict()
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
             with open(args.output_json, "w") as f:
                 json.dump(output, f, indent=2)
