@@ -22,9 +22,10 @@ This document catalogs all debugging instrumentation added to trace stochastic N
 | `triton_backward.py:343-364` | NEG_INF guards for alpha recompute logsumexp | This session |
 | `triton_backward.py:577-598` | NEG_INF guards for beta update logsumexp | This session |
 | `triton_backward.py:459-472` | Input clamping in Triton marginal | This session |
-| `triton_backward.py:176-182` | **OOB fix: clamped indices for all memory ops** | This session |
-| `triton_backward.py:~750` | **OOB fix: workspace allocation with C_PAD** | This session |
-| `triton_backward.py:~895` | **OOB fix: slice workspaces to C before einsum** | This session |
+| `triton_backward.py:176-182` | **OOB fix: clamped indices for READS from unpadded inputs** | This session |
+| `triton_backward.py:~765` | **OOB fix: pad ALL gradient allocations to C_PAD** | This session |
+| `triton_backward.py:~541-608` | **Atomic fix: unclamped indices for WRITES to padded outputs** | This session |
+| `triton_backward.py:~915` | **OOB fix: slice all gradients back to C before returning** | This session |
 | `timit_phoneme.py:1533-1547` | Parameter magnitude logging per epoch | This session |
 | `timit_phoneme.py:804-865` | Fixed-length collate for debugging | This session |
 
@@ -164,46 +165,49 @@ trans_scores = torch.where(first_seg_mask, torch.zeros_like(...), trans_scores)
 total_per_segment = torch.where(seg_mask, total_per_segment, torch.zeros_like(...))
 ```
 
-### OOB Memory Access Fix (DEFINITIVE ROOT CAUSE)
+### OOB Memory Access & Atomic Contention Fix (DEFINITIVE ROOT CAUSE)
 
-The stochastic NaN was caused by **out-of-bounds pointer calculation** in `triton_backward.py`.
+The stochastic NaN was caused by **out-of-bounds pointer calculation** and **atomic contention** in `triton_backward.py`.
 
-**Problem:** Workspace tensors (`grad_tr_workspace`, `grad_db_workspace`) were allocated with size `C` (e.g., 39), but Triton launches `C_PAD` threads (next power of 2, e.g., 64). While `atomic_add` uses `mask=c_mask` to prevent writes, the **pointer address calculation happens for ALL threads**:
+**Problem 1 (OOB):** Gradient tensors were allocated with size `C` (e.g., 39), but Triton launches `C_PAD` threads (next power of 2, e.g., 64). Masked-out threads (39-63) still calculate pointer addresses, causing OOB access.
 
-```python
-# For threads 39-63 (masked out):
-offset = c_idx * stride  # Calculates pointer to index 39-63 (OOB!)
-tl.atomic_add(ptr + offset, value, mask=c_mask)  # Mask prevents write, but pointer is invalid
-```
+**Problem 2 (Atomic Contention):** Clamping all masked-out indices to `C-1` forces 25 threads to target the *same memory address* with `atomic_add`, causing race conditions even when writes are masked.
 
-Passing invalid pointers to `atomic_add` is **undefined behavior** on GPU, causing memory corruption.
+**Fix (2 parts):**
 
-**Fix (3 parts):**
-
-**Part 1: Clamp indices** to ensure valid pointer calculation:
+**Part 1: Pad ALL gradient allocations** to `C_PAD`:
 
 ```python
-# triton_backward.py:176-182
-c_idx_safe = tl.minimum(c_idx, C - 1)
-c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
-c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
-```
-
-**Part 2: Pad workspace allocations** to `C_PAD`:
-
-```python
-# triton_backward.py:~750
+# triton_backward.py:~765
+grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, ...)
+grad_proj_start = torch.zeros(batch, T, C_PAD, ...)
+grad_proj_end = torch.zeros(batch, T, C_PAD, ...)
 grad_tr_workspace = torch.zeros(batch, K, C_PAD, C_PAD, ...)
 grad_db_workspace = torch.zeros(batch, K, C_PAD, ...)
 ```
 
-**Part 3: Slice back to C** before einsum:
+**Part 2: Use unclamped indices for writes, clamped for reads:**
 
 ```python
-# triton_backward.py:~895
+# WRITES: Use unclamped c_idx so each thread writes to unique address
+tl.atomic_add(grad_cs_base + t * stride + c_idx * stride_c, ...)  # c_idx, not c_idx_safe
+
+# READS: Use clamped c_idx_safe for unpadded inputs
+cum_end = tl.load(cum_scores_base + t * stride + c_idx_safe * stride_c, ...)
+```
+
+**Part 3: Slice back to C** before returning:
+
+```python
+# triton_backward.py:~915
+grad_cum_scores = grad_cum_scores[:, :, :C]
+grad_proj_start = grad_proj_start[:, :, :C]
+grad_proj_end = grad_proj_end[:, :, :C]
 grad_tr_workspace = grad_tr_workspace[:, :, :C, :C]
 grad_db_workspace = grad_db_workspace[:, :, :C]
 ```
+
+This ensures every thread writes to its own unique memory address (valid padding), completely eliminating OOB access and atomic contention.
 
 ---
 
@@ -240,17 +244,21 @@ Watch for parameter drift warnings.
 
 ## Root Cause (CONFIRMED)
 
-### OOB Memory Access in Triton Backward Kernel
+### OOB Memory Access & Atomic Contention in Triton Backward Kernel
 
-**CONFIRMED:** The stochastic NaN was caused by out-of-bounds pointer calculation in `triton_backward.py`. Workspace tensors were allocated with size `C`, but Triton launches `C_PAD` threads. Masked-out threads (indices C to C_PAD-1) calculated pointers beyond the allocated memory, causing undefined behavior and memory corruption.
+**CONFIRMED:** The stochastic NaN was caused by two related issues in `triton_backward.py`:
 
-**Fix applied:** Clamped indices + padded workspace allocations + slice before einsum.
+1. **OOB Pointer Calculation**: Gradient tensors allocated with size `C` (e.g., 39), but Triton launches `C_PAD` threads (e.g., 64). Masked-out threads calculated pointers beyond allocated memory.
+
+2. **Atomic Contention**: Initial fix of clamping indices to `C-1` forced 25+ threads to target the *same* memory address with `atomic_add`, causing hardware-level race conditions even with masked writes.
+
+**Fix applied:** Pad ALL gradient allocations to `C_PAD` + use unclamped indices for writes (each thread gets unique address) + use clamped indices only for reads from unpadded inputs + slice back to `C` before returning.
 
 ### Previously Suspected (Not Root Cause)
 
-- **Triton Atomic Operations**: `tl.atomic_add` order non-determinism is not a correctness issue
+- **Triton Atomic Operations**: `tl.atomic_add` order non-determinism is not a correctness issue (but contention IS)
 - **Buffer Initialization**: Allocation timing is fine with PyTorch's async execution model
-- **Stochastic Batch Ordering**: Only exposed the underlying OOB bug, not a root cause itself
+- **Stochastic Batch Ordering**: Only exposed the underlying OOB/contention bug, not a root cause itself
 
 ---
 
@@ -278,7 +286,7 @@ When the bug is fixed, these can be removed or kept as defensive programming:
 
 **Keep (defensive):**
 
-- **OOB fix: clamped indices + padded workspaces** (ROOT CAUSE FIX)
+- **OOB/Contention fix: padded gradients + unclamped writes + clamped reads** (ROOT CAUSE FIX)
 - NEG_INF guards in Triton logsumexp
 - Epsilon guards in logsumexp
 - Input clamping before marginal

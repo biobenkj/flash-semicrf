@@ -538,16 +538,16 @@ if HAS_TRITON:
                                 marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
                                 marginal_sum_src_scaled = marginal_sum_src * grad_out
 
-                                # Use clamped indices for atomic_add to avoid OOB pointer calculation
+                                # Use UNCLAMPED indices for atomic_add to padded grad_cum_scores.
+                                # Each thread writes to its own unique address in the padding,
+                                # avoiding atomic contention from clamped indices all hitting C-1.
                                 tl.atomic_add(
-                                    grad_cs_base
-                                    + end_pos * stride_gcs_t
-                                    + c_idx_safe * stride_gcs_c,
+                                    grad_cs_base + end_pos * stride_gcs_t + c_idx * stride_gcs_c,
                                     marginal_sum_src_scaled,
                                     mask=c_mask,
                                 )
                                 tl.atomic_add(
-                                    grad_cs_base + t * stride_gcs_t + c_idx_safe * stride_gcs_c,
+                                    grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
                                     -marginal_sum_src_scaled,
                                     mask=c_mask,
                                 )
@@ -558,18 +558,16 @@ if HAS_TRITON:
                                 # Compute 2D offsets for workspace
                                 # For duration-dependent: grad_tr_workspace[batch, k, src, dst]
                                 # For static: grad_tr_workspace[batch, src, dst]
-                                # c_dst_idx_safe is (C_PAD, 1) for src, c_src_idx_safe is (1, C_PAD) for dst
-                                # Use clamped indices to avoid OOB pointer calculation
+                                # Use UNCLAMPED indices for writes to padded workspace
                                 if HAS_DURATION_TRANSITIONS:
                                     tr_offsets_ws = (
                                         k * stride_gtw_k
-                                        + c_dst_idx_safe * stride_gtw_src
-                                        + c_src_idx_safe * stride_gtw_dst
+                                        + c_dst_idx * stride_gtw_src
+                                        + c_src_idx * stride_gtw_dst
                                     )
                                 else:
                                     tr_offsets_ws = (
-                                        c_dst_idx_safe * stride_gtw_src
-                                        + c_src_idx_safe * stride_gtw_dst
+                                        c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
                                     )
                                 # atomic_add still needed within batch (multiple t iterations add to same location)
                                 # but no inter-batch contention since each batch has its own workspace slice
@@ -579,22 +577,20 @@ if HAS_TRITON:
 
                                 # grad_duration_bias: write to per-batch workspace (unscaled)
                                 # grad_db_workspace[batch, k, c_dst] += sum over c_src
-                                # Use clamped index to avoid OOB pointer calculation
+                                # Use UNCLAMPED index for writes to padded workspace
                                 tl.atomic_add(
-                                    grad_db_ws_base
-                                    + k * stride_gdbw_k
-                                    + c_idx_safe * stride_gdbw_c,
+                                    grad_db_ws_base + k * stride_gdbw_k + c_idx * stride_gdbw_c,
                                     marginal_sum_src,
                                     mask=c_mask,
                                 )
 
                                 # grad_proj_start and grad_proj_end (per-batch, scaled)
                                 # Segment starts at t, ends at end_pos-1
-                                # Use clamped indices to avoid OOB pointer calculation
+                                # Use UNCLAMPED indices for writes to padded gradients
                                 if HAS_BOUNDARIES:
                                     # grad_proj_start[t, c_dst] += marginal_sum_src * grad_out
                                     tl.atomic_add(
-                                        grad_ps_base + t * stride_ps_t + c_idx_safe * stride_ps_c,
+                                        grad_ps_base + t * stride_ps_t + c_idx * stride_ps_c,
                                         marginal_sum_src_scaled,
                                         mask=c_mask,
                                     )
@@ -602,7 +598,7 @@ if HAS_TRITON:
                                     tl.atomic_add(
                                         grad_pe_base
                                         + (end_pos - 1) * stride_ps_t
-                                        + c_idx_safe * stride_ps_c,
+                                        + c_idx * stride_ps_c,
                                         marginal_sum_src_scaled,
                                         mask=c_mask,
                                     )
@@ -735,9 +731,9 @@ if HAS_TRITON:
             proj_start = proj_start.contiguous()
             proj_end = proj_end.contiguous()
             stride_ps_b, stride_ps_t, stride_ps_c = proj_start.stride()
-            # Allocate gradient outputs for boundaries
-            grad_proj_start = torch.zeros(batch, T, C, device=device, dtype=dtype)
-            grad_proj_end = torch.zeros(batch, T, C, device=device, dtype=dtype)
+            # Allocate gradient outputs for boundaries with C_PAD (slice back to C later)
+            grad_proj_start = torch.zeros(batch, T, C_PAD, device=device, dtype=dtype)
+            grad_proj_end = torch.zeros(batch, T, C_PAD, device=device, dtype=dtype)
         else:
             # Create dummy tensors for stride calculation (won't be accessed)
             proj_start = cum_scores[:, :T, :]
@@ -760,8 +756,9 @@ if HAS_TRITON:
         alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
         beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
-        # Allocate gradient outputs
-        grad_cum_scores = torch.zeros(batch, T_plus_1, C, device=device, dtype=dtype)
+        # Allocate gradient outputs with C_PAD to allow unclamped writes from kernel
+        # (we slice back to C before returning)
+        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=dtype)
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=dtype)
 
         # Allocate per-batch workspace buffers to avoid atomic add contention
@@ -910,6 +907,12 @@ if HAS_TRITON:
 
         grad_db_workspace = grad_db_workspace[:, :, :C]
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output)
+
+        # Slice padded gradients back to actual class count C
+        grad_cum_scores = grad_cum_scores[:, :, :C]
+        if grad_proj_start is not None:
+            grad_proj_start = grad_proj_start[:, :, :C]
+            grad_proj_end = grad_proj_end[:, :, :C]
 
         return (
             grad_cum_scores,
