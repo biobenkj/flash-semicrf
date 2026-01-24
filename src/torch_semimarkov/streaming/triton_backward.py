@@ -173,6 +173,13 @@ if HAS_TRITON:
         log_Z = tl.load(log_Z_ptr + batch_idx)
         grad_out = tl.load(grad_output_ptr + batch_idx)
 
+        # Clamp indices to ensure address calculations stay within bounds
+        # even for masked-out threads (indices C to C_PAD-1).
+        # This prevents OOB pointer calculation which is undefined behavior.
+        c_idx_safe = tl.minimum(c_idx, C - 1)
+        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+
         # Base pointers
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_ckpt_base = ring_ckpt_ptr + batch_idx * stride_ckpt_b
@@ -191,9 +198,10 @@ if HAS_TRITON:
 
         # Load transition matrix into registers (only for static transitions)
         # Duration-dependent transitions are loaded inside the k-loops
+        # Use clamped indices to avoid OOB pointer calculation for masked-out threads
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
-                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
                 mask=c_mask_2d,
                 other=0.0,
             )  # (C_PAD, C_PAD) - this is transition.T
@@ -283,13 +291,16 @@ if HAS_TRITON:
                                     )
 
                                 # Compute edge on-the-fly
+                                # Use clamped indices to avoid OOB pointer calculation
                                 cum_end = tl.load(
-                                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
                                 cum_start = tl.load(
-                                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                                    cum_scores_base
+                                    + start_pos * stride_cs_t
+                                    + c_idx_safe * stride_cs_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
@@ -298,7 +309,9 @@ if HAS_TRITON:
                                 # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
                                 dur_idx = tl.minimum(k, K - 1)
                                 dur_bias = tl.load(
-                                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                                    duration_bias_ptr
+                                    + dur_idx * stride_db_k
+                                    + c_idx_safe * stride_db_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
@@ -310,7 +323,7 @@ if HAS_TRITON:
                                     start_score = tl.load(
                                         proj_start_base
                                         + start_pos * stride_ps_t
-                                        + c_idx * stride_ps_c,
+                                        + c_idx_safe * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
@@ -318,19 +331,20 @@ if HAS_TRITON:
                                     end_score = tl.load(
                                         proj_end_base
                                         + end_pos_boundary * stride_ps_t
-                                        + c_idx * stride_ps_c,
+                                        + c_idx_safe * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
                                     segment_score = segment_score + start_score + end_score
 
                                 # Load k-indexed transition for duration-dependent case
+                                # Use clamped indices to avoid OOB pointer calculation
                                 if HAS_DURATION_TRANSITIONS:
                                     transition_block = tl.load(
                                         transition_ptr
                                         + k * stride_tr_k
-                                        + c_dst_idx * stride_tr_dst
-                                        + c_src_idx * stride_tr_src,
+                                        + c_dst_idx_safe * stride_tr_dst
+                                        + c_src_idx_safe * stride_tr_src,
                                         mask=c_mask_2d,
                                         other=0.0,
                                     )
@@ -411,13 +425,16 @@ if HAS_TRITON:
                                 )
 
                                 # Compute edge on-the-fly
+                                # Use clamped indices to avoid OOB pointer calculation
                                 cum_end = tl.load(
-                                    cum_scores_base + end_pos * stride_cs_t + c_idx * stride_cs_c,
+                                    cum_scores_base
+                                    + end_pos * stride_cs_t
+                                    + c_idx_safe * stride_cs_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
                                 cum_start = tl.load(
-                                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
@@ -426,7 +443,9 @@ if HAS_TRITON:
                                 # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
                                 dur_idx = tl.minimum(k, K - 1)
                                 dur_bias = tl.load(
-                                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                                    duration_bias_ptr
+                                    + dur_idx * stride_db_k
+                                    + c_idx_safe * stride_db_c,
                                     mask=c_mask,
                                     other=0.0,
                                 )
@@ -436,7 +455,9 @@ if HAS_TRITON:
                                 # In Phase 2: segment starts at t, ends at end_pos-1
                                 if HAS_BOUNDARIES:
                                     start_score = tl.load(
-                                        proj_start_base + t * stride_ps_t + c_idx * stride_ps_c,
+                                        proj_start_base
+                                        + t * stride_ps_t
+                                        + c_idx_safe * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
@@ -444,19 +465,20 @@ if HAS_TRITON:
                                     end_score = tl.load(
                                         proj_end_base
                                         + end_pos_boundary * stride_ps_t
-                                        + c_idx * stride_ps_c,
+                                        + c_idx_safe * stride_ps_c,
                                         mask=c_mask,
                                         other=0.0,
                                     )
                                     segment_score = segment_score + start_score + end_score
 
                                 # Load k-indexed transition for duration-dependent case
+                                # Use clamped indices to avoid OOB pointer calculation
                                 if HAS_DURATION_TRANSITIONS:
                                     transition_block = tl.load(
                                         transition_ptr
                                         + k * stride_tr_k
-                                        + c_dst_idx * stride_tr_dst
-                                        + c_src_idx * stride_tr_src,
+                                        + c_dst_idx_safe * stride_tr_dst
+                                        + c_src_idx_safe * stride_tr_src,
                                         mask=c_mask_2d,
                                         other=0.0,
                                     )
@@ -516,13 +538,16 @@ if HAS_TRITON:
                                 marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
                                 marginal_sum_src_scaled = marginal_sum_src * grad_out
 
+                                # Use clamped indices for atomic_add to avoid OOB pointer calculation
                                 tl.atomic_add(
-                                    grad_cs_base + end_pos * stride_gcs_t + c_idx * stride_gcs_c,
+                                    grad_cs_base
+                                    + end_pos * stride_gcs_t
+                                    + c_idx_safe * stride_gcs_c,
                                     marginal_sum_src_scaled,
                                     mask=c_mask,
                                 )
                                 tl.atomic_add(
-                                    grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
+                                    grad_cs_base + t * stride_gcs_t + c_idx_safe * stride_gcs_c,
                                     -marginal_sum_src_scaled,
                                     mask=c_mask,
                                 )
@@ -533,16 +558,18 @@ if HAS_TRITON:
                                 # Compute 2D offsets for workspace
                                 # For duration-dependent: grad_tr_workspace[batch, k, src, dst]
                                 # For static: grad_tr_workspace[batch, src, dst]
-                                # c_dst_idx is (C_PAD, 1) for src, c_src_idx is (1, C_PAD) for dst
+                                # c_dst_idx_safe is (C_PAD, 1) for src, c_src_idx_safe is (1, C_PAD) for dst
+                                # Use clamped indices to avoid OOB pointer calculation
                                 if HAS_DURATION_TRANSITIONS:
                                     tr_offsets_ws = (
                                         k * stride_gtw_k
-                                        + c_dst_idx * stride_gtw_src
-                                        + c_src_idx * stride_gtw_dst
+                                        + c_dst_idx_safe * stride_gtw_src
+                                        + c_src_idx_safe * stride_gtw_dst
                                     )
                                 else:
                                     tr_offsets_ws = (
-                                        c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
+                                        c_dst_idx_safe * stride_gtw_src
+                                        + c_src_idx_safe * stride_gtw_dst
                                     )
                                 # atomic_add still needed within batch (multiple t iterations add to same location)
                                 # but no inter-batch contention since each batch has its own workspace slice
@@ -552,18 +579,22 @@ if HAS_TRITON:
 
                                 # grad_duration_bias: write to per-batch workspace (unscaled)
                                 # grad_db_workspace[batch, k, c_dst] += sum over c_src
+                                # Use clamped index to avoid OOB pointer calculation
                                 tl.atomic_add(
-                                    grad_db_ws_base + k * stride_gdbw_k + c_idx * stride_gdbw_c,
+                                    grad_db_ws_base
+                                    + k * stride_gdbw_k
+                                    + c_idx_safe * stride_gdbw_c,
                                     marginal_sum_src,
                                     mask=c_mask,
                                 )
 
                                 # grad_proj_start and grad_proj_end (per-batch, scaled)
                                 # Segment starts at t, ends at end_pos-1
+                                # Use clamped indices to avoid OOB pointer calculation
                                 if HAS_BOUNDARIES:
                                     # grad_proj_start[t, c_dst] += marginal_sum_src * grad_out
                                     tl.atomic_add(
-                                        grad_ps_base + t * stride_ps_t + c_idx * stride_ps_c,
+                                        grad_ps_base + t * stride_ps_t + c_idx_safe * stride_ps_c,
                                         marginal_sum_src_scaled,
                                         mask=c_mask,
                                     )
@@ -571,7 +602,7 @@ if HAS_TRITON:
                                     tl.atomic_add(
                                         grad_pe_base
                                         + (end_pos - 1) * stride_ps_t
-                                        + c_idx * stride_ps_c,
+                                        + c_idx_safe * stride_ps_c,
                                         marginal_sum_src_scaled,
                                         mask=c_mask,
                                     )
@@ -735,13 +766,16 @@ if HAS_TRITON:
 
         # Allocate per-batch workspace buffers to avoid atomic add contention
         # Each batch element accumulates to its own slice, then we sum after kernel
+        # IMPORTANT: Allocate with C_PAD to prevent OOB memory access from masked-out
+        # threads (indices C to C_PAD-1). Even though writes are masked, the pointer
+        # calculation happens for all threads, and OOB pointers are undefined behavior.
         if has_duration_transitions:
-            # Duration-dependent: (batch, K, C, C)
-            grad_tr_workspace = torch.zeros(batch, K, C, C, device=device, dtype=dtype)
+            # Duration-dependent: (batch, K, C_PAD, C_PAD)
+            grad_tr_workspace = torch.zeros(batch, K, C_PAD, C_PAD, device=device, dtype=dtype)
         else:
-            # Static: (batch, C, C)
-            grad_tr_workspace = torch.zeros(batch, C, C, device=device, dtype=dtype)
-        grad_db_workspace = torch.zeros(batch, K, C, device=device, dtype=dtype)
+            # Static: (batch, C_PAD, C_PAD)
+            grad_tr_workspace = torch.zeros(batch, C_PAD, C_PAD, device=device, dtype=dtype)
+        grad_db_workspace = torch.zeros(batch, K, C_PAD, device=device, dtype=dtype)
 
         # Allocate boundary marginals output if requested
         if return_boundary_marginals:
@@ -865,11 +899,16 @@ if HAS_TRITON:
         # the naive broadcast approach would allocate ~268MB just to sum immediately.
         #
         # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
+        # Slice workspaces back to actual class count C before einsum reduction
+        # (they were allocated with C_PAD to prevent OOB memory access)
         if has_duration_transitions:
+            grad_tr_workspace = grad_tr_workspace[:, :, :C, :C]
             grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output)
         else:
+            grad_tr_workspace = grad_tr_workspace[:, :C, :C]
             grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output)
 
+        grad_db_workspace = grad_db_workspace[:, :, :C]
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output)
 
         return (
