@@ -67,15 +67,8 @@ def _next_power_of_2(n: int) -> int:
 
 
 if HAS_TRITON:
-    # Forward kernels are READ-ONLY (no atomic_add), so multi-config autotune is safe
-    @triton.autotune(
-        configs=[
-            triton.Config({}, num_warps=2, num_stages=1),
-            triton.Config({}, num_warps=4, num_stages=2),
-            triton.Config({}, num_warps=8, num_stages=2),
-        ],
-        key=["T", "K", "C"],
-    )
+    # NOTE: @triton.autotune removed - corrupts ring buffer during multi-config benchmarking.
+    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
     @triton.jit
     def semi_crf_streaming_scan_kernel(
         # Inputs
@@ -365,14 +358,6 @@ if HAS_TRITON:
         # Store result
         tl.store(out_ptr + batch_idx, partition)
 
-    @triton.autotune(
-        configs=[
-            triton.Config({}, num_warps=2, num_stages=1),
-            triton.Config({}, num_warps=4, num_stages=2),
-            triton.Config({}, num_warps=8, num_stages=2),
-        ],
-        key=["T", "K", "C"],
-    )
     @triton.jit
     def semi_crf_streaming_scan_kernel_max(
         # Same signature as log kernel
@@ -587,14 +572,6 @@ if HAS_TRITON:
 
         tl.store(out_ptr + batch_idx, partition)
 
-    @triton.autotune(
-        configs=[
-            triton.Config({}, num_warps=2, num_stages=1),
-            triton.Config({}, num_warps=4, num_stages=2),
-            triton.Config({}, num_warps=8, num_stages=2),
-        ],
-        key=["T", "K", "C"],
-    )
     @triton.jit
     def semi_crf_streaming_scan_kernel_max_bp(
         # Same signature as max kernel, plus backpointer outputs
@@ -977,7 +954,7 @@ if HAS_TRITON:
                 stride_ckpt_n,
                 stride_ckpt_k,
                 stride_ckpt_c,
-                # num_warps is controlled by @triton.autotune
+                num_warps=4,
             )
 
         # Trim padding from checkpoints for return
@@ -1137,7 +1114,7 @@ if HAS_TRITON:
                 stride_bp_b,
                 stride_bp_t,
                 stride_bp_c,
-                # num_warps is controlled by @triton.autotune
+                num_warps=4,
             )
 
         return partition, bp_k, bp_c, final_labels

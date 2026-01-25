@@ -343,7 +343,7 @@ When the bug is fixed, these can be removed or kept as defensive programming:
 1. **Loop Tiling (TILE_C=16 or 32):** Instead of computing full (C_PAD × C_PAD) marginal matrix, process in (TILE_C × C_PAD) tiles
 2. **Online Logsumexp:** Flash Attention pattern for beta update - accumulate logsumexp across tiles without materializing full matrix
 3. **Float64 Accumulators:** Online logsumexp accumulators use float64 to match beta precision and prevent cross-tile accumulation errors
-4. **@triton.autotune:** Automatic selection of optimal TILE_C and num_warps based on problem shape
+4. **Static config (no @triton.autotune):** Fixed `num_warps=4`, `TILE_C=16` - see "Autotuning Limitations" below
 
 ### Testing num_warps with find_determinism.py
 
@@ -410,50 +410,70 @@ print(compiled.asm['ptx'])    # Final CUDA assembly
 
 ---
 
-## Backward Kernel Autotuning Limitations
+## Autotuning Limitations
 
-**CRITICAL**: Do NOT use multi-config `@triton.autotune` for backward kernels
-that use `tl.atomic_add`.
+**CRITICAL**: Do NOT use `@triton.autotune` for ANY kernel with read/write working memory.
 
-### The Bug
+### The Bug (Triton issue #7181)
 
 Triton's `pre_hook` / `reset_to_zero` only runs during autotune benchmarking,
-NOT after selecting the best config (Triton issue #7181). This means:
+NOT after selecting the best config. This means:
 
-1. During benchmarking: Each config corrupts the output buffer
+**For backward kernels (atomic_add):**
+1. During benchmarking: Each config accumulates to output buffer
 2. After benchmarking: Selected config runs WITHOUT pre_hook
 3. Result: Final run accumulates on garbage → massive errors (~10^23)
+
+**For forward kernels (ring buffer):**
+1. During benchmarking: Each config writes to ring buffer → buffer corrupted
+2. Config 2+ reads garbage from Config 1's partial writes
+3. Best config runs on corrupted ring buffer → wrong results
+
+This explains both failure modes we observed:
+- Backward C=32 failure: ~10^23 gradient errors
+- Forward 139/139 failures: ~30k-270k diff errors
 
 ### Symptoms
 
 - First kernel call produces different results than subsequent calls
-- Diffs between runs are astronomical (10^20+), not small FP errors
+- For backward: Diffs are astronomical (10^20+)
+- For forward: Diffs are large (10^4 to 10^5)
 - Only affects first call in process (triggers autotuning)
 - Subsequent calls use cached config and work correctly
 
-### Solution
+### Solution: Remove @triton.autotune entirely
 
-Use **single-config autotune** for backward kernels:
+Pass static config values directly to kernel launcher:
 
 ```python
-@triton.autotune(
-    configs=[
-        # SINGLE CONFIG - avoids buffer corruption
-        triton.Config({"TILE_C": 16}, num_warps=4, num_stages=2),
-    ],
-    key=["C", "K", "CHECKPOINT_INTERVAL"],
-)
+# Forward kernels - just @triton.jit, pass num_warps to launcher
+@triton.jit
+def semi_crf_streaming_scan_kernel(...):
+    ...
+
+# In launcher:
+kernel[grid](..., num_warps=4)
+
+# Backward kernel - pass TILE_C and num_warps
+@triton.jit
+def semi_crf_streaming_backward_kernel(..., TILE_C: tl.constexpr):
+    ...
+
+# In launcher:
+kernel[grid](..., TILE_C=16, num_warps=4)
 ```
 
-This still provides:
+### Static Config Values
 
-- Config caching (avoids recompilation)
-- Key-based cache invalidation
-- But NO benchmarking (single config = nothing to compare)
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `num_warps` | 4 | Balances parallelism and register pressure |
+| `TILE_C` | 16 | Works for all C values, avoids single-tile edge cases |
 
-### Forward kernels are safe
+### Future: Re-enabling Autotune
 
-Forward kernels don't use atomic operations, so multi-config autotune is fine.
+If Triton fixes issue #7181 to properly reset buffers between benchmark configs,
+multi-config autotuning could be re-enabled. Until then, use static configs.
 
 ---
 

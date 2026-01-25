@@ -37,19 +37,8 @@ except ImportError:
 
 
 if HAS_TRITON:
-    # WARNING: Use single-config autotune ONLY for backward kernels with atomic_add.
-    # Multi-config causes buffer corruption because pre_hook is NOT called after
-    # autotuning (Triton issue #7181). During benchmarking, each config corrupts
-    # the output buffer. After selecting the best config, it runs WITHOUT pre_hook,
-    # so the kernel accumulates on garbage data from the last benchmark config.
-    # See the kernel docstring "Performance Notes" for details.
-    @triton.autotune(
-        configs=[
-            # SINGLE CONFIG - avoids buffer corruption from multi-config benchmarking
-            triton.Config({"TILE_C": 16}, num_warps=4, num_stages=2),
-        ],
-        key=["C", "K", "CHECKPOINT_INTERVAL"],
-    )
+    # NOTE: @triton.autotune removed - corrupts gradient buffers during benchmarking.
+    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
     @triton.jit
     def semi_crf_streaming_backward_kernel(
         # Inputs (from forward)
@@ -1010,7 +999,8 @@ if HAS_TRITON:
                 stride_gdbw_c,
                 stride_bm_b,
                 stride_bm_t,
-                # TILE_C and num_warps are controlled by @triton.autotune
+                TILE_C=16,
+                num_warps=4,
             )
 
         # Compute weighted sum of per-batch gradients for shared parameters.
