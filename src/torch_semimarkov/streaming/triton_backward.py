@@ -73,6 +73,7 @@ if HAS_TRITON:
         HAS_BOUNDARIES: tl.constexpr,  # whether boundary projections are provided
         HAS_DURATION_TRANSITIONS: tl.constexpr,  # whether transitions are (K, C, C)
         RETURN_BOUNDARY_MARGINALS: tl.constexpr,  # whether to accumulate boundary marginals
+        TILE_C: tl.constexpr,  # tile size for c_dst dimension (16 or 32 typical)
         # Strides for cum_scores (batch, T+1, C)
         stride_cs_b,
         stride_cs_t,
@@ -409,224 +410,264 @@ if HAS_TRITON:
                         # Compute beta[t] and gradients
                         new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
+                        # === TILED BACKWARD COMPUTATION ===
+                        # Process c_dst dimension in tiles of TILE_C to reduce register pressure.
+                        # This enables higher num_warps (4-8) without register spilling.
+                        #
+                        # Pattern: Instead of computing full (C_PAD, C_PAD) marginal matrix,
+                        # compute (TILE_C, C_PAD) tiles and accumulate gradients per-tile.
+                        # For beta update, use online logsumexp across tiles (Flash Attention pattern).
+
                         # tl.maximum ensures K=1 processes at least one duration
                         for k in tl.range(1, tl.maximum(K, 2)):
                             end_pos = t + k
                             # Only process valid end positions
                             if end_pos <= seq_len and end_pos <= T:
-                                # Get beta[end_pos] from ring buffer
                                 end_ring_idx = end_pos % K
-                                beta_next = tl.load(
-                                    beta_ring_base
-                                    + end_ring_idx * stride_br_k
-                                    + c_idx * stride_br_c,
-                                    mask=c_mask,
-                                    other=NEG_INF,
-                                )
-
-                                # Compute edge on-the-fly
-                                # Use clamped indices to avoid OOB pointer calculation
-                                cum_end = tl.load(
-                                    cum_scores_base
-                                    + end_pos * stride_cs_t
-                                    + c_idx_safe * stride_cs_c,
-                                    mask=c_mask,
-                                    other=0.0,
-                                )
-                                cum_start = tl.load(
-                                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
-                                    mask=c_mask,
-                                    other=0.0,
-                                )
-                                content_score = cum_end - cum_start
-
-                                # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
                                 dur_idx = tl.minimum(k, K - 1)
-                                dur_bias = tl.load(
-                                    duration_bias_ptr
-                                    + dur_idx * stride_db_k
-                                    + c_idx_safe * stride_db_c,
-                                    mask=c_mask,
-                                    other=0.0,
+
+                                # === Accumulators for this k iteration ===
+                                # Boundary marginals accumulator (scalar)
+                                marginal_sum_all_k = 0.0
+
+                                # Online logsumexp accumulators for beta_k (indexed by c_src)
+                                # Accumulates logsumexp over c_dst tiles
+                                m_beta_k = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+                                l_beta_k = tl.zeros([C_PAD], dtype=tl.float32)
+
+                                # Clamp alpha_t once per k (reused across tiles)
+                                alpha_t_clamped = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
+
+                                # === Tile loop over c_dst dimension ===
+                                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
+                                    # Tile indices
+                                    c_dst_tile = tl.arange(0, TILE_C)
+                                    c_dst_idx_tile = c_dst_tile_start + c_dst_tile
+                                    c_dst_mask_tile = c_dst_idx_tile < C
+                                    c_dst_idx_tile_safe = tl.minimum(c_dst_idx_tile, C - 1)
+                                    tile_mask_2d = c_dst_mask_tile[:, None] & c_mask[None, :]
+
+                                    # Load beta_next tile (TILE_C,)
+                                    beta_tile = tl.load(
+                                        beta_ring_base
+                                        + end_ring_idx * stride_br_k
+                                        + c_dst_idx_tile_safe * stride_br_c,
+                                        mask=c_dst_mask_tile,
+                                        other=NEG_INF,
+                                    )
+
+                                    # Compute segment_score tile (TILE_C,)
+                                    cum_end_tile = tl.load(
+                                        cum_scores_base
+                                        + end_pos * stride_cs_t
+                                        + c_dst_idx_tile_safe * stride_cs_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    cum_start_tile = tl.load(
+                                        cum_scores_base
+                                        + t * stride_cs_t
+                                        + c_dst_idx_tile_safe * stride_cs_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    content_score_tile = cum_end_tile - cum_start_tile
+
+                                    dur_bias_tile = tl.load(
+                                        duration_bias_ptr
+                                        + dur_idx * stride_db_k
+                                        + c_dst_idx_tile_safe * stride_db_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    segment_score_tile = content_score_tile + dur_bias_tile
+
+                                    # Add boundary scores if provided
+                                    if HAS_BOUNDARIES:
+                                        start_score_tile = tl.load(
+                                            proj_start_base
+                                            + t * stride_ps_t
+                                            + c_dst_idx_tile_safe * stride_ps_c,
+                                            mask=c_dst_mask_tile,
+                                            other=0.0,
+                                        )
+                                        end_pos_boundary = end_pos - 1
+                                        end_score_tile = tl.load(
+                                            proj_end_base
+                                            + end_pos_boundary * stride_ps_t
+                                            + c_dst_idx_tile_safe * stride_ps_c,
+                                            mask=c_dst_mask_tile,
+                                            other=0.0,
+                                        )
+                                        segment_score_tile = (
+                                            segment_score_tile + start_score_tile + end_score_tile
+                                        )
+
+                                    # Load transition tile (TILE_C, C_PAD)
+                                    # Rows = c_dst tile, Columns = all c_src
+                                    if HAS_DURATION_TRANSITIONS:
+                                        transition_tile = tl.load(
+                                            transition_ptr
+                                            + k * stride_tr_k
+                                            + c_dst_idx_tile_safe[:, None] * stride_tr_dst
+                                            + c_idx_safe[None, :] * stride_tr_src,
+                                            mask=tile_mask_2d,
+                                            other=0.0,
+                                        )
+                                    else:
+                                        transition_tile = tl.load(
+                                            transition_ptr
+                                            + c_dst_idx_tile_safe[:, None] * stride_tr_dst
+                                            + c_idx_safe[None, :] * stride_tr_src,
+                                            mask=tile_mask_2d,
+                                            other=0.0,
+                                        )
+
+                                    # edge_tile: (TILE_C, C_PAD)
+                                    edge_tile = segment_score_tile[:, None] + transition_tile
+
+                                    # === Compute marginal tile (TILE_C, C_PAD) ===
+                                    beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
+                                    edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
+
+                                    log_marginal_tile = (
+                                        alpha_t_clamped[None, :]  # (1, C_PAD) for c_src
+                                        + edge_tile_clamped  # (TILE_C, C_PAD)
+                                        + beta_tile_clamped[:, None]  # (TILE_C, 1) for c_dst
+                                        - log_Z
+                                    )
+                                    log_marginal_tile = tl.minimum(
+                                        tl.maximum(log_marginal_tile, -700.0), 700.0
+                                    )
+                                    marginal_tile = tl.exp(log_marginal_tile)
+                                    marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
+
+                                    # === Accumulate gradients from this tile ===
+
+                                    # Boundary marginals: sum over both dims
+                                    if RETURN_BOUNDARY_MARGINALS:
+                                        marginal_sum_all_k += tl.sum(marginal_tile)
+
+                                    # grad_cum_scores: sum over c_src -> (TILE_C,)
+                                    marginal_sum_src_tile = tl.sum(marginal_tile, axis=1)
+                                    marginal_sum_src_tile = tl.where(
+                                        c_dst_mask_tile, marginal_sum_src_tile, 0.0
+                                    )
+                                    marginal_sum_src_tile_scaled = marginal_sum_src_tile * grad_out
+
+                                    tl.atomic_add(
+                                        grad_cs_base
+                                        + end_pos * stride_gcs_t
+                                        + c_dst_idx_tile * stride_gcs_c,
+                                        marginal_sum_src_tile_scaled,
+                                        mask=c_dst_mask_tile,
+                                    )
+                                    tl.atomic_add(
+                                        grad_cs_base
+                                        + t * stride_gcs_t
+                                        + c_dst_idx_tile * stride_gcs_c,
+                                        -marginal_sum_src_tile_scaled,
+                                        mask=c_dst_mask_tile,
+                                    )
+
+                                    # grad_transition: marginal_T_tile = (C_PAD, TILE_C)
+                                    marginal_T_tile = tl.trans(marginal_tile)
+                                    if HAS_DURATION_TRANSITIONS:
+                                        tr_offsets_tile = (
+                                            k * stride_gtw_k
+                                            + c_idx[:, None] * stride_gtw_src
+                                            + c_dst_idx_tile[None, :] * stride_gtw_dst
+                                        )
+                                    else:
+                                        tr_offsets_tile = (
+                                            c_idx[:, None] * stride_gtw_src
+                                            + c_dst_idx_tile[None, :] * stride_gtw_dst
+                                        )
+                                    tile_mask_T = c_mask[:, None] & c_dst_mask_tile[None, :]
+                                    tl.atomic_add(
+                                        grad_tr_ws_base + tr_offsets_tile,
+                                        marginal_T_tile,
+                                        mask=tile_mask_T,
+                                    )
+
+                                    # grad_duration_bias: (unscaled)
+                                    tl.atomic_add(
+                                        grad_db_ws_base
+                                        + k * stride_gdbw_k
+                                        + c_dst_idx_tile * stride_gdbw_c,
+                                        marginal_sum_src_tile,
+                                        mask=c_dst_mask_tile,
+                                    )
+
+                                    # grad_proj_start, grad_proj_end
+                                    if HAS_BOUNDARIES:
+                                        tl.atomic_add(
+                                            grad_ps_base
+                                            + t * stride_ps_t
+                                            + c_dst_idx_tile * stride_ps_c,
+                                            marginal_sum_src_tile_scaled,
+                                            mask=c_dst_mask_tile,
+                                        )
+                                        tl.atomic_add(
+                                            grad_pe_base
+                                            + (end_pos - 1) * stride_ps_t
+                                            + c_dst_idx_tile * stride_ps_c,
+                                            marginal_sum_src_tile_scaled,
+                                            mask=c_dst_mask_tile,
+                                        )
+
+                                    # === Online logsumexp for beta_k ===
+                                    # Accumulate logsumexp over c_dst tiles for each c_src position
+                                    scores_for_beta_tile = edge_tile + beta_tile[:, None]
+                                    scores_for_beta_tile = tl.where(
+                                        tile_mask_2d, scores_for_beta_tile, NEG_INF
+                                    )
+
+                                    # Max over c_dst tile (axis 0) -> (C_PAD,)
+                                    max_tile = tl.max(scores_for_beta_tile, axis=0)
+                                    is_tile_neginf = max_tile < (NEG_INF + 1.0)
+                                    max_tile_safe = tl.where(is_tile_neginf, 0.0, max_tile)
+
+                                    # Sum of exp for this tile -> (C_PAD,)
+                                    sum_exp_tile = tl.sum(
+                                        tl.exp(scores_for_beta_tile - max_tile_safe[None, :]),
+                                        axis=0,
+                                    )
+                                    sum_exp_tile = tl.where(is_tile_neginf, 0.0, sum_exp_tile)
+
+                                    # Online logsumexp update (Flash Attention pattern)
+                                    m_new = tl.maximum(m_beta_k, max_tile)
+                                    is_m_neginf = m_beta_k < (NEG_INF + 1.0)
+                                    m_new_safe = tl.where(is_m_neginf & is_tile_neginf, 0.0, m_new)
+
+                                    # Rescale previous sum and add new tile's contribution
+                                    l_beta_k = tl.where(
+                                        is_m_neginf,
+                                        sum_exp_tile * tl.exp(max_tile - m_new_safe),
+                                        l_beta_k * tl.exp(m_beta_k - m_new_safe)
+                                        + sum_exp_tile * tl.exp(max_tile - m_new_safe),
+                                    )
+                                    m_beta_k = m_new
+
+                                # === After all c_dst tiles: finalize beta_k ===
+                                is_beta_k_neginf = m_beta_k < (NEG_INF + 1.0)
+                                beta_k = tl.where(
+                                    is_beta_k_neginf,
+                                    NEG_INF,
+                                    m_beta_k + tl.log(l_beta_k + 1e-10),
                                 )
-                                segment_score = content_score + dur_bias
+                                beta_k = tl.where(c_mask, beta_k, NEG_INF)
 
-                                # Add boundary scores if provided
-                                # In Phase 2: segment starts at t, ends at end_pos-1
-                                if HAS_BOUNDARIES:
-                                    start_score = tl.load(
-                                        proj_start_base
-                                        + t * stride_ps_t
-                                        + c_idx_safe * stride_ps_c,
-                                        mask=c_mask,
-                                        other=0.0,
-                                    )
-                                    end_pos_boundary = end_pos - 1
-                                    end_score = tl.load(
-                                        proj_end_base
-                                        + end_pos_boundary * stride_ps_t
-                                        + c_idx_safe * stride_ps_c,
-                                        mask=c_mask,
-                                        other=0.0,
-                                    )
-                                    segment_score = segment_score + start_score + end_score
-
-                                # Load k-indexed transition for duration-dependent case
-                                # Use clamped indices to avoid OOB pointer calculation
-                                if HAS_DURATION_TRANSITIONS:
-                                    transition_block = tl.load(
-                                        transition_ptr
-                                        + k * stride_tr_k
-                                        + c_dst_idx_safe * stride_tr_dst
-                                        + c_src_idx_safe * stride_tr_src,
-                                        mask=c_mask_2d,
-                                        other=0.0,
-                                    )
-
-                                edge_block = (
-                                    segment_score[:, None] + transition_block
-                                )  # (C_PAD, C_PAD)
-
-                                # === Compute marginal ===
-                                # log_marginal[c_dst, c_src] = alpha[t, c_src] + edge[c_dst, c_src] + beta[end, c_dst] - log_Z
-                                #
-                                # Clamp inputs to prevent extreme values that could cause numerical issues.
-                                # This is defensive - normally values should be bounded, but stochastic
-                                # training can expose edge cases.
-                                alpha_t_safe = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
-                                beta_next_safe = tl.minimum(tl.maximum(beta_next, -1e6), 1e6)
-                                edge_block_safe = tl.minimum(tl.maximum(edge_block, -1e6), 1e6)
-
-                                log_marginal = (
-                                    alpha_t_safe[None, :]  # (1, C_PAD) for c_src
-                                    + edge_block_safe  # (C_PAD, C_PAD)
-                                    + beta_next_safe[:, None]  # (C_PAD, 1) for c_dst
-                                    - log_Z
-                                )
-                                # Clamp log_marginal to prevent exp overflow/underflow
-                                # float32 exp() overflows at ~88.7, underflows at ~-87.3
-                                # float64 exp() overflows at ~709.782, underflows at a similar negative value
-                                log_marginal = tl.minimum(tl.maximum(log_marginal, -700.0), 700.0)
-                                marginal = tl.exp(log_marginal)  # (C_PAD, C_PAD)
-                                marginal = tl.where(c_mask_2d, marginal, 0.0)
-
-                                # === Accumulate boundary marginals (if requested) ===
+                                # Accumulate boundary marginals for this k
                                 if RETURN_BOUNDARY_MARGINALS:
-                                    # Sum over both c_dst and c_src to get scalar marginal
-                                    # for this (t, k) pair. This is the probability contribution
-                                    # of segments starting at position t with duration k.
-                                    marginal_sum_all = tl.sum(marginal)
-                                    # Accumulate to boundary_marginals[batch_idx, t]
-                                    # Uses atomic_add because multiple k values write to same t
                                     tl.atomic_add(
                                         boundary_marginals_ptr
                                         + batch_idx * stride_bm_b
                                         + t * stride_bm_t,
-                                        marginal_sum_all,
+                                        marginal_sum_all_k,
                                     )
 
-                                # === Accumulate gradients ===
-                                # Note: For shared parameters (transition, duration_bias), we accumulate
-                                # unscaled marginals. The scaling by grad_output.sum() is done after the
-                                # kernel to match PyTorch's backward semantics.
-                                # For per-batch parameters (cum_scores), we scale by grad_out here.
-
-                                # grad_cum_scores: positive at end_pos, negative at t
-                                # Scale by upstream gradient for per-batch tensor
-                                marginal_sum_src = tl.sum(
-                                    marginal, axis=1
-                                )  # sum over c_src -> (C_PAD,)
-                                marginal_sum_src = tl.where(c_mask, marginal_sum_src, 0.0)
-                                marginal_sum_src_scaled = marginal_sum_src * grad_out
-
-                                # Use UNCLAMPED indices for atomic_add to padded grad_cum_scores.
-                                # Each thread writes to its own unique address in the padding,
-                                # avoiding atomic contention from clamped indices all hitting C-1.
-                                tl.atomic_add(
-                                    grad_cs_base + end_pos * stride_gcs_t + c_idx * stride_gcs_c,
-                                    marginal_sum_src_scaled,
-                                    mask=c_mask,
-                                )
-                                tl.atomic_add(
-                                    grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
-                                    -marginal_sum_src_scaled,
-                                    mask=c_mask,
-                                )
-
-                                # grad_transition: write to per-batch workspace (unscaled marginal)
-                                # marginal is (C_dst, C_src), grad_transition[c_src, c_dst] += marginal[c_dst, c_src]
-                                marginal_T = tl.trans(marginal)  # (C_src, C_dst) = (C_PAD, C_PAD)
-                                # Compute 2D offsets for workspace
-                                # For duration-dependent: grad_tr_workspace[batch, k, src, dst]
-                                # For static: grad_tr_workspace[batch, src, dst]
-                                # Use UNCLAMPED indices for writes to padded workspace
-                                if HAS_DURATION_TRANSITIONS:
-                                    tr_offsets_ws = (
-                                        k * stride_gtw_k
-                                        + c_dst_idx * stride_gtw_src
-                                        + c_src_idx * stride_gtw_dst
-                                    )
-                                else:
-                                    tr_offsets_ws = (
-                                        c_dst_idx * stride_gtw_src + c_src_idx * stride_gtw_dst
-                                    )
-                                # atomic_add still needed within batch (multiple t iterations add to same location)
-                                # but no inter-batch contention since each batch has its own workspace slice
-                                tl.atomic_add(
-                                    grad_tr_ws_base + tr_offsets_ws, marginal_T, mask=c_mask_2d
-                                )
-
-                                # grad_duration_bias: write to per-batch workspace (unscaled)
-                                # grad_db_workspace[batch, k, c_dst] += sum over c_src
-                                # Use UNCLAMPED index for writes to padded workspace
-                                tl.atomic_add(
-                                    grad_db_ws_base + k * stride_gdbw_k + c_idx * stride_gdbw_c,
-                                    marginal_sum_src,
-                                    mask=c_mask,
-                                )
-
-                                # grad_proj_start and grad_proj_end (per-batch, scaled)
-                                # Segment starts at t, ends at end_pos-1
-                                # Use UNCLAMPED indices for writes to padded gradients
-                                if HAS_BOUNDARIES:
-                                    # grad_proj_start[t, c_dst] += marginal_sum_src * grad_out
-                                    tl.atomic_add(
-                                        grad_ps_base + t * stride_ps_t + c_idx * stride_ps_c,
-                                        marginal_sum_src_scaled,
-                                        mask=c_mask,
-                                    )
-                                    # grad_proj_end[end_pos-1, c_dst] += marginal_sum_src * grad_out
-                                    tl.atomic_add(
-                                        grad_pe_base
-                                        + (end_pos - 1) * stride_ps_t
-                                        + c_idx * stride_ps_c,
-                                        marginal_sum_src_scaled,
-                                        mask=c_mask,
-                                    )
-
-                                # === Update beta contribution ===
-                                # beta[t, c_src] = logsumexp over (k, c_dst) of edge[c_dst, c_src] + beta[end, c_dst]
-                                scores_for_beta = edge_block + beta_next[:, None]  # (C_dst, C_src)
-                                scores_for_beta = tl.where(c_mask_2d, scores_for_beta, NEG_INF)
-
-                                # Logsumexp over c_dst (axis 0)
-                                # Guard against all-NEG_INF case to prevent undefined arithmetic
-                                max_beta_k = tl.max(scores_for_beta, axis=0)
-                                is_all_neginf_beta = max_beta_k < (NEG_INF + 1.0)
-                                max_beta_k_safe = tl.where(is_all_neginf_beta, 0.0, max_beta_k)
-                                log_sum_exp_beta = tl.log(
-                                    tl.sum(
-                                        tl.exp(scores_for_beta - max_beta_k_safe[None, :]), axis=0
-                                    )
-                                    + 1e-10
-                                )
-                                beta_k = tl.where(
-                                    is_all_neginf_beta, NEG_INF, max_beta_k + log_sum_exp_beta
-                                )
-                                beta_k = tl.where(c_mask, beta_k, NEG_INF)
-
-                                # Accumulate into new_beta via logsumexp over k
-                                # Guard against both inputs being NEG_INF
+                                # Accumulate beta_k into new_beta via logsumexp over k
                                 max_new = tl.maximum(new_beta, beta_k)
                                 is_both_neginf_beta = (new_beta < (NEG_INF + 1.0)) & (
                                     beta_k < (NEG_INF + 1.0)
@@ -852,6 +893,7 @@ if HAS_TRITON:
                 has_boundaries,  # HAS_BOUNDARIES constexpr
                 has_duration_transitions,  # HAS_DURATION_TRANSITIONS constexpr
                 return_boundary_marginals,  # RETURN_BOUNDARY_MARGINALS constexpr
+                16,  # TILE_C: tile size for c_dst tiling
                 stride_cs_b,
                 stride_cs_t,
                 stride_cs_c,

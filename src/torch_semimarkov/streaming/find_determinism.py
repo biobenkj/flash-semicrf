@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Find which parameter combinations trigger non-deterministic forward/backward."""
+"""Find which parameter combinations trigger non-deterministic forward/backward.
+
+Usage:
+    python src/torch_semimarkov/streaming/find_determinism.py
+
+To test with different num_warps values:
+    1. Edit triton_backward.py line ~888: change `num_warps=2` to desired value
+    2. Edit triton_forward.py line ~957 and ~1115: change `num_warps=2` to desired value
+    3. Run this script and check for NaN or determinism failures
+
+Expected behavior after loop tiling fix:
+    - num_warps=2: Should pass (baseline)
+    - num_warps=4: Should now pass (was failing before tiling)
+    - num_warps=8: May pass depending on register pressure
+"""
 
 import os
 import sys
