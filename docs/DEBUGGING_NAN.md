@@ -403,10 +403,57 @@ print(compiled.asm['ptx'])    # Final CUDA assembly
 
 ### Implemented Fixes for num_warps > 2
 
-1. **Loop Tiling** ✅ - Process C_PAD×C_PAD marginal in TILE_C×C_PAD tiles (TILE_C=16 or 32)
+1. **Loop Tiling** ✅ - Process C_PAD×C_PAD marginal in TILE_C×C_PAD tiles (TILE_C=16)
 2. **Online Logsumexp** ✅ - Flash Attention pattern for beta update across tiles
 3. **Float64 Accumulators** ✅ - Prevent cross-tile accumulation errors in online logsumexp
-4. **@triton.autotune** ✅ - Automatic config selection based on C, K, CHECKPOINT_INTERVAL
+4. **@triton.autotune** ✅ - Single-config only for backward (see limitations below)
+
+---
+
+## Backward Kernel Autotuning Limitations
+
+**CRITICAL**: Do NOT use multi-config `@triton.autotune` for backward kernels
+that use `tl.atomic_add`.
+
+### The Bug
+
+Triton's `pre_hook` / `reset_to_zero` only runs during autotune benchmarking,
+NOT after selecting the best config (Triton issue #7181). This means:
+
+1. During benchmarking: Each config corrupts the output buffer
+2. After benchmarking: Selected config runs WITHOUT pre_hook
+3. Result: Final run accumulates on garbage → massive errors (~10^23)
+
+### Symptoms
+
+- First kernel call produces different results than subsequent calls
+- Diffs between runs are astronomical (10^20+), not small FP errors
+- Only affects first call in process (triggers autotuning)
+- Subsequent calls use cached config and work correctly
+
+### Solution
+
+Use **single-config autotune** for backward kernels:
+
+```python
+@triton.autotune(
+    configs=[
+        # SINGLE CONFIG - avoids buffer corruption
+        triton.Config({"TILE_C": 16}, num_warps=4, num_stages=2),
+    ],
+    key=["C", "K", "CHECKPOINT_INTERVAL"],
+)
+```
+
+This still provides:
+
+- Config caching (avoids recompilation)
+- Key-based cache invalidation
+- But NO benchmarking (single config = nothing to compare)
+
+### Forward kernels are safe
+
+Forward kernels don't use atomic operations, so multi-config autotune is fine.
 
 ---
 

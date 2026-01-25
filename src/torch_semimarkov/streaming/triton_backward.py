@@ -37,19 +37,18 @@ except ImportError:
 
 
 if HAS_TRITON:
-
+    # WARNING: Use single-config autotune ONLY for backward kernels with atomic_add.
+    # Multi-config causes buffer corruption because pre_hook is NOT called after
+    # autotuning (Triton issue #7181). During benchmarking, each config corrupts
+    # the output buffer. After selecting the best config, it runs WITHOUT pre_hook,
+    # so the kernel accumulates on garbage data from the last benchmark config.
+    # See the kernel docstring "Performance Notes" for details.
     @triton.autotune(
         configs=[
-            # Conservative: Prioritize correctness, low register pressure
-            triton.Config({"TILE_C": 16}, num_warps=2, num_stages=1),
-            # Balanced: Good for most problem sizes
+            # SINGLE CONFIG - avoids buffer corruption from multi-config benchmarking
             triton.Config({"TILE_C": 16}, num_warps=4, num_stages=2),
-            triton.Config({"TILE_C": 32}, num_warps=4, num_stages=2),
-            # Aggressive: For larger C, higher throughput
-            triton.Config({"TILE_C": 16}, num_warps=8, num_stages=2),
-            triton.Config({"TILE_C": 32}, num_warps=8, num_stages=2),
         ],
-        key=["C", "K", "CHECKPOINT_INTERVAL"],  # Retune when these change
+        key=["C", "K", "CHECKPOINT_INTERVAL"],
     )
     @triton.jit
     def semi_crf_streaming_backward_kernel(
@@ -130,8 +129,8 @@ if HAS_TRITON:
         # Strides for boundary_marginals (batch, T) - only used if RETURN_BOUNDARY_MARGINALS
         stride_bm_b,
         stride_bm_t,
-        # Autotuned parameters (must be at end for @triton.autotune)
-        TILE_C: tl.constexpr,  # tile size for c_dst dimension (16 or 32)
+        # Autotuned parameter (must be at end for @triton.autotune)
+        TILE_C: tl.constexpr,
     ):
         r"""Streaming Semi-CRF backward kernel with loop tiling and online logsumexp.
 
@@ -195,9 +194,7 @@ if HAS_TRITON:
         ----------------------
         - **Transition matrix**: Loaded once per (t, k) pair, broadcast over c_src
         - **Cumulative scores**: Coalesced reads via c_idx stride
-        - **Gradients**: Float64 workspace with atomic_add; local accumulation
-          for same-position gradients (grad_cs[t], grad_proj_start[t]) reduces
-          atomic operations from K×(C_PAD/TILE_C) to 1 per position
+        - **Gradients**: Float64 workspace with atomic_add per (t, k, tile)
 
         Gradient Scaling Semantics
         --------------------------
@@ -208,9 +205,18 @@ if HAS_TRITON:
 
         Performance Notes
         -----------------
-        - **Autotuning**: @triton.autotune selects optimal TILE_C and num_warps
-          based on problem shape (C, K, CHECKPOINT_INTERVAL)
-        - **L40/L40S optimal**: Typically num_warps=4, TILE_C=16
+        - **Single-config autotune only**: Multi-config autotuning is NOT safe for
+          backward kernels with atomic operations. Triton's pre_hook/reset_to_zero
+          only runs during benchmarking, NOT after selecting the best config
+          (see Triton issue #7181). This causes the final run to accumulate on
+          garbage data from the last benchmarked config, producing errors of ~10^23.
+
+        - **Do NOT add more configs**: If you're tempted to add TILE_C=32 or
+          different num_warps configs, DON'T. The first kernel call will produce
+          wrong results due to buffer corruption during autotuning.
+
+        - **L40/L40S optimal**: Fixed at num_warps=4, TILE_C=16
+
         - **One program per batch element**: grid = (batch_size,)
 
         See Also
@@ -481,14 +487,6 @@ if HAS_TRITON:
                         # compute (TILE_C, C_PAD) tiles and accumulate gradients per-tile.
                         # For beta update, use online logsumexp across tiles (Flash Attention pattern).
 
-                        # === Local accumulators for position t ===
-                        # These gradients go to the same position (t) across all k and tiles,
-                        # so we accumulate locally and do ONE atomic write after the k loop.
-                        # This reduces atomic operations from K × (C_PAD/TILE_C) to 1.
-                        grad_cs_t_local = tl.zeros([C_PAD], dtype=tl.float64)
-                        if HAS_BOUNDARIES:
-                            grad_ps_t_local = tl.zeros([C_PAD], dtype=tl.float64)
-
                         # tl.maximum ensures K=1 processes at least one duration
                         for k in tl.range(1, tl.maximum(K, 2)):
                             end_pos = t + k
@@ -628,7 +626,7 @@ if HAS_TRITON:
                                     )
                                     marginal_sum_src_tile_scaled = marginal_sum_src_tile * grad_out
 
-                                    # grad_cum_scores[end_pos]: varies by k, must use atomic
+                                    # grad_cum_scores[end_pos]: +marginal (varies by k, must use atomic)
                                     tl.atomic_add(
                                         grad_cs_base
                                         + end_pos * stride_gcs_t
@@ -636,19 +634,17 @@ if HAS_TRITON:
                                         marginal_sum_src_tile_scaled,
                                         mask=c_dst_mask_tile,
                                     )
-                                    # grad_cum_scores[t]: accumulate locally across all k and tiles,
-                                    # then write once after the k loop completes.
-                                    # Scatter tile contribution to C_PAD accumulator using element-wise loop.
-                                    # This reduces atomic contention from K×(C_PAD/TILE_C) to 1 write per t.
-                                    for scatter_i in tl.static_range(0, TILE_C):
-                                        scatter_idx = c_dst_tile_start + scatter_i
-                                        if scatter_idx < C:
-                                            grad_cs_t_local = tl.where(
-                                                c_idx == scatter_idx,
-                                                grad_cs_t_local
-                                                - marginal_sum_src_tile_scaled[scatter_i],
-                                                grad_cs_t_local,
-                                            )
+                                    # grad_cum_scores[t]: -marginal (same position for all k)
+                                    # Note: We use atomic_add here because scatter with constexpr
+                                    # indices is not supported in Triton. This is still more efficient
+                                    # than the non-tiled version since we write (TILE_C,) per tile.
+                                    tl.atomic_add(
+                                        grad_cs_base
+                                        + t * stride_gcs_t
+                                        + c_dst_idx_tile * stride_gcs_c,
+                                        -marginal_sum_src_tile_scaled,
+                                        mask=c_dst_mask_tile,
+                                    )
 
                                     # grad_transition: marginal_T_tile = (C_PAD, TILE_C)
                                     marginal_T_tile = tl.trans(marginal_tile)
@@ -679,20 +675,17 @@ if HAS_TRITON:
                                         mask=c_dst_mask_tile,
                                     )
 
-                                    # grad_proj_start[t]: accumulate locally (same position for all k)
-                                    # grad_proj_end[end_pos-1]: varies by k, must use atomic
+                                    # grad_proj_start[t] and grad_proj_end[end_pos-1]
                                     if HAS_BOUNDARIES:
-                                        # Scatter to local accumulator for proj_start
-                                        for scatter_i in tl.static_range(0, TILE_C):
-                                            scatter_idx = c_dst_tile_start + scatter_i
-                                            if scatter_idx < C:
-                                                grad_ps_t_local = tl.where(
-                                                    c_idx == scatter_idx,
-                                                    grad_ps_t_local
-                                                    + marginal_sum_src_tile_scaled[scatter_i],
-                                                    grad_ps_t_local,
-                                                )
-                                        # proj_end varies by k, use atomic
+                                        # proj_start[t]: same position for all k, use atomic
+                                        tl.atomic_add(
+                                            grad_ps_base
+                                            + t * stride_ps_t
+                                            + c_dst_idx_tile * stride_ps_c,
+                                            marginal_sum_src_tile_scaled,
+                                            mask=c_dst_mask_tile,
+                                        )
+                                        # proj_end[end_pos-1]: varies by k, use atomic
                                         tl.atomic_add(
                                             grad_pe_base
                                             + (end_pos - 1) * stride_ps_t
@@ -772,21 +765,6 @@ if HAS_TRITON:
                                 new_beta = tl.where(
                                     is_both_neginf_beta, NEG_INF, max_new + log_sum_exp_new
                                 )
-
-                        # === Write locally-accumulated gradients for position t ===
-                        # Single atomic write after all k iterations, reducing contention
-                        # from K × (C_PAD/TILE_C) atomics down to 1 per position.
-                        tl.atomic_add(
-                            grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
-                            grad_cs_t_local,
-                            mask=c_mask,
-                        )
-                        if HAS_BOUNDARIES:
-                            tl.atomic_add(
-                                grad_ps_base + t * stride_ps_t + c_idx * stride_ps_c,
-                                grad_ps_t_local,
-                                mask=c_mask,
-                            )
 
                         # Store beta[t] to ring buffer
                         t_ring_idx = t % K
@@ -999,7 +977,6 @@ if HAS_TRITON:
                 has_boundaries,  # HAS_BOUNDARIES constexpr
                 has_duration_transitions,  # HAS_DURATION_TRANSITIONS constexpr
                 return_boundary_marginals,  # RETURN_BOUNDARY_MARGINALS constexpr
-                # TILE_C is controlled by @triton.autotune, not passed explicitly
                 stride_cs_b,
                 stride_cs_t,
                 stride_cs_c,
@@ -1033,7 +1010,7 @@ if HAS_TRITON:
                 stride_gdbw_c,
                 stride_bm_b,
                 stride_bm_t,
-                # num_warps is controlled by @triton.autotune, not passed explicitly
+                # TILE_C and num_warps are controlled by @triton.autotune
             )
 
         # Compute weighted sum of per-batch gradients for shared parameters.
