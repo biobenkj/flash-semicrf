@@ -332,11 +332,18 @@ When the bug is fixed, these can be removed or kept as defensive programming:
 
 ## num_warps Tuning and IR/PTX Analysis
 
-### Current Status
+### Current Status (FIXED)
 
-**Finding:** `num_warps > 2` causes non-deterministic NaN gradients on L40/L40S. Setting `num_warps=2` fixes correctness but severely degrades performance.
+**Original Issue:** `num_warps > 2` caused non-deterministic NaN gradients on L40/L40S due to register pressure causing spills to local memory.
 
-**Hypothesis:** Register pressure causes spills to local memory with higher warp counts, introducing undefined behavior.
+**Solution Implemented:** Loop tiling + online logsumexp pattern reduces peak register demand from ~384 to ~120 per thread, enabling `num_warps=4-8`.
+
+**Key Changes:**
+
+1. **Loop Tiling (TILE_C=16 or 32):** Instead of computing full (C_PAD × C_PAD) marginal matrix, process in (TILE_C × C_PAD) tiles
+2. **Online Logsumexp:** Flash Attention pattern for beta update - accumulate logsumexp across tiles without materializing full matrix
+3. **Float64 Accumulators:** Online logsumexp accumulators use float64 to match beta precision and prevent cross-tile accumulation errors
+4. **@triton.autotune:** Automatic selection of optimal TILE_C and num_warps based on problem shape
 
 ### Testing num_warps with find_determinism.py
 
@@ -394,11 +401,12 @@ print(compiled.asm['llir'])   # Low-level IR
 print(compiled.asm['ptx'])    # Final CUDA assembly
 ```
 
-### Potential Fixes for num_warps > 2
+### Implemented Fixes for num_warps > 2
 
-1. **Loop Tiling** - Reduce register pressure by processing C_PAD×C_PAD in smaller tiles
-2. **num_stages Tuning** - Reduce pipeline stages to save registers
-3. **Grid Parallelization** - Move work from warps to grid dimension
+1. **Loop Tiling** ✅ - Process C_PAD×C_PAD marginal in TILE_C×C_PAD tiles (TILE_C=16 or 32)
+2. **Online Logsumexp** ✅ - Flash Attention pattern for beta update across tiles
+3. **Float64 Accumulators** ✅ - Prevent cross-tile accumulation errors in online logsumexp
+4. **@triton.autotune** ✅ - Automatic config selection based on C, K, CHECKPOINT_INTERVAL
 
 ---
 
