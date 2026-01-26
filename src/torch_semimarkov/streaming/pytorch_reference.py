@@ -1,16 +1,6 @@
 r"""PyTorch reference implementation for streaming Semi-CRF.
 
-This module contains the pure PyTorch implementations used for:
-
-- CPU fallback when Triton is not available
-- Boundary projection support (``proj_start``, ``proj_end``)
-- Reference implementation for testing Triton kernels
-
-Functions:
-    _compute_checkpoint_interval: Compute optimal checkpoint interval.
-    compute_edge_block_streaming: Compute edge block on-the-fly.
-    semi_crf_streaming_forward_pytorch: Forward pass with ring buffer.
-    semi_crf_streaming_backward_pytorch: Backward pass via forward-backward algorithm.
+Pure PyTorch implementations for CPU fallback and testing Triton kernels.
 """
 
 import math
@@ -23,24 +13,7 @@ from .constants import NEG_INF
 
 
 def _compute_checkpoint_interval(T: int, K: int) -> int:
-    r"""_compute_checkpoint_interval(T, K) -> int
-
-    Compute optimal checkpoint interval to minimize total memory.
-
-    The optimal interval :math:`S` minimizes total memory:
-
-    .. math::
-        \text{Memory} = \frac{T}{S} \times K \times C + S \times C + K \times C
-
-    Taking :math:`\frac{d}{dS} = 0` gives :math:`S^* = \sqrt{T \times K}`.
-
-    Args:
-        T (int): Sequence length.
-        K (int): Maximum segment duration.
-
-    Returns:
-        int: Optimal checkpoint interval (at least K).
-    """
+    """Optimal checkpoint interval: sqrt(T*K), at least K."""
     optimal = int(math.sqrt(T * K))
     return max(K, optimal)
 
@@ -54,35 +27,7 @@ def compute_edge_block_streaming(
     proj_start: Optional[torch.Tensor] = None,
     proj_end: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    r"""compute_edge_block_streaming(cum_scores, transition, duration_bias, t, k, proj_start=None, proj_end=None) -> Tensor
-
-    Compute edge block on-the-fly using prefix-sum decomposition.
-
-    This computes the edge potential for segments starting at position ``t``
-    with duration ``k``, without materializing the full edge tensor:
-
-    .. math::
-        \text{edge}[c_{\text{dest}}, c_{\text{src}}] = \text{segment\_score}[c_{\text{dest}}]
-        + \text{transition}[c_{\text{src}}, c_{\text{dest}}]
-
-    where :math:`\text{segment\_score} = \text{content\_score} + \text{duration\_bias} + \text{boundaries}`.
-
-    Args:
-        cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`.
-        transition (Tensor): Label transition scores of shape :math:`(C, C)` for
-            static transitions, or :math:`(K, C, C)` for duration-dependent transitions.
-        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
-        t (int): Segment start position.
-        k (int): Segment duration.
-        proj_start (Tensor, optional): Start boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        proj_end (Tensor, optional): End boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-
-    Returns:
-        Tensor: Edge potentials of shape :math:`(\text{batch}, C, C)`.
-    """
+    """Compute edge block on-the-fly via prefix-sum. Returns (batch, C, C)."""
     # Content score via cumsum difference: (batch, C)
     content_score = cum_scores[:, t + k, :] - cum_scores[:, t, :]
 
@@ -124,44 +69,7 @@ def semi_crf_streaming_forward_pytorch(
     proj_end: Optional[torch.Tensor] = None,
     checkpoint_interval: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    r"""semi_crf_streaming_forward_pytorch(cum_scores, transition, duration_bias, lengths, K, semiring="log", proj_start=None, proj_end=None, checkpoint_interval=None) -> tuple[Tensor, Tensor, int]
-
-    Forward pass with streaming edge computation (pure PyTorch reference).
-
-    Computes the log partition function using a ring buffer with :math:`O(KC)` memory.
-    Edge potentials are computed on-the-fly from cumulative scores.
-
-    The forward recurrence is:
-
-    .. math::
-        \alpha[t, c] = \bigoplus_{k=1}^{K-1} \bigoplus_{c'} \alpha[t-k, c'] + \text{edge}[t-k, k, c, c']
-
-    where :math:`\bigoplus` is logsumexp (log semiring) or max (max semiring).
-
-    Args:
-        cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`.
-        transition (Tensor): Label transition scores of shape :math:`(C, C)` for
-            static transitions, or :math:`(K, C, C)` for duration-dependent transitions.
-        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
-        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-        K (int): Maximum segment duration.
-        semiring (str, optional): ``"log"`` (logsumexp) or ``"max"`` (Viterbi).
-            Default: ``"log"``
-        proj_start (Tensor, optional): Start boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        proj_end (Tensor, optional): End boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        checkpoint_interval (int, optional): Interval for saving ring buffer state.
-            If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
-
-    Returns:
-        tuple[Tensor, Tensor, int]: Tuple of:
-            - **partition** (Tensor): Log partition values of shape :math:`(\text{batch},)`.
-            - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
-              :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
-            - **checkpoint_interval** (int): Actual interval used.
-    """
+    """Forward pass with O(KC) ring buffer. Returns (partition, ring_checkpoints, interval)."""
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
 
@@ -407,50 +315,9 @@ def semi_crf_streaming_backward_pytorch(
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
 ]:
-    r"""semi_crf_streaming_backward_pytorch(cum_scores, transition, duration_bias, lengths, K, log_Z, ring_checkpoints, checkpoint_interval, semiring="log", proj_start=None, proj_end=None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+    """Backward pass via forward-backward algorithm with checkpointing.
 
-    Backward pass computing gradients via marginals (pure PyTorch reference).
-
-    Uses the forward-backward algorithm with checkpointing. Recomputes alpha
-    within segments from saved ring buffer checkpoints, then computes beta
-    backward while accumulating gradients.
-
-    The marginal probability for a segment is:
-
-    .. math::
-        P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}]) =
-        \frac{\exp(\alpha[t, c_{\text{src}}] + \text{edge}[t, k, c_{\text{dst}}, c_{\text{src}}]
-        + \beta[t+k, c_{\text{dst}}])}{\exp(\log Z)}
-
-    Gradients are accumulated as weighted sums of these marginals.
-
-    Args:
-        cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`.
-        transition (Tensor): Label transition scores of shape :math:`(C, C)` for
-            static transitions, or :math:`(K, C, C)` for duration-dependent transitions.
-        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
-        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-        K (int): Maximum segment duration.
-        log_Z (Tensor): Log partition values of shape :math:`(\text{batch},)`.
-        ring_checkpoints (Tensor): Saved ring buffer states from forward pass.
-        checkpoint_interval (int): Interval between checkpoints.
-        semiring (str, optional): ``"log"`` or ``"max"``. Default: ``"log"``
-        proj_start (Tensor, optional): Start boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        proj_end (Tensor, optional): End boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-
-    Returns:
-        tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of gradients:
-            - **grad_cum_scores** (Tensor): Shape :math:`(\text{batch}, T+1, C)`.
-            - **grad_transition** (Tensor): Shape :math:`(\text{batch}, C, C)` or
-              :math:`(\text{batch}, K, C, C)`.
-            - **grad_duration_bias** (Tensor): Shape :math:`(\text{batch}, K, C)`.
-            - **grad_proj_start** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
-              if boundaries provided.
-            - **grad_proj_end** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
-              if boundaries provided.
+    Returns: (grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end)
     """
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
@@ -493,10 +360,7 @@ def semi_crf_streaming_backward_pytorch(
         seg_start = ckpt_idx * checkpoint_interval
         seg_end = min((ckpt_idx + 1) * checkpoint_interval, T)
 
-        # Clear segment buffer
         alpha_segment.fill_(NEG_INF)
-
-        # === Phase 1: Recompute alpha from checkpoint's ring buffer state ===
         alpha_ring = ring_checkpoints[:, ckpt_idx, :, :].clone()
 
         # Store alpha[seg_start] at local position 0
@@ -541,7 +405,7 @@ def semi_crf_streaming_backward_pytorch(
                     active_mask.view(batch, 1), alpha_t, alpha_segment[:, local_t, :]
                 )
 
-        # === Phase 2: Compute beta backward and gradients ===
+        # Compute beta backward and gradients
         for t in range(seg_end - 1, seg_start - 1, -1):
             local_t = t - seg_start
             alpha_t = alpha_segment[:, local_t, :]
@@ -665,73 +529,13 @@ def semi_crf_streaming_marginals_pytorch(
     proj_end: Optional[torch.Tensor] = None,
     checkpoint_interval: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""semi_crf_streaming_marginals_pytorch(cum_scores, transition, duration_bias, lengths, K, proj_start=None, proj_end=None, checkpoint_interval=None) -> tuple[Tensor, Tensor]
-
-    Compute boundary marginals via streaming forward-backward algorithm.
-
-    This function computes the true boundary marginals :math:`P(\text{segment starts at position } t)`
-    using the forward-backward algorithm with O(KC) memory. It runs a forward pass to compute
-    alpha values and partition function, then a backward pass to compute beta values and
-    accumulate marginals.
-
-    The boundary marginal at position t is:
-
-    .. math::
-        P(\text{boundary at } t) = \sum_{k, c_{\text{dst}}, c_{\text{src}}}
-        P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}])
-
-    where each segment probability is computed via the forward-backward algorithm:
-
-    .. math::
-        P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}]) =
-        \frac{\exp(\alpha[t, c_{\text{src}}] + \text{edge}[t, k, c_{\text{dst}}, c_{\text{src}}]
-        + \beta[t+k, c_{\text{dst}}])}{\exp(\log Z)}
-
-    Args:
-        cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`.
-        transition (Tensor): Label transition scores of shape :math:`(C, C)` for
-            static transitions, or :math:`(K, C, C)` for duration-dependent transitions.
-        duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
-        lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-        K (int): Maximum segment duration.
-        proj_start (Tensor, optional): Start boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        proj_end (Tensor, optional): End boundary scores of shape
-            :math:`(\text{batch}, T, C)`. Default: ``None``
-        checkpoint_interval (int, optional): Interval for saving ring buffer state.
-            If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
-
-    Returns:
-        tuple[Tensor, Tensor]: Tuple of:
-            - **boundary_marginals** (Tensor): Boundary probabilities of shape
-              :math:`(\text{batch}, T)`. Each value represents the probability
-              that a segment starts at that position.
-            - **log_Z** (Tensor): Log partition values of shape :math:`(\text{batch},)`.
-
-    Example::
-
-        >>> cum_scores = torch.zeros(2, 101, 4)  # batch=2, T=100, C=4
-        >>> cum_scores[:, 1:] = torch.cumsum(torch.randn(2, 100, 4), dim=1)
-        >>> transition = torch.randn(4, 4)
-        >>> duration_bias = torch.randn(10, 4)  # K=10
-        >>> lengths = torch.tensor([100, 80])
-        >>> boundary_marginals, log_Z = semi_crf_streaming_marginals_pytorch(
-        ...     cum_scores, transition, duration_bias, lengths, K=10
-        ... )
-        >>> boundary_marginals.shape
-        torch.Size([2, 100])
-
-    See Also:
-        :func:`semi_crf_streaming_forward_pytorch`: Forward pass only
-        :func:`semi_crf_streaming_backward_pytorch`: Backward pass for gradients
-    """
+    """Compute boundary marginals via forward-backward. Returns (marginals, log_Z)."""
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
     device = cum_scores.device
     dtype = cum_scores.dtype
 
-    # === Phase 1: Forward pass ===
+    # Forward pass
     log_Z, ring_checkpoints, effective_interval = semi_crf_streaming_forward_pytorch(
         cum_scores,
         transition,
@@ -744,7 +548,7 @@ def semi_crf_streaming_marginals_pytorch(
         checkpoint_interval=checkpoint_interval,
     )
 
-    # === Phase 2: Backward pass to compute marginals ===
+    # Backward pass to compute marginals
     effective_interval = max(effective_interval, K)
 
     # Initialize boundary marginals accumulator
@@ -772,7 +576,7 @@ def semi_crf_streaming_marginals_pytorch(
         # Clear segment buffer
         alpha_segment.fill_(NEG_INF)
 
-        # === Phase 2a: Recompute alpha from checkpoint's ring buffer state ===
+        # Recompute alpha from checkpoint
         alpha_ring = ring_checkpoints[:, ckpt_idx, :, :].clone()
 
         # Store alpha[seg_start] at local position 0
@@ -811,7 +615,7 @@ def semi_crf_streaming_marginals_pytorch(
                     active_mask.view(batch, 1), alpha_t, alpha_segment[:, local_t, :]
                 )
 
-        # === Phase 2b: Compute beta backward and accumulate marginals ===
+        # Compute beta backward and accumulate marginals
         for t in range(seg_end - 1, seg_start - 1, -1):
             local_t = t - seg_start
             alpha_t = alpha_segment[:, local_t, :]

@@ -1,22 +1,30 @@
 r"""Triton backward kernel for streaming Semi-CRF.
 
-This module contains the Triton kernel for the backward pass and the launcher
-function that allocates buffers and dispatches the kernel.
+Uses forward-backward algorithm with checkpointing:
+1. Recompute alpha values from saved ring buffer checkpoints
+2. Compute beta backward while accumulating gradients
 
-The backward pass uses the forward-backward algorithm with checkpointing:
-
-1. **Phase 1**: Recompute alpha values from saved ring buffer checkpoints
-2. **Phase 2**: Compute beta backward while accumulating gradients
-
-Gradients are computed via marginal probabilities:
+Gradients computed via marginal probabilities:
 
 .. math::
-    P(\text{segment}[t, k, c_{\text{dst}}, c_{\text{src}}]) =
-    \frac{\exp(\alpha[t, c_{\text{src}}] + \text{edge} + \beta[t+k, c_{\text{dst}}])}
-    {\exp(\log Z)}
+    P(\text{segment}) = \frac{\exp(\alpha + \text{edge} + \beta)}{\exp(\log Z)}
 
-Functions:
-    launch_streaming_triton_backward: Main entry point for launching backward kernel.
+Memory vs Stability Tradeoff
+----------------------------
+This kernel supports configurable precision via ``accum_dtype`` parameter.
+The ~120K atomic_add operations per batch accumulate floating-point error that causes
+NaN/Inf at batch sizes >= 128 when using float32.
+
+**Configuration:**
+
+- ``accum_dtype=torch.float64`` (default): Stable at batch >= 128, ~1.5x memory, ~2x slower
+- ``accum_dtype=torch.float32``: Lower memory, baseline speed, stable only at batch <= 64
+
+**Recommendations:**
+
+- Memory-constrained: Use ``accum_dtype=torch.float32`` with batch size <= 64
+- Throughput-focused: Use ``accum_dtype=torch.float64`` with batch size 256+
+- The sweet spot balances GPU memory utilization against samples/second
 """
 
 import torch
@@ -37,8 +45,7 @@ except ImportError:
 
 
 if HAS_TRITON:
-    # NOTE: @triton.autotune removed - corrupts gradient buffers during benchmarking.
-    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
+
     @triton.jit
     def semi_crf_streaming_backward_kernel(
         # Inputs (from forward)
@@ -121,97 +128,24 @@ if HAS_TRITON:
         # Autotuned parameter (must be at end for @triton.autotune)
         TILE_C: tl.constexpr,
     ):
-        r"""Streaming Semi-CRF backward kernel with loop tiling and online logsumexp.
+        """Streaming Semi-CRF backward kernel with loop tiling.
 
-        This kernel computes gradients for the Semi-CRF partition function using
-        the forward-backward algorithm with memory-efficient streaming checkpoints.
+        For each checkpoint segment (reverse order):
+        1. Recompute alpha from checkpoint, then forward through segment
+        2. Compute beta backward while accumulating gradients via marginals
 
-        Algorithm
-        ---------
-        For each checkpoint segment (processed in reverse order):
+        Numerical Stability:
+        - Float64 accumulation for atomic_add precision
+        - NEG_INF guards for all-invalid logsumexp inputs
+        - Log-marginal clamping to [-700, 700] before exp()
+        - Alpha/beta/edge clamping to [-1e6, 1e6]
 
-        **Phase 1 - Alpha Recomputation:**
-            Load ring buffer checkpoint for segment start, then recompute
-            alpha values forward through the segment using the recurrence:
+        Loop Tiling:
+        Process c_dst in TILE_C tiles to reduce register pressure from
+        O(C_PAD²) to O(TILE_C × C_PAD). Uses online logsumexp for beta.
 
-            .. math::
-                \alpha[t, c] = \text{logsumexp}_k \left(
-                    \alpha[t-k, :] + \text{edge}[t-k \to t, :, c]
-                \right)
-
-        **Phase 2 - Beta Backward with Gradient Accumulation:**
-            Process positions in reverse (t = seg_end-1 down to seg_start).
-            For each position, compute marginal probabilities and accumulate
-            gradients while updating beta via:
-
-            .. math::
-                \beta[t, c] = \text{logsumexp}_k \left(
-                    \text{edge}[t \to t+k, c, :] + \beta[t+k, :]
-                \right)
-
-        Numerical Stability
-        -------------------
-        - **Float64 accumulation**: Gradient tensors use float64 to prevent
-          non-determinism from atomic_add floating-point non-associativity.
-          Error scales as O(sqrt(T×K×C)) per operation; float64 reduces this
-          from ~1e-3 (float32) to ~1e-10 (negligible).
-
-        - **NEG_INF guards**: When all logsumexp inputs are NEG_INF (-1e9),
-          the subtraction `scores - max` yields 0 instead of staying at NEG_INF.
-          Guards detect this case (max < NEG_INF + 1) and return NEG_INF directly.
-
-        - **Log-marginal clamping**: Before exp(), log-marginals are clamped to
-          [-700, 700] to prevent float64 overflow (exp(710) ≈ inf).
-
-        - **Input clamping**: Alpha, beta, and edge values clamped to [-1e6, 1e6]
-          before marginal computation to prevent extreme intermediate values.
-
-        Loop Tiling (Register Pressure Reduction)
-        -----------------------------------------
-        The marginal computation requires a (C_PAD × C_PAD) matrix, which at
-        C_PAD=64 demands ~384 registers/thread. With num_warps=4+, this exceeds
-        available registers and causes spilling to slow local memory.
-
-        **Solution**: Process C_PAD in tiles of TILE_C (typically 16 or 32):
-            - Load (TILE_C × C_PAD) tile of marginal matrix
-            - Accumulate gradients from tile
-            - Use online logsumexp for beta update across tiles (Flash Attention pattern)
-
-        This reduces peak register demand to ~120/thread, enabling num_warps=4-8.
-
-        Memory Access Patterns
-        ----------------------
-        - **Transition matrix**: Loaded once per (t, k) pair, broadcast over c_src
-        - **Cumulative scores**: Coalesced reads via c_idx stride
-        - **Gradients**: Float64 workspace with atomic_add per (t, k, tile)
-
-        Gradient Scaling Semantics
-        --------------------------
-        - **Per-batch parameters** (cum_scores): Scaled by grad_output[batch_idx]
-          inside kernel
-        - **Shared parameters** (transition, duration_bias): Accumulated unscaled,
-          then reduced via einsum after kernel: ``grad = einsum("bij, b -> ij", ws, grad_out)``
-
-        Performance Notes
-        -----------------
-        - **Single-config autotune only**: Multi-config autotuning is NOT safe for
-          backward kernels with atomic operations. Triton's pre_hook/reset_to_zero
-          only runs during benchmarking, NOT after selecting the best config
-          (see Triton issue #7181). This causes the final run to accumulate on
-          garbage data from the last benchmarked config, producing errors of ~10^23.
-
-        - **Do NOT add more configs**: If you're tempted to add TILE_C=32 or
-          different num_warps configs, DON'T. The first kernel call will produce
-          wrong results due to buffer corruption during autotuning.
-
-        - **L40/L40S optimal**: Fixed at num_warps=4, TILE_C=16
-
-        - **One program per batch element**: grid = (batch_size,)
-
-        See Also
-        --------
-        - Flash Attention: Online softmax pattern for memory-efficient attention
-        - Mamba SSM: Loop tiling for register-pressure reduction in state space models
+        Memory: O((S+K)×C) alpha buffer + O(KC) beta ring.
+        One program per batch element.
         """
         NEG_INF: tl.constexpr = -1e9
 
@@ -289,11 +223,7 @@ if HAS_TRITON:
 
             # Only process segments within sequence length
             if seg_start < seq_len:
-                # === Phase 1: Recompute alpha for this segment ===
-                # Load ring buffer state from checkpoint
-                # Then recompute forward through the segment
-
-                # Initialize alpha from checkpoint (stores ring buffer state at seg_start)
+                # Recompute alpha from checkpoint
                 for k_slot in tl.range(0, K):
                     alpha_val = tl.load(
                         ring_ckpt_base
@@ -451,8 +381,7 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
-                # === Phase 2: Compute beta backward and gradients ===
-                # Note: Use tl.range to avoid compile-time unrolling for large CHECKPOINT_INTERVAL
+                # Compute beta backward and gradients
                 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
                     t = seg_end - 1 - t_offset
                     # Only process valid positions
@@ -468,15 +397,7 @@ if HAS_TRITON:
                         # Compute beta[t] and gradients
                         new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
-                        # === TILED BACKWARD COMPUTATION ===
-                        # Process c_dst dimension in tiles of TILE_C to reduce register pressure.
-                        # This enables higher num_warps (4-8) without register spilling.
-                        #
-                        # Pattern: Instead of computing full (C_PAD, C_PAD) marginal matrix,
-                        # compute (TILE_C, C_PAD) tiles and accumulate gradients per-tile.
-                        # For beta update, use online logsumexp across tiles (Flash Attention pattern).
-
-                        # tl.maximum ensures K=1 processes at least one duration
+                        # Tiled computation over c_dst dimension
                         for k in tl.range(1, tl.maximum(K, 2)):
                             end_pos = t + k
                             # Only process valid end positions
@@ -484,23 +405,14 @@ if HAS_TRITON:
                                 end_ring_idx = end_pos % K
                                 dur_idx = tl.minimum(k, K - 1)
 
-                                # === Accumulators for this k iteration ===
-                                # Boundary marginals accumulator (scalar)
                                 marginal_sum_all_k = 0.0
-
-                                # Online logsumexp accumulators for beta_k (indexed by c_src)
-                                # Accumulates logsumexp over c_dst tiles
-                                # IMPORTANT: Use float64 to match new_beta precision and avoid
-                                # accumulation errors with higher num_warps
                                 m_beta_k = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
                                 l_beta_k = tl.zeros([C_PAD], dtype=tl.float64)
 
                                 # Clamp alpha_t once per k (reused across tiles)
                                 alpha_t_clamped = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
 
-                                # === Tile loop over c_dst dimension ===
                                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
-                                    # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
                                     c_dst_idx_tile = c_dst_tile_start + c_dst_tile
                                     c_dst_mask_tile = c_dst_idx_tile < C
@@ -586,7 +498,6 @@ if HAS_TRITON:
                                     # edge_tile: (TILE_C, C_PAD)
                                     edge_tile = segment_score_tile[:, None] + transition_tile
 
-                                    # === Compute marginal tile (TILE_C, C_PAD) ===
                                     beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
                                     edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
 
@@ -602,9 +513,6 @@ if HAS_TRITON:
                                     marginal_tile = tl.exp(log_marginal_tile)
                                     marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
 
-                                    # === Accumulate gradients from this tile ===
-
-                                    # Boundary marginals: sum over both dims
                                     if RETURN_BOUNDARY_MARGINALS:
                                         marginal_sum_all_k += tl.sum(marginal_tile)
 
@@ -623,13 +531,7 @@ if HAS_TRITON:
                                         marginal_sum_src_tile_scaled,
                                         mask=c_dst_mask_tile,
                                     )
-                                    # grad_cum_scores[t]: -marginal (same position for all k)
-                                    # Note: We use atomic_add here because scatter with constexpr
-                                    # indices is not supported in Triton. This is still more efficient
-                                    # than the non-tiled version since we write (TILE_C,) per tile.
-                                    # FUTURE OPTIMIZATION: Accumulate locally across all k and tiles,
-                                    # then write once after the k-loop. Requires restructuring loops
-                                    # (tile outside k, or C_PAD-sized local accumulator with scatter).
+                                    # grad_cum_scores[t]: -marginal
                                     tl.atomic_add(
                                         grad_cs_base
                                         + t * stride_gcs_t
@@ -686,22 +588,13 @@ if HAS_TRITON:
                                             mask=c_dst_mask_tile,
                                         )
 
-                                    # === Online logsumexp for beta_k (Flash Attention pattern) ===
-                                    # Instead of materializing full (C_PAD, C_PAD) and reducing,
-                                    # we accumulate logsumexp across tiles using online algorithm:
-                                    #   m = running max, l = running sum of exp(x - m)
-                                    #   For each new tile: m' = max(m, tile_max)
-                                    #                      l' = l * exp(m - m') + tile_sum * exp(tile_max - m')
-                                    # Final result: m + log(l)
+                                    # Online logsumexp for beta_k
                                     scores_for_beta_tile = edge_tile + beta_tile[:, None]
                                     scores_for_beta_tile = tl.where(
                                         tile_mask_2d, scores_for_beta_tile, NEG_INF
                                     )
 
-                                    # Tile statistics: max and sum(exp) over c_dst dimension
                                     max_tile = tl.max(scores_for_beta_tile, axis=0)
-                                    # NEG_INF guard: if all inputs are NEG_INF, max would be NEG_INF
-                                    # and scores - max = 0, giving exp(0) = 1 (wrong!). Detect and handle.
                                     is_tile_neginf = max_tile < (NEG_INF + 1.0)
                                     max_tile_safe = tl.where(is_tile_neginf, 0.0, max_tile)
 
@@ -711,12 +604,10 @@ if HAS_TRITON:
                                     )
                                     sum_exp_tile = tl.where(is_tile_neginf, 0.0, sum_exp_tile)
 
-                                    # Online update: merge this tile's statistics with running accumulator
                                     m_new = tl.maximum(m_beta_k, max_tile)
                                     is_m_neginf = m_beta_k < (NEG_INF + 1.0)
                                     m_new_safe = tl.where(is_m_neginf & is_tile_neginf, 0.0, m_new)
 
-                                    # Rescale previous sum and add new tile's contribution
                                     l_beta_k = tl.where(
                                         is_m_neginf,
                                         sum_exp_tile * tl.exp(max_tile - m_new_safe),
@@ -725,7 +616,6 @@ if HAS_TRITON:
                                     )
                                     m_beta_k = m_new
 
-                                # === After all c_dst tiles: finalize beta_k ===
                                 is_beta_k_neginf = m_beta_k < (NEG_INF + 1.0)
                                 beta_k = tl.where(
                                     is_beta_k_neginf,
@@ -778,16 +668,11 @@ if HAS_TRITON:
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
         return_boundary_marginals: bool = False,
+        accum_dtype: torch.dtype = torch.float64,
         num_warps: int = 4,
         validate_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None, return_boundary_marginals=False, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
-
-        Launch the Triton backward kernel with proper buffer allocation.
-
-        This function allocates working memory (alpha buffer, beta ring buffer)
-        and dispatches the backward kernel. Gradients for shared parameters
-        are accumulated per-batch then reduced via einsum.
+        r"""Launch Triton backward kernel with buffer allocation.
 
         Args:
             cum_scores (Tensor): Cumulative projected scores of shape
@@ -807,11 +692,11 @@ if HAS_TRITON:
                 :math:`(\text{batch}, T, C)`. Default: ``None``
             return_boundary_marginals (bool, optional): If ``True``, also compute
                 and return boundary marginals. Default: ``False``
-            num_warps (int, optional): Number of warps per block for Triton kernel.
-                Higher values increase parallelism but also register pressure.
-                Recommended range: 2-8. Default: ``4``
-            validate_cache (bool, optional): If True, validate Triton cache
-                consistency and warn on config changes. Default: ``True``
+            accum_dtype (torch.dtype, optional): Dtype for gradient accumulation.
+                Use ``torch.float64`` (default) for numerical stability at batch >= 128.
+                Use ``torch.float32`` for lower memory at batch <= 64.
+            num_warps (int, optional): Warps per block (2-8). Default: ``4``
+            validate_cache (bool, optional): Validate Triton cache. Default: ``True``
 
         Returns:
             tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of:
@@ -847,7 +732,6 @@ if HAS_TRITON:
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
 
-        # Determine if duration-dependent transitions (Phase 4A)
         has_duration_transitions = transition.ndim == 3
 
         # Ensure contiguous
@@ -876,36 +760,29 @@ if HAS_TRITON:
             grad_proj_end = None
             # Kernel uses proj_start/proj_end directly when HAS_BOUNDARY_PROJ=False
 
-        # Pad checkpoints to C_PAD
+        # Pad checkpoints to C_PAD and convert to float64 for kernel consistency.
+        # The kernel uses float64 for alpha computation - checkpoints must match.
         if ring_checkpoints.shape[-1] < C_PAD:
             ring_ckpts_padded = torch.full(
-                (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
+                (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=torch.float64
             )
-            ring_ckpts_padded[:, :, :, :C] = ring_checkpoints
+            ring_ckpts_padded[:, :, :, :C] = ring_checkpoints.to(torch.float64)
         else:
-            ring_ckpts_padded = ring_checkpoints.contiguous()
+            ring_ckpts_padded = ring_checkpoints.to(torch.float64).contiguous()
 
-        # Allocate working memory
-        alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
-        beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
+        # Allocate working memory in float64 to match kernel computation precision.
+        # The kernel computes alpha/beta in float64 (tl.float64) - using float32 buffers
+        # causes precision loss on store/load cycles, accumulating errors over T×K ops.
+        alpha_buffer = torch.full(
+            (batch, segment_size, C_PAD), NEG_INF, device=device, dtype=torch.float64
+        )
+        beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=torch.float64)
 
-        # NUMERICAL STABILITY FIX: Use float64 for gradient accumulation to reduce
-        # floating-point non-associativity errors from atomic_add operations.
-        # The error accumulates over T×K×C operations (e.g., 585,000 at T=500, K=30, C=39).
-        # Float32 error: ~1e-7 per op → ~1e-3 accumulated
-        # Float64 error: ~1e-16 per op → ~1e-10 accumulated
-        # We convert back to original dtype before returning.
-        accum_dtype = torch.float64
-
-        # Allocate gradient outputs with C_PAD
-        # grad_cum_scores uses float32: each batch writes to its own slice (no cross-batch atomics)
-        # so float32 precision is sufficient. This reduces memory bandwidth by 50%.
-        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=torch.float32)
+        # Gradient accumulation dtype (float64 for stability at large batch, float32 for lower memory)
+        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=accum_dtype)
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=accum_dtype)
 
-        # Allocate per-batch workspace buffers with higher precision
-        # IMPORTANT: Allocate with C_PAD to prevent OOB memory access from masked-out
-        # threads (indices C to C_PAD-1).
+        # Per-batch workspace buffers (C_PAD for OOB safety)
         if has_duration_transitions:
             # Duration-dependent: (batch, K, C_PAD, C_PAD)
             grad_tr_workspace = torch.zeros(
@@ -1018,31 +895,11 @@ if HAS_TRITON:
                 stride_gdbw_c,
                 stride_bm_b,
                 stride_bm_t,
-                TILE_C=16,  # DO NOT INCREASE - TILE_C=32 causes register spills (14x slowdown)
+                TILE_C=16,
                 num_warps=num_warps,
             )
 
-        # Compute weighted sum of per-batch gradients for shared parameters.
-        #
-        # Correct gradient semantics for shared parameters:
-        #   grad_θ = Σ_b[grad_output[b] × Σ_{t,k}(marginal[b,t,k])]
-        #
-        # NOT the buggy formula:
-        #   grad_θ = Σ_{b,t,k}(marginal[b,t,k]) × Σ_b(grad_output[b])  # WRONG!
-        #
-        # The difference matters when grad_output varies across batch elements
-        # (e.g., masked sequences, weighted losses). With uniform grad_output=[1,1,...],
-        # both formulas happen to give the same result, which is why tests using
-        # .sum().backward() didn't catch the bug.
-        #
-        # We use einsum for memory efficiency: it fuses the multiply + reduce
-        # without creating a large intermediate tensor. For K=1024, C=64, batch=16,
-        # the naive broadcast approach would allocate ~268MB just to sum immediately.
-        #
-        # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
-        # Slice workspaces back to actual class count C before einsum reduction
-        # (they were allocated with C_PAD to prevent OOB memory access)
-        # Convert grad_output to float64 to match workspace dtype for einsum
+        # Reduce per-batch gradients: grad_θ = Σ_b[grad_output[b] × workspace[b]]
         grad_output_f64 = grad_output.to(torch.float64)
         if has_duration_transitions:
             grad_tr_workspace = grad_tr_workspace[:, :, :C, :C]
@@ -1055,15 +912,19 @@ if HAS_TRITON:
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 
         # Slice padded gradients back to actual class count C
-        # grad_cum_scores: float32 → original dtype (may be no-op if dtype is float32)
-        # grad_transition/grad_duration_bias: float64 → original dtype
-        grad_cum_scores = grad_cum_scores[:, :, :C].to(dtype)
-        grad_transition = grad_transition.to(dtype)
-        grad_duration_bias = grad_duration_bias.to(dtype)
+        # All gradient workspaces use float64 → convert to original dtype
+        # IMPORTANT: Clamp gradients to a reasonable range before conversion.
+        # Float64 gradients can be extremely large; even values that fit in float32
+        # (< 3.4e38) can corrupt model parameters during optimizer.step().
+        # Use 1e10 as a conservative maximum - still very large but won't cause NaN.
+        _GRAD_MAX = 1e10
+        grad_cum_scores = grad_cum_scores[:, :, :C].clamp(-_GRAD_MAX, _GRAD_MAX).to(dtype)
+        grad_transition = grad_transition.clamp(-_GRAD_MAX, _GRAD_MAX).to(dtype)
+        grad_duration_bias = grad_duration_bias.clamp(-_GRAD_MAX, _GRAD_MAX).to(dtype)
 
         if grad_proj_start is not None:
-            grad_proj_start = grad_proj_start[:, :, :C].to(dtype)
-            grad_proj_end = grad_proj_end[:, :, :C].to(dtype)
+            grad_proj_start = grad_proj_start[:, :, :C].clamp(-_GRAD_MAX, _GRAD_MAX).to(dtype)
+            grad_proj_end = grad_proj_end[:, :, :C].clamp(-_GRAD_MAX, _GRAD_MAX).to(dtype)
 
         return (
             grad_cum_scores,
@@ -1085,64 +946,23 @@ if HAS_TRITON:
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
     ) -> torch.Tensor:
-        r"""launch_streaming_triton_marginals(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, proj_start=None, proj_end=None) -> Tensor
+        r"""Compute boundary marginals via backward kernel.
 
-        Compute boundary marginals via Triton backward kernel.
-
-        This is a convenience wrapper that runs the backward kernel with
-        ``return_boundary_marginals=True`` and discards the gradient outputs.
-        The boundary marginal at position t represents the probability that
-        a segment starts at that position.
+        Runs backward with ``return_boundary_marginals=True``, discarding gradients.
 
         Args:
-            cum_scores (Tensor): Cumulative projected scores of shape
-                :math:`(\text{batch}, T+1, C)`.
-            transition (Tensor): Transition scores of shape :math:`(C, C)` for
-                static transitions, or :math:`(K, C, C)` for duration-dependent.
-            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
-            ring_checkpoints (Tensor): Saved ring buffer states of shape
-                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
-            checkpoint_interval (int): Interval used during forward pass.
-            proj_start (Tensor, optional): Start boundary scores of shape
-                :math:`(\text{batch}, T, C)`. Default: ``None``
-            proj_end (Tensor, optional): End boundary scores of shape
-                :math:`(\text{batch}, T, C)`. Default: ``None``
+            cum_scores: Shape :math:`(\text{batch}, T+1, C)`.
+            transition: Shape :math:`(C, C)` or :math:`(K, C, C)`.
+            duration_bias: Shape :math:`(K, C)`.
+            lengths: Shape :math:`(\text{batch},)`.
+            log_Z: Partition values, shape :math:`(\text{batch},)`.
+            ring_checkpoints: Shape :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+            checkpoint_interval: Interval from forward pass.
+            proj_start: Optional boundary scores :math:`(\text{batch}, T, C)`.
+            proj_end: Optional boundary scores :math:`(\text{batch}, T, C)`.
 
         Returns:
-            Tensor: Boundary marginals of shape :math:`(\text{batch}, T)`.
-                Each value represents the probability that a segment starts
-                at that position.
-
-        .. note::
-            Requires CUDA and Triton. For CPU computation, use
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`.
-
-        Example::
-
-            >>> # Setup (on CUDA)
-            >>> cum_scores = torch.zeros(2, 101, 4, device='cuda')
-            >>> cum_scores[:, 1:] = torch.cumsum(torch.randn(2, 100, 4, device='cuda'), dim=1)
-            >>> transition = torch.randn(4, 4, device='cuda')
-            >>> duration_bias = torch.randn(10, 4, device='cuda')  # K=10
-            >>> lengths = torch.tensor([100, 80], device='cuda')
-            >>> # Forward pass to get checkpoints
-            >>> log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
-            ...     cum_scores, transition, duration_bias, lengths, K=10
-            ... )
-            >>> # Compute boundary marginals
-            >>> marginals = launch_streaming_triton_marginals(
-            ...     cum_scores, transition, duration_bias, lengths,
-            ...     log_Z, ring_ckpts, interval
-            ... )
-            >>> marginals.shape
-            torch.Size([2, 100])
-
-        See Also:
-            :func:`launch_streaming_triton_backward`: Full backward pass with gradients
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
-                PyTorch reference implementation (CPU compatible)
+            Boundary marginals of shape :math:`(\text{batch}, T)`.
         """
         batch = cum_scores.shape[0]
         # Use ones for grad_output since we only want marginals, not scaled gradients

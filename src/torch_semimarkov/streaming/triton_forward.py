@@ -1,19 +1,9 @@
 r"""Triton forward kernels for streaming Semi-CRF.
 
-This module contains the Triton kernels for the forward pass (log and max semiring)
-and the launcher function that allocates buffers and dispatches the kernels.
-
-The kernels implement streaming edge computation where edge potentials are
-computed on-the-fly from cumulative scores via prefix-sum decomposition:
+Edge potentials computed on-the-fly via prefix-sum:
 
 .. math::
-    \text{edge}[c_{\text{dst}}, c_{\text{src}}] =
-    (\text{cum\_scores}[t+k, c_{\text{dst}}] - \text{cum\_scores}[t, c_{\text{dst}}])
-    + \text{duration\_bias}[k, c_{\text{dst}}]
-    + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
-
-Functions:
-    launch_streaming_triton_kernel: Main entry point for launching Triton forward kernels.
+    \text{edge} = (\text{cum}[t+k] - \text{cum}[t]) + \text{dur\_bias}[k] + \text{transition}
 """
 
 import torch
@@ -34,28 +24,7 @@ except ImportError:
 
 
 def _next_power_of_2(n: int) -> int:
-    r"""_next_power_of_2(n) -> int
-
-    Compute the smallest power of 2 greater than or equal to n.
-
-    Used for padding tensor dimensions to powers of 2, which is required
-    for efficient Triton kernel execution with vectorized loads.
-
-    Args:
-        n (int): Input value (must be positive for meaningful result).
-
-    Returns:
-        int: Smallest power of 2 :math:`\geq n`. Returns 1 for :math:`n \leq 0`.
-
-    Examples::
-
-        >>> _next_power_of_2(5)
-        8
-        >>> _next_power_of_2(8)
-        8
-        >>> _next_power_of_2(24)
-        32
-    """
+    """Smallest power of 2 >= n. Returns 1 for n <= 0."""
     if n <= 0:
         return 1
     if n & (n - 1) == 0:
@@ -67,8 +36,7 @@ def _next_power_of_2(n: int) -> int:
 
 
 if HAS_TRITON:
-    # NOTE: @triton.autotune removed - corrupts ring buffer during multi-config benchmarking.
-    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
+
     @triton.jit
     def semi_crf_streaming_scan_kernel(
         # Inputs
@@ -118,21 +86,9 @@ if HAS_TRITON:
         stride_ckpt_k,
         stride_ckpt_c,
     ):
-        r"""Streaming Semi-CRF forward scan with on-the-fly edge computation (log semiring).
+        """Forward scan with on-the-fly edge computation (log semiring).
 
-        This Triton kernel computes the forward pass of the Semi-CRF using logsumexp
-        reductions. Edge potentials are computed on-the-fly from cumulative scores:
-
-        .. code-block:: text
-
-            edge[c_dst, c_src] = (cum_scores[t+k, c_dst] - cum_scores[t, c_dst])
-                               + duration_bias[k, c_dst]
-                               + transition[c_src, c_dst]
-
-        Memory: Uses a ring buffer for alpha values with :math:`O(KC)` memory.
-        Saves ring buffer checkpoints at regular intervals for backward pass.
-
-        One program is launched per batch element (grid size = batch_size).
+        Memory: O(KC) ring buffer. One program per batch element.
         """
         NEG_INF: tl.constexpr = -1e9
 
@@ -209,9 +165,7 @@ if HAS_TRITON:
                     other=NEG_INF,
                 )  # (C_PAD,) - alpha[start_pos, c_src]
 
-                # === Compute edge block on-the-fly (prefix-sum) ===
-
-                # Load cum_scores[t, :] and cum_scores[start_pos, :]
+                # Compute edge block on-the-fly (prefix-sum)
                 cum_end = tl.load(
                     cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
                     mask=active & k_valid & c_mask,
@@ -224,8 +178,7 @@ if HAS_TRITON:
                     other=0.0,
                 )  # (C_PAD,)
 
-                # Content score = cum_scores[t, c_dst] - cum_scores[start, c_dst]
-                content_score = cum_end - cum_start  # (C_PAD,)
+                content_score = cum_end - cum_start
 
                 # Load duration bias
                 # Use min(k, K-1) to handle K=1 case: k=1 maps to index 0
@@ -272,11 +225,8 @@ if HAS_TRITON:
                         other=0.0,
                     )  # (C_PAD, C_PAD) - transition[k].T
 
-                edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
-
-                # === Compute scores and reduction ===
-                # scores[c_dst, c_src] = alpha_prev[c_src] + edge[c_dst, c_src]
-                scores = alpha_prev[None, :] + edge_block  # (C_PAD, C_PAD)
+                edge_block = segment_score[:, None] + transition_block
+                scores = alpha_prev[None, :] + edge_block
 
                 # Mask out invalid entries
                 scores = tl.where(c_mask_2d, scores, NEG_INF)
@@ -399,15 +349,7 @@ if HAS_TRITON:
         stride_ckpt_k,
         stride_ckpt_c,
     ):
-        r"""Streaming Semi-CRF forward scan with max semiring (Viterbi decoding).
-
-        Same structure as :func:`semi_crf_streaming_scan_kernel` but uses max
-        instead of logsumexp for reductions. This implements the Viterbi algorithm
-        for finding the most likely segmentation.
-
-        See :func:`semi_crf_streaming_scan_kernel` for detailed documentation of
-        parameters and the edge computation formula.
-        """
+        """Forward scan with max semiring (Viterbi). Same structure as log kernel."""
         NEG_INF: tl.constexpr = -1e9
 
         batch_idx = tl.program_id(0)
@@ -620,16 +562,7 @@ if HAS_TRITON:
         stride_bp_t,
         stride_bp_c,
     ):
-        r"""Streaming Semi-CRF forward scan with max semiring and backpointer tracking.
-
-        Same as :func:`semi_crf_streaming_scan_kernel_max` but also outputs
-        backpointers for O(T) traceback during Viterbi decoding.
-
-        Additional outputs:
-            bp_k: (batch, T, C) - best duration k for each (t, c_dest)
-            bp_c: (batch, T, C) - best source label c_src for each (t, c_dest)
-            final_labels: (batch,) - argmax of final alpha (best final label)
-        """
+        """Max semiring with backpointer tracking for O(T) traceback."""
         NEG_INF: tl.constexpr = -1e9
 
         batch_idx = tl.program_id(0)
@@ -812,41 +745,22 @@ if HAS_TRITON:
         num_warps: int = 4,
         validate_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, int]
-
-        Launch the streaming Triton kernel with proper buffer allocation.
-
-        This function allocates the required buffers (ring buffer, checkpoints)
-        and dispatches the appropriate Triton kernel based on the semiring.
+        """Launch Triton forward kernel with buffer allocation.
 
         Args:
-            cum_scores (Tensor): Cumulative projected scores of shape
-                :math:`(\text{batch}, T+1, C)`.
-            transition (Tensor): Transition scores of shape :math:`(C, C)` for
-                static transitions, or :math:`(K, C, C)` for duration-dependent.
-            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            K (int): Maximum segment duration.
-            semiring (str, optional): ``"log"`` or ``"max"``. Default: ``"log"``
-            checkpoint_interval (int, optional): Interval for saving ring buffer.
-                If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
-            proj_start (Tensor, optional): Start boundary scores of shape
-                :math:`(\text{batch}, T, C)`. Default: ``None``
-            proj_end (Tensor, optional): End boundary scores of shape
-                :math:`(\text{batch}, T, C)`. Default: ``None``
-            num_warps (int, optional): Number of warps per block for Triton kernel.
-                Higher values increase parallelism but also register pressure.
-                Recommended range: 2-8. Default: ``4``
-            validate_cache (bool, optional): If True, validate Triton cache
-                consistency and warn on config changes. Default: ``True``
+            cum_scores: Shape (batch, T+1, C).
+            transition: Shape (C, C) or (K, C, C).
+            duration_bias: Shape (K, C).
+            lengths: Shape (batch,).
+            K: Max segment duration.
+            semiring: "log" or "max".
+            checkpoint_interval: Ring buffer save interval. Default: sqrt(T*K).
+            proj_start, proj_end: Optional boundary scores (batch, T, C).
+            num_warps: Warps per block (2-8).
+            validate_cache: Validate Triton cache.
 
         Returns:
-            tuple[Tensor, Tensor, int]: Tuple of:
-                - **partition** (Tensor): Partition function values of shape
-                  :math:`(\text{batch},)`.
-                - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
-                  :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
-                - **checkpoint_interval** (int): Actual interval used.
+            (partition, ring_checkpoints, checkpoint_interval)
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
@@ -874,7 +788,6 @@ if HAS_TRITON:
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
 
-        # Determine if duration-dependent transitions (Phase 4A)
         has_duration_transitions = transition.ndim == 3
 
         # Ensure inputs are contiguous
@@ -988,38 +901,10 @@ if HAS_TRITON:
         num_warps: int = 4,
         validate_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        r"""Launch Triton max kernel with backpointer tracking for Viterbi decoding.
-
-        This function launches the backpointer-enabled max kernel for O(T) traceback.
-
-        Args:
-            cum_scores (Tensor): Cumulative projected scores of shape
-                :math:`(\text{batch}, T+1, C)`.
-            transition (Tensor): Transition scores of shape :math:`(C, C)` for
-                static transitions, or :math:`(K, C, C)` for duration-dependent.
-            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            K (int): Maximum segment duration.
-            checkpoint_interval (int, optional): Interval for saving ring buffer.
-                If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
-            proj_start (Tensor, optional): Start boundary scores. Default: ``None``
-            proj_end (Tensor, optional): End boundary scores. Default: ``None``
-            num_warps (int, optional): Number of warps per block for Triton kernel.
-                Higher values increase parallelism but also register pressure.
-                Recommended range: 2-8. Default: ``4``
-            validate_cache (bool, optional): If True, validate Triton cache
-                consistency and warn on config changes. Default: ``True``
+        """Launch max kernel with backpointer tracking for O(T) traceback.
 
         Returns:
-            tuple[Tensor, Tensor, Tensor, Tensor]: Tuple of:
-                - **viterbi_scores** (Tensor): Best path scores of shape
-                  :math:`(\text{batch},)`.
-                - **bp_k** (Tensor): Best duration for each (t, c_dest) of shape
-                  :math:`(\text{batch}, T, C)`.
-                - **bp_c** (Tensor): Best source label for each (t, c_dest) of shape
-                  :math:`(\text{batch}, T, C)`.
-                - **final_labels** (Tensor): Best final label of shape
-                  :math:`(\text{batch},)`.
+            (viterbi_scores, bp_k, bp_c, final_labels)
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
@@ -1156,29 +1041,9 @@ if HAS_TRITON:
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        r"""Triton-accelerated Viterbi forward pass with backpointer tracking.
+        """Triton Viterbi with backpointers.
 
-        This is the GPU-accelerated equivalent of
-        :func:`semi_crf_streaming_viterbi_with_backpointers` from pytorch_reference.py.
-
-        Args:
-            cum_scores (Tensor): Cumulative projected scores of shape
-                :math:`(\text{batch}, T+1, C)`.
-            transition (Tensor): Transition scores of shape :math:`(C, C)` or
-                :math:`(K, C, C)`.
-            duration_bias (Tensor): Duration bias of shape :math:`(K, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            K (int): Maximum segment duration.
-            proj_start (Tensor, optional): Start boundary scores. Default: ``None``
-            proj_end (Tensor, optional): End boundary scores. Default: ``None``
-
-        Returns:
-            tuple[Tensor, Tensor, Tensor, Tensor]: Same as
-                :func:`semi_crf_streaming_viterbi_with_backpointers`:
-                - **viterbi_scores** (Tensor): Best path scores ``(batch,)``.
-                - **bp_k** (Tensor): Best durations ``(batch, T, C)``.
-                - **bp_c** (Tensor): Best source labels ``(batch, T, C)``.
-                - **final_labels** (Tensor): Best final labels ``(batch,)``.
+        Returns: (viterbi_scores, bp_k, bp_c, final_labels)
         """
         return launch_streaming_triton_kernel_max_bp(
             cum_scores,

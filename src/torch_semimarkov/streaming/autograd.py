@@ -1,15 +1,4 @@
-r"""Autograd functions and public API for streaming Semi-CRF.
-
-This module contains the :class:`torch.autograd.Function` classes and the main
-entry point for the streaming Semi-CRF API.
-
-Classes:
-    SemiCRFStreaming: Pure PyTorch autograd function for streaming Semi-CRF.
-    SemiCRFStreamingTriton: Triton-accelerated autograd function for streaming Semi-CRF.
-
-Functions:
-    semi_crf_streaming_forward: Main entry point for streaming Semi-CRF computation.
-"""
+r"""Autograd functions and public API for streaming Semi-CRF."""
 
 from typing import Optional
 
@@ -32,26 +21,7 @@ except ImportError:
 
 
 class SemiCRFStreaming(torch.autograd.Function):
-    r"""Autograd function for streaming Semi-CRF with on-the-fly edge computation.
-
-    This wraps the forward and backward passes to enable automatic differentiation.
-    Memory usage is :math:`O(KC)` for the ring buffer, independent of sequence length T.
-
-    The forward pass computes:
-
-    .. math::
-        \alpha[t, c] = \bigoplus_{k=1}^{K-1} \bigoplus_{c'} \alpha[t-k, c'] \otimes \text{edge}[t-k, k, c, c']
-
-    where :math:`\oplus` is logsumexp (log semiring) or max (max semiring).
-
-    .. note::
-        This class is used internally by :func:`semi_crf_streaming_forward`.
-        Users should call that function directly rather than using this class.
-
-    See Also:
-        :func:`semi_crf_streaming_forward`: Main entry point for streaming Semi-CRF
-        :class:`SemiCRFStreamingTriton`: Triton-accelerated version
-    """
+    r"""Pure PyTorch autograd function for streaming Semi-CRF. O(KC) memory."""
 
     @staticmethod
     def forward(
@@ -184,27 +154,7 @@ class SemiCRFStreaming(torch.autograd.Function):
 
 
 class SemiCRFStreamingTriton(torch.autograd.Function):
-    r"""Autograd function using Triton forward and backward kernels.
-
-    This class uses custom Triton kernels for both forward and backward passes,
-    providing maximum performance for GPU training. The backward pass uses
-    checkpointing to recompute alpha values, trading compute for memory.
-
-    Memory complexity:
-
-    - Forward: :math:`O(KC)` ring buffer + :math:`O(\frac{T}{S} \times KC)` checkpoints
-    - Backward: :math:`O((S+K) \times C)` alpha buffer + :math:`O(KC)` beta ring
-
-    where :math:`S = \sqrt{T \times K}` is the checkpoint interval.
-
-    .. note::
-        This class is used internally when ``use_triton=True`` and gradients
-        are needed. Users should call :func:`semi_crf_streaming_forward` directly.
-
-    See Also:
-        :class:`SemiCRFStreaming`: Pure PyTorch autograd function
-        :func:`semi_crf_streaming_forward`: Main entry point
-    """
+    r"""Triton-accelerated autograd function for streaming Semi-CRF. O(KC) memory."""
 
     @staticmethod
     def forward(
@@ -217,6 +167,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         semiring: str = "log",
         proj_start: Optional[torch.Tensor] = None,
         proj_end: Optional[torch.Tensor] = None,
+        accum_dtype: torch.dtype = torch.float64,
         num_warps: int = 4,
     ) -> torch.Tensor:
         # Use Triton kernel for forward
@@ -246,6 +197,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         ctx.K = K
         ctx.semiring = semiring
         ctx.checkpoint_interval = checkpoint_interval
+        ctx.accum_dtype = accum_dtype
         ctx.num_warps = num_warps
 
         return partition
@@ -289,6 +241,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
                 grad_output,
                 proj_start=proj_start,
                 proj_end=proj_end,
+                accum_dtype=ctx.accum_dtype,
                 num_warps=ctx.num_warps,
             )
         )
@@ -330,6 +283,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             None,  # semiring
             grad_proj_start,
             grad_proj_end,
+            None,  # accum_dtype
             None,  # num_warps
         )
 
@@ -345,23 +299,12 @@ def semi_crf_streaming_forward(
     proj_end: Optional[torch.Tensor] = None,
     use_triton: bool = True,
     use_compile: bool = False,  # Deprecated, kept for API compatibility
+    accum_dtype: torch.dtype = torch.float64,
     num_warps: int = 4,
 ) -> torch.Tensor:
-    r"""semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K, semiring="log", proj_start=None, proj_end=None, use_triton=True, num_warps=4) -> Tensor
+    r"""Compute Semi-CRF partition function with streaming edge computation.
 
-    Compute Semi-CRF partition function with streaming edge computation.
-
-    This is the main entry point for the streaming API. Edge potentials are
-    computed on-the-fly from cumulative scores, eliminating the need for the
-    full :math:`(\text{batch}, T-1, K, C, C)` edge tensor.
-
-    Memory: :math:`O(KC)` ring buffer, independent of sequence length T.
-    Compute: :math:`O(T \times K \times C^2)` same as standard Semi-CRF.
-
-    Uses custom Triton kernels for optimal performance on GPU:
-
-    - **Inference** (no gradients): Uses custom Triton forward kernel
-    - **Training** (with gradients): Uses custom Triton forward and backward kernels
+    O(KC) memory (ring buffer), O(T×K×C²) compute. Uses Triton kernels on GPU.
 
     .. warning::
         ``cum_scores`` **MUST** be float32 for numerical stability at T > 100K.
@@ -387,6 +330,9 @@ def semi_crf_streaming_forward(
             :math:`(\text{batch}, T, C)`. Default: ``None``
         use_triton (bool, optional): If ``True``, use Triton kernels when available.
             Default: ``True``
+        accum_dtype (torch.dtype, optional): Dtype for gradient accumulation in backward.
+            Use ``torch.float64`` (default) for numerical stability at batch >= 128.
+            Use ``torch.float32`` for lower memory at batch <= 64.
         num_warps (int, optional): Number of warps per block for Triton kernels.
             Higher values increase parallelism but also register pressure.
             Recommended range: 2-8. Default: ``4``
@@ -425,10 +371,6 @@ def semi_crf_streaming_forward(
         ... )
         >>> partition.shape
         torch.Size([2])
-
-    See Also:
-        :class:`~torch_semimarkov.SemiMarkov`: Pre-computed edge tensor API
-        :func:`compute_edge_block_streaming`: On-the-fly edge computation helper
     """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
@@ -439,8 +381,6 @@ def semi_crf_streaming_forward(
     T = T_plus_1 - 1
     validate_lengths(lengths, T, batch_size=batch)
 
-    # Check if Triton is available and applicable
-    # Note: As of Phase 4B, Triton kernels now support boundary projections
     can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 
     # Determine if gradients are needed
@@ -455,7 +395,7 @@ def semi_crf_streaming_forward(
     if needs_grad:
         # Training path
         if can_use_triton:
-            # Use Triton forward + Triton backward kernels (now supports boundaries)
+            # Use Triton forward + Triton backward kernels
             return SemiCRFStreamingTriton.apply(
                 cum_scores,
                 transition,
@@ -465,6 +405,7 @@ def semi_crf_streaming_forward(
                 semiring,
                 proj_start,
                 proj_end,
+                accum_dtype,
                 num_warps,
             )
         else:
@@ -482,7 +423,7 @@ def semi_crf_streaming_forward(
     else:
         # Inference path (no gradients)
         if can_use_triton:
-            # Use fast custom Triton kernel (now supports boundaries)
+            # Use fast custom Triton kernel
             partition, _, _ = launch_streaming_triton_kernel(
                 cum_scores,
                 transition,

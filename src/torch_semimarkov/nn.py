@@ -1,25 +1,6 @@
 r"""Neural network modules for Semi-Markov CRF.
 
-This module provides :class:`torch.nn.Module` wrappers around the streaming Semi-CRF
-kernels, making them easy to integrate with PyTorch Lightning and other training
-frameworks.
-
-Classes:
-    :class:`SemiMarkovCRFHead`: CRF head for sequence labeling.
-
-For clinical applications requiring boundary uncertainty or focused learning,
-see :class:`~torch_semimarkov.uncertainty.UncertaintySemiMarkovCRFHead` which
-extends this class with uncertainty methods.
-
-Examples::
-
-    >>> from torch_semimarkov import SemiMarkovCRFHead
-    >>> model = SemiMarkovCRFHead(num_classes=5, max_duration=100, hidden_dim=64)
-    >>> result = model.forward(hidden, lengths)
-
-See Also:
-    :mod:`torch_semimarkov.uncertainty`: Uncertainty quantification module
-    :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`: Streaming API
+Provides :class:`torch.nn.Module` wrappers around streaming Semi-CRF kernels.
 """
 
 from typing import Optional, Union
@@ -86,6 +67,11 @@ class SemiMarkovCRFHead(nn.Module):
             - A :class:`~torch_semimarkov.duration.DurationDistribution` instance
 
             Default: ``None`` (uses learned duration bias)
+        edge_memory_threshold (float, optional): Memory threshold in bytes for
+            switching to streaming backend. Default: ``8e9`` (8GB)
+        accum_dtype (torch.dtype, optional): Dtype for gradient accumulation in
+            backward pass. Use ``torch.float64`` (default) for numerical stability
+            at batch >= 128. Use ``torch.float32`` for lower memory at batch <= 64.
         num_warps (int, optional): Number of warps per block for Triton kernels.
             Higher values increase parallelism but also register pressure.
             Recommended range: 2-8. Default: ``4``
@@ -101,18 +87,7 @@ class SemiMarkovCRFHead(nn.Module):
         duration_bias: Returns the current duration bias tensor of shape :math:`(K, C)`.
 
     Transition Matrix Convention:
-        The transition parameter has shape :math:`(C, C)` with indexing:
-
-        - ``transition[i, j]`` = score for transitioning FROM label ``i`` TO label ``j``
-        - Convention: ``(source, destination)`` ordering
-
-        When building edge potentials internally, the matrix is transposed::
-
-            edge[t, k, c_dest, c_src] = content[c_dest] + dur_bias[k, c_dest]
-                                      + transition[c_src, c_dest]
-
-        This matches the standard CRF transition convention used in the literature.
-            This is a property for backward compatibility - internally uses ``duration_dist()``.
+        ``transition[i, j]`` = score for transitioning FROM label ``i`` TO label ``j``.
 
     Examples::
 
@@ -143,13 +118,7 @@ class SemiMarkovCRFHead(nn.Module):
         >>> loss.backward()
 
     .. note::
-        For numerical stability at T > 100K, all computations are done in float32.
-        When using with PyTorch Lightning, set ``precision=32`` in the trainer.
-
-    See Also:
-        :class:`UncertaintySemiMarkovCRFHead`: Extended version with uncertainty methods
-        :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`: Underlying API
-        :mod:`torch_semimarkov.duration`: Available duration distributions
+        For T > 100K, use float32 precision for numerical stability.
     """
 
     def __init__(
@@ -160,12 +129,14 @@ class SemiMarkovCRFHead(nn.Module):
         init_scale: float = 0.1,
         duration_distribution: Optional[Union[str, DurationDistribution]] = None,
         edge_memory_threshold: float = 8e9,
+        accum_dtype: torch.dtype = torch.float64,
         num_warps: int = 4,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.max_duration = max_duration
         self.edge_memory_threshold = edge_memory_threshold
+        self.accum_dtype = accum_dtype
         self.num_warps = num_warps
 
         # CRF parameters
@@ -188,38 +159,11 @@ class SemiMarkovCRFHead(nn.Module):
 
     @property
     def duration_bias(self) -> Tensor:
-        r"""duration_bias() -> Tensor
-
-        Duration bias tensor for segment scoring.
-
-        Returns the duration bias of shape :math:`(K, C)` where ``K`` is the
-        maximum duration and ``C`` is the number of classes. This property
-        provides backward compatibility - internally calls ``self.duration_dist()``.
-
-        Returns:
-            Tensor: Duration bias tensor of shape :math:`(K, C)`.
-        """
+        """Duration bias tensor of shape :math:`(K, C)`."""
         return self.duration_dist()
 
     def _should_use_streaming(self, T: int) -> bool:
-        r"""_should_use_streaming(T) -> bool
-
-        Determine whether to use streaming backend based on memory heuristics.
-
-        The streaming backend uses :math:`O(KC)` memory (ring buffer), while the
-        exact backend requires :math:`O(TKC^2)` memory (edge tensor). This method
-        returns ``True`` when the edge tensor would exceed the memory threshold.
-
-        Args:
-            T (int): Sequence length.
-
-        Returns:
-            bool: ``True`` if streaming backend should be used, ``False`` for exact.
-
-        .. note::
-            The default threshold is 8GB. Streaming is recommended when
-            :math:`T \times K \times C^2 \times 4 > 8 \times 10^9` bytes.
-        """
+        """Return True if edge tensor would exceed memory threshold."""
         K = self.max_duration
         C = self.num_classes
 
@@ -229,29 +173,7 @@ class SemiMarkovCRFHead(nn.Module):
         return edge_tensor_bytes > self.edge_memory_threshold
 
     def _select_backend(self, T: int, semiring: str, use_triton: bool) -> tuple[str, bool]:
-        r"""_select_backend(T, semiring, use_triton) -> tuple[str, bool]
-
-        Select backend based on memory heuristics and semiring requirements.
-
-        The streaming backend supports only ``"log"`` and ``"max"`` semirings.
-        Other semirings (e.g., :class:`~torch_semimarkov.semirings.EntropySemiring`)
-        require the exact backend which materializes the full edge tensor.
-
-        Args:
-            T (int): Sequence length.
-            semiring (str): Semiring name (``"log"``, ``"max"``, or others).
-            use_triton (bool): Whether Triton acceleration is requested.
-
-        Returns:
-            tuple[str, bool]: A tuple containing:
-
-            - **backend_type** (str): Either ``"streaming"`` or ``"exact"``.
-            - **use_triton_final** (bool): Whether to use Triton (only for streaming).
-
-        Raises:
-            ValueError: If semiring requires exact backend but edge tensor exceeds
-                memory threshold.
-        """
+        """Select backend based on memory and semiring requirements."""
         # Semirings beyond log/max require exact backend
         if semiring not in ("log", "max"):
             if self._should_use_streaming(T):
@@ -270,34 +192,7 @@ class SemiMarkovCRFHead(nn.Module):
             return "exact", False
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
-        r"""_build_edge_tensor(scores, lengths) -> Tensor
-
-        Build the full edge potential tensor for exact inference.
-
-        Constructs edge potentials for all valid ``(position, duration, label_src, label_dst)``
-        combinations. Each edge represents a segment starting at position ``n`` with
-        duration ``k`` transitioning from ``c_src`` to ``c_dst``:
-
-        .. math::
-            \text{edge}[n, k, c_{\text{dst}}, c_{\text{src}}] =
-            \text{content}[n, k, c_{\text{dst}}] + \text{duration\_bias}[k, c_{\text{dst}}]
-            + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
-
-        Args:
-            scores (Tensor): Projected scores of shape :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-
-        Returns:
-            Tensor: Edge potentials of shape :math:`(\text{batch}, T, K, C, C)`.
-
-        .. warning::
-            Memory complexity is :math:`O(T \times K \times C^2)`. For genome-scale
-            sequences (:math:`T > 10K`), use the streaming backend instead.
-
-        .. note::
-            The edge tensor has ``T`` positions (not ``T-1``) to match the streaming
-            API which can start segments at any position ``0`` to ``T-1``.
-        """
+        """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
         batch, T, C = scores.shape
         K = self.max_duration
 
@@ -333,29 +228,7 @@ class SemiMarkovCRFHead(nn.Module):
         return edge
 
     def _forward_exact(self, scores: Tensor, lengths: Tensor, semiring: str) -> Tensor:
-        r"""_forward_exact(scores, lengths, semiring) -> Tensor
-
-        Compute partition function via exact edge tensor inference.
-
-        Uses :class:`~torch_semimarkov.SemiMarkov` with full semiring support.
-        Materializes the complete edge tensor which enables arbitrary semirings
-        but has :math:`O(TKC^2)` memory complexity.
-
-        Args:
-            scores (Tensor): Projected scores of shape :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            semiring (str): Semiring name (``"log"`` or ``"max"``).
-
-        Returns:
-            Tensor: Partition function values of shape :math:`(\text{batch},)`.
-
-        .. warning::
-            Requires materializing the full edge tensor. Will OOM for large ``T``.
-            Use the streaming backend for genome-scale sequences.
-
-        See Also:
-            :class:`~torch_semimarkov.SemiMarkov`: Underlying inference engine
-        """
+        """Compute partition via exact edge tensor. O(TKC²) memory."""
         from .semimarkov import SemiMarkov
         from .semirings import LogSemiring, MaxSemiring
 
@@ -380,9 +253,7 @@ class SemiMarkovCRFHead(nn.Module):
         use_triton: bool = True,
         backend: str = "auto",
     ) -> dict:
-        r"""forward(hidden_states, lengths, use_triton=True, backend="auto") -> dict
-
-        Compute partition function from encoder hidden states.
+        r"""Compute partition function from encoder hidden states.
 
         Args:
             hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
@@ -463,6 +334,7 @@ class SemiMarkovCRFHead(nn.Module):
                 self.max_duration,
                 semiring="log",
                 use_triton=use_triton_final,
+                accum_dtype=self.accum_dtype,
                 num_warps=self.num_warps,
             )
         else:
@@ -480,11 +352,7 @@ class SemiMarkovCRFHead(nn.Module):
         backend: str = "auto",
         reduction: str = "mean",
     ) -> Tensor:
-        r"""compute_loss(hidden_states, lengths, labels, use_triton=True, backend="auto", reduction="mean") -> Tensor
-
-        Compute negative log-likelihood loss.
-
-        The NLL loss is computed as:
+        r"""Compute negative log-likelihood loss.
 
         .. math::
             \text{NLL} = \log Z - \text{score}(y^*)
@@ -532,38 +400,13 @@ class SemiMarkovCRFHead(nn.Module):
         return nll
 
     def parameter_penalty(self, p: float = 2.0) -> Tensor:
-        r"""parameter_penalty(p=2.0) -> Tensor
-
-        Compute Lp penalty on CRF parameters to prevent gradient explosion.
-
-        Semi-Markov CRFs have more complex gradient dynamics than standard CRFs
-        due to: (1) edge potentials that scale with segment duration, (2) more
-        learnable parameters (duration_bias, possibly duration-dependent transitions),
-        and (3) partition functions with O(T × K × C²) terms vs O(T × C²).
-
-        Without regularization, these parameters can drift to extreme values over
-        many training epochs, causing numerical overflow in the backward pass
-        marginal computation (exp of extreme log-marginals).
-
-        This method returns a penalty term that should be added to the loss:
-
-        .. math::
-            \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{NLL}} + \lambda \cdot \text{penalty}
-
-        where :math:`\lambda` is a hyperparameter (typical values: 0.001 to 0.1).
+        r"""Compute Lp penalty on CRF parameters.
 
         Args:
-            p (float): The norm order. Default is 2.0 (L2 regularization).
-                Use p=1.0 for L1 (sparse) regularization.
+            p (float, optional): Norm order (2.0 for L2, 1.0 for L1). Default: ``2.0``
 
         Returns:
-            Tensor: Scalar penalty value (sum of Lp norms of CRF parameters).
-
-        Example:
-            >>> crf = SemiMarkovCRFHead(num_classes=10, max_duration=30, hidden_dim=256)
-            >>> loss = crf.compute_loss(hidden, lengths, labels)
-            >>> total_loss = loss + 0.01 * crf.parameter_penalty()
-            >>> total_loss.backward()
+            Tensor: Scalar penalty :math:`\|W_{\text{trans}}\|_p^p + \|W_{\text{dur}}\|_p^p`.
         """
         penalty = self.transition.norm(p=p).pow(p)
         penalty = penalty + self.duration_bias.norm(p=p).pow(p)
@@ -575,24 +418,7 @@ class SemiMarkovCRFHead(nn.Module):
         labels: Tensor,
         lengths: Tensor,
     ) -> Tensor:
-        r"""_score_gold(cum_scores, labels, lengths) -> Tensor
-
-        Score the gold segmentation.
-
-        Extracts segments from per-position labels (where label changes indicate
-        segment boundaries) and computes:
-
-        .. math::
-            \text{score} = \sum_i \text{content}_i + \sum_i \text{duration\_bias}_i + \sum_i \text{transition}_i
-
-        Args:
-            cum_scores (Tensor): Cumulative scores of shape :math:`(\text{batch}, T+1, C)`.
-            labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-
-        Returns:
-            Tensor: Gold sequence scores of shape :math:`(\text{batch},)`.
-        """
+        """Score the gold segmentation. Returns shape (batch,)."""
         return score_gold_vectorized(
             cum_scores=cum_scores,
             labels=labels,
@@ -609,28 +435,16 @@ class SemiMarkovCRFHead(nn.Module):
         use_triton: bool = True,
         backend: str = "auto",
     ) -> Tensor:
-        r"""decode(hidden_states, lengths, use_triton=True, backend="auto") -> Tensor
-
-        Decode best segmentation using Viterbi algorithm.
-
-        Computes the maximum score over all valid segmentations using the
-        max semiring (Viterbi decoding).
+        r"""Compute Viterbi (max) score without path reconstruction.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
-                or :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
-            backend (str, optional): Backend selection mode: ``"auto"``, ``"streaming"``,
-                or ``"exact"``. Default: ``"auto"``
+            hidden_states (Tensor): Shape :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
+            lengths (Tensor): Shape :math:`(\text{batch},)`.
+            use_triton (bool, optional): Use Triton kernels. Default: ``True``
+            backend (str, optional): ``"auto"``, ``"streaming"``, or ``"exact"``. Default: ``"auto"``
 
         Returns:
-            Tensor: Best score (max over all segmentations) of shape :math:`(\text{batch},)`.
-
-        .. note::
-            This returns the score, not the actual segmentation. For the full
-            segmentation path, use the :class:`~torch_semimarkov.SemiMarkov` class
-            with :class:`~torch_semimarkov.semirings.MaxSemiring` and extract via marginals.
+            Tensor: Best segmentation scores of shape :math:`(\text{batch},)`.
         """
         # Input validation
         validate_hidden_states(hidden_states)
@@ -676,6 +490,7 @@ class SemiMarkovCRFHead(nn.Module):
                 self.max_duration,
                 semiring="max",
                 use_triton=use_triton_final,
+                accum_dtype=self.accum_dtype,
                 num_warps=self.num_warps,
             )
         else:
@@ -691,40 +506,18 @@ class SemiMarkovCRFHead(nn.Module):
         max_traceback_length: int = 10000,
         use_triton: bool = True,
     ) -> ViterbiResult:
-        r"""decode_with_traceback(hidden_states, lengths, max_traceback_length=10000, use_triton=True) -> ViterbiResult
-
-        Decode best segmentation with full path reconstruction.
-
-        Computes the maximum-scoring segmentation using Viterbi algorithm
-        and returns both the score and the actual segment boundaries.
+        r"""Viterbi decode with path reconstruction.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape
-                :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            max_traceback_length (int, optional): Maximum sequence length for
-                traceback. Sequences longer than this will have empty segment
-                lists (score is still computed). Default: ``10000``
-            use_triton (bool, optional): Whether to use Triton kernels for the
-                forward pass. Default: ``True``
+            hidden_states (Tensor): Shape :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
+            lengths (Tensor): Shape :math:`(\text{batch},)`.
+            max_traceback_length (int, optional): Maximum T for traceback. Longer
+                sequences return empty segment lists. Default: ``10000``
+            use_triton (bool, optional): Use Triton kernels for forward pass. Default: ``True``
 
         Returns:
-            ViterbiResult: Named tuple containing:
-
-            - **scores** (Tensor): Best scores of shape :math:`(\text{batch},)`.
-            - **segments** (List[List[Segment]]): Per-batch segment lists.
-
-        .. note::
-            For very long sequences (T > max_traceback_length), traceback requires
-            :math:`O(T \times C)` memory which may not be feasible. In such cases, the
-            returned segments list will be empty but scores are still computed.
-
-        Examples::
-
-            >>> result = crf.decode_with_traceback(hidden_states, lengths)
-            >>> print(f"Score: {result.scores[0].item():.2f}")
-            >>> for seg in result.segments[0]:
-            ...     print(f"  [{seg.start}, {seg.end}] label={seg.label}")
+            ViterbiResult: Named tuple with ``scores`` :math:`(\text{batch},)` and
+            ``segments`` (list of list of :class:`Segment`).
         """
         # Input validation
         validate_hidden_states(hidden_states)
@@ -753,12 +546,8 @@ class SemiMarkovCRFHead(nn.Module):
         needs_traceback = lengths <= max_traceback_length
         any_needs_traceback = needs_traceback.any().item()
 
-        # Use fast backpointer-based traceback when possible
         if any_needs_traceback:
-            # NOTE: Triton backpointer kernel disabled due to memory corruption bug
-            # that causes NaN in subsequent training forward passes (see commit 256db2a).
-            # Using PyTorch reference implementation until root cause is fixed.
-            can_use_triton = False
+            can_use_triton = False  # Triton backpointer disabled (memory corruption)
 
             # Get max scores AND backpointers in a single forward pass
             if can_use_triton:
@@ -797,6 +586,7 @@ class SemiMarkovCRFHead(nn.Module):
                 self.max_duration,
                 semiring="max",
                 use_triton=use_triton,
+                accum_dtype=self.accum_dtype,
                 num_warps=self.num_warps,
             )
             all_segments = [[] for _ in range(batch)]
@@ -808,26 +598,7 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores: Tensor,
         seq_len: int,
     ) -> list[Segment]:
-        r"""_traceback_single(cum_scores, seq_len) -> list[Segment]
-
-        Perform Viterbi traceback to recover the optimal segmentation path.
-
-        Runs the forward pass with backpointer storage, then traces back from
-        the final position to reconstruct the optimal segmentation.
-
-        Args:
-            cum_scores (Tensor): Cumulative scores of shape :math:`(1, T+1, C)`.
-            seq_len (int): Actual sequence length.
-
-        Returns:
-            list[Segment]: List of :class:`Segment` objects forming the optimal
-            segmentation, ordered from start to end.
-
-        .. note::
-            This method allocates :math:`O(T \times C)` memory for backpointers.
-            For very long sequences, use :meth:`decode` which returns only the
-            score without traceback.
-        """
+        """Viterbi traceback for single sequence. O(TC) memory."""
         device = cum_scores.device
         C = self.num_classes
         K = self.max_duration
@@ -911,21 +682,7 @@ class SemiMarkovCRFHead(nn.Module):
         lengths: Tensor,
         cum_scores: Tensor,
     ) -> list[list[Segment]]:
-        r"""Fast traceback using pre-computed backpointers.
-
-        This method performs O(T) traceback instead of O(T*K) recomputation
-        by using backpointers computed during the forward pass.
-
-        Args:
-            bp_k (Tensor): Backpointer durations of shape (batch, T, C).
-            bp_c (Tensor): Backpointer source labels of shape (batch, T, C).
-            final_labels (Tensor): Best final label for each batch of shape (batch,).
-            lengths (Tensor): Sequence lengths of shape (batch,).
-            cum_scores (Tensor): Cumulative scores for segment score computation.
-
-        Returns:
-            list[list[Segment]]: Per-batch segment lists.
-        """
+        """O(T) traceback using pre-computed backpointers."""
         batch = lengths.shape[0]
         all_segments: list[list[Segment]] = []
 
@@ -977,27 +734,7 @@ class SemiMarkovCRFHead(nn.Module):
         label: int,
         prev_label: Optional[int],
     ) -> float:
-        r"""_compute_segment_score(cum_scores, start, end, label, prev_label) -> float
-
-        Compute the score contribution of a single segment.
-
-        The segment score is the sum of content, duration bias, and transition:
-
-        .. math::
-            \text{score} = (\text{cum}[\text{end}+1, c] - \text{cum}[\text{start}, c])
-            + \text{dur\_bias}[k, c] + \text{trans}[c_{\text{prev}}, c]
-
-        Args:
-            cum_scores (Tensor): Cumulative scores of shape :math:`(T+1, C)`.
-            start (int): Segment start position (inclusive).
-            end (int): Segment end position (inclusive).
-            label (int): Segment label (class index).
-            prev_label (int, optional): Previous segment's label for transition.
-                ``None`` for the first segment.
-
-        Returns:
-            float: Total score contribution of this segment.
-        """
+        """Compute content + duration_bias + transition for a segment."""
         # Content score
         content = (cum_scores[end + 1, label] - cum_scores[start, label]).item()
 
