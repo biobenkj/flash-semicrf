@@ -203,8 +203,9 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        # Verify checkpoint shape
-        expected_num_ckpts = (T + ckpt_interval - 1) // ckpt_interval + 1
+        # Verify checkpoint shape: ceil(T / ckpt_interval) checkpoints
+        # Checkpoints are saved at t=0, ckpt_interval, 2*ckpt_interval, etc.
+        expected_num_ckpts = (T + ckpt_interval - 1) // ckpt_interval
         assert (
             ring_ckpts.shape[1] == expected_num_ckpts
         ), f"Expected {expected_num_ckpts} checkpoints"
