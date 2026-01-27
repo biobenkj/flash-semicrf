@@ -701,6 +701,10 @@ if HAS_TRITON:
 
                                     # Tile statistics: max and sum(exp) over c_dst dimension
                                     max_tile = tl.max(scores_for_beta_tile, axis=0)
+                                    # CRITICAL: Cast to float64 to match accumulator precision.
+                                    # Without this, mixed f32/f64 operations in the online logsumexp
+                                    # cause catastrophic errors (10^9+) with 2+ tiles.
+                                    max_tile = max_tile.to(tl.float64)
                                     # NEG_INF guard: if all inputs are NEG_INF, max would be NEG_INF
                                     # and scores - max = 0, giving exp(0) = 1 (wrong!). Detect and handle.
                                     is_tile_neginf = max_tile < (NEG_INF + 1.0)
@@ -711,6 +715,8 @@ if HAS_TRITON:
                                         axis=0,
                                     )
                                     sum_exp_tile = tl.where(is_tile_neginf, 0.0, sum_exp_tile)
+                                    # CRITICAL: Cast to float64 to match accumulator precision.
+                                    sum_exp_tile = sum_exp_tile.to(tl.float64)
 
                                     # Online update: merge this tile's statistics with running accumulator
                                     m_new = tl.maximum(m_beta_k, max_tile)
