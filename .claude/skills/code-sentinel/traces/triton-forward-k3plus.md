@@ -15,6 +15,27 @@ The Triton forward kernel computes the Semi-CRF partition function on GPU using 
 - `C` = Number of classes/labels
 - `C_PAD` = Padded class count (next power of 2 >= C)
 
+## Active Assumptions
+
+### Mechanically Verified
+
+These are verified automatically via `python3 verify-assumptions.py triton-forward-k3plus`.
+
+| ID | Assumption | Verification |
+|----|------------|--------------|
+| A1 | Ring buffer uses `t % K` write indexing | anchor: RING_BUFFER_WRITE |
+| A2 | NEG_INF guard pattern exists | anchor: NEGINF_GUARD |
+| A3 | Checkpoint save occurs at interval boundaries | anchor: CHECKPOINT_SAVE |
+| A5 | Kernel launched via `launch_streaming_triton_kernel` | anchor: KERNEL_LAUNCH |
+
+### Agent-Verified (on trace load)
+
+These require human/agent judgment when loading the trace.
+
+| ID | Assumption | Verification Guidance |
+|----|------------|----------------------|
+| A4 | C_PAD is power of 2 | Check C_PAD assignment in launcher (~line 881) uses `2 ** math.ceil(math.log2(C))` |
+
 ## Entry Points
 
 | Function | File:Line | Called When |

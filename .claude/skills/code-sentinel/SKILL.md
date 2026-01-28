@@ -5,15 +5,18 @@ description: >
   for Triton/PyTorch backends.
 
   MANDATORY: Invoke this skill BEFORE debugging NaN/Inf, shape mismatches,
-  or modifying autograd logic.
+  modifying autograd logic, or making commits.
 
   Actions:
-  1. Locate active backend via `dispatch-overview.md`.
-  2. Load specific trace (e.g., `triton-forward-k3plus.md`) into context.
-  3. Compare trace "Verified Commit" against current git HEAD.
+  1. Run `./sentinel.py status` to check overall health
+  2. Run `./sentinel.py verify --trace <name>` before providing debugging advice
+  3. Run `./sentinel.py pipeline` before committing changes
+  4. Locate active backend via `dispatch-overview.md`
+  5. Load specific trace into context and verify against current git HEAD
 
   Triggers: "debug semi-markov", "trace execution", "explain backend dispatch",
-  "Triton kernel debug", "NaN", "shape mismatch", "gradient flow", "sentinel"
+  "Triton kernel debug", "NaN", "shape mismatch", "gradient flow", "sentinel",
+  "verify code", "check consistency", "pre-commit", "retrace"
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
@@ -23,37 +26,80 @@ Persistent execution traces ("Sentinels") for torch-semimarkov backends. Prevent
 
 ## Quick Start
 
-1. **Identify the backend**: Check [dispatch-overview.md](traces/dispatch-overview.md)
-2. **Load the trace**: Read the relevant trace document
-3. **Check staleness**: Verify commit anchor matches current code
+```bash
+# Check overall health
+./sentinel.py status
 
-## Staleness Check (ALWAYS DO FIRST)
+# Verify before debugging
+./sentinel.py verify --trace triton-forward-k3plus
 
-Before providing debugging advice, check if the sentinel is stale:
+# Run full pre-commit pipeline
+./sentinel.py pipeline
+
+# Install git hooks
+./sentinel.py install-hooks
+```
+
+## Verification Protocol (ALWAYS EXECUTE FIRST)
+
+### Step 1: Run Verification
 
 ```bash
-# Get current commit for traced file
-git log -1 --format=%h -- src/torch_semimarkov/streaming/triton_forward.py
-
-# Check for uncommitted changes
-git diff --name-only src/torch_semimarkov/streaming/triton_forward.py
-git diff --cached --name-only src/torch_semimarkov/streaming/triton_forward.py
+./sentinel.py verify --trace <trace-name>
 ```
 
-Compare against the "Verified against" commit in the trace header.
+This performs:
+- Commit staleness check (verified hash vs current HEAD)
+- Uncommitted changes detection
+- Anchor verification (pattern -> line number)
+- Assumption verification (mechanical checks)
 
-**If stale, output this EXACT format:**
+### Step 2: Interpret Output
 
+**On success (all verified):**
 ```
-SENTINEL STALE
-Source: triton_forward.py
-Verified: <old_hash> | Current: <new_hash>
-Status: [COMMITTED_CHANGES | UNCOMMITTED_CHANGES | BOTH]
-
-I am now running `git diff` to synchronize my map before providing advice.
+Grounded: triton-forward-k3plus @ 40fe66b ✓
 ```
 
-Then run `git diff <old_hash>..HEAD -- <file>` and update understanding before advising.
+**On failure (drift detected):**
+```
+Grounded: triton-forward-k3plus @ 40fe66b
+  Commit: STALE (COMMITTED_CHANGES)
+    Verified: 40fe66b | Current: abc1234
+  Anchors: 5/7 verified, 2 failed
+    ✗ RING_BUFFER_WRITE: ANCHOR_DRIFT: Expected ~320, found 345 (drift 25 > 20)
+  Assumptions: A1 ✓, A2 ✗, A3 ✓
+
+⚠️  Cannot provide advice until sentinel is updated.
+```
+
+### Step 3: Remediate if Needed
+
+If stale, run diff to synchronize understanding:
+```bash
+./sentinel.py retrace triton-forward-k3plus --diff-only
+```
+
+If anchors drifted, auto-update line numbers:
+```bash
+./sentinel.py retrace triton-forward-k3plus --anchors-only
+```
+
+## Pre-Commit Pipeline
+
+Run before every commit:
+
+```bash
+./sentinel.py pipeline
+
+# Or with automatic test execution
+SENTINEL_RUN_TESTS=1 ./sentinel.py pipeline
+```
+
+Pipeline steps:
+1. **Consistency check** - meta ↔ anchors ↔ traces alignment
+2. **Trace verification** - all sentinels verified
+3. **Test advisory** - suggest tests for changed files
 
 ## Backend Selection Tree
 
@@ -84,83 +130,125 @@ semi_crf_streaming_forward() [autograd.py:474]
 
 ## Failure Mode Routing
 
-| Symptom | Primary Trace | Secondary Trace | Check First |
-|---------|---------------|-----------------|-------------|
-| **NaN in loss** | triton-forward-k3plus.md | dispatch-overview.md | NEG_INF guards |
-| **NaN in backward** | triton-backward-k3plus.md | pytorch-backward-k3plus.md | Partition validation |
-| **Wrong gradients** | triton-backward-k3plus.md | pytorch-backward-k3plus.md | Cross-reference outputs |
-| **OOM on GPU** | triton-backward-k3plus.md | - | Recomputation Logic section |
-| **K=1/K=2 mismatch** | k1-linear-crf.md / k2-fast-path.md | dispatch-overview.md | Dispatch conditions |
-| **Triton vs PyTorch diff** | triton-forward-k3plus.md | pytorch-forward-k3plus.md | Ring buffer indexing |
+| Symptom | Primary Trace | Check First |
+|---------|---------------|-------------|
+| **NaN in loss** | triton-forward-k3plus.md | NEG_INF guards |
+| **NaN in backward** | triton-backward-k3plus.md | Partition validation |
+| **Wrong gradients** | triton-backward-k3plus.md | Cross-reference outputs |
+| **OOM on GPU** | triton-backward-k3plus.md | Recomputation Logic section |
+| **K=1/K=2 mismatch** | k1-linear-crf.md | Dispatch conditions |
+| **Triton vs PyTorch diff** | triton-forward-k3plus.md | Ring buffer indexing |
 
 ## Available Traces
 
 | Trace | Purpose | Source File |
 |-------|---------|-------------|
-| [dispatch-overview.md](traces/dispatch-overview.md) | Backend selection decision tree | autograd.py |
-| [autograd-kernel-interface.md](traces/autograd-kernel-interface.md) | Contract between autograd and Triton | autograd.py |
-| [triton-forward-k3plus.md](traces/triton-forward-k3plus.md) | Triton forward kernel (K>=3, GPU) | triton_forward.py |
-| [triton-backward-k3plus.md](traces/triton-backward-k3plus.md) | Triton backward kernel | triton_backward.py |
-| [pytorch-forward-k3plus.md](traces/pytorch-forward-k3plus.md) | PyTorch reference forward | pytorch_reference.py |
-| [pytorch-backward-k3plus.md](traces/pytorch-backward-k3plus.md) | PyTorch reference backward | pytorch_reference.py |
-| [k1-linear-crf.md](traces/k1-linear-crf.md) | K=1 linear CRF fast path | pytorch_reference.py |
-| [k2-fast-path.md](traces/k2-fast-path.md) | K=2 specialized path | pytorch_reference.py |
+| [dispatch-overview.md](traces/dispatch-overview.md) | Backend selection | autograd.py |
+| [triton-forward-k3plus.md](traces/triton-forward-k3plus.md) | Triton forward (K>=3) | triton_forward.py |
+| [triton-backward-k3plus.md](traces/triton-backward-k3plus.md) | Triton backward | triton_backward.py |
+| [pytorch-forward-k3plus.md](traces/pytorch-forward-k3plus.md) | PyTorch forward | pytorch_reference.py |
+| [pytorch-backward-k3plus.md](traces/pytorch-backward-k3plus.md) | PyTorch backward | pytorch_reference.py |
+| [k1-linear-crf.md](traces/k1-linear-crf.md) | K=1 fast path | pytorch_reference.py |
+| [k2-fast-path.md](traces/k2-fast-path.md) | K=2 fast path | pytorch_reference.py |
+| [non-streaming-backends.md](traces/non-streaming-backends.md) | Non-streaming API | semimarkov.py |
+| [autograd-kernel-interface.md](traces/autograd-kernel-interface.md) | Autograd contract | autograd.py |
 
-## Update Sentinel Action
+## CLI Reference
 
-When a sentinel is stale, update it using this template:
+| Command | Description |
+|---------|-------------|
+| `./sentinel.py status` | Show overall sentinel health |
+| `./sentinel.py verify --trace NAME` | Verify specific trace |
+| `./sentinel.py verify --all` | Verify all traces |
+| `./sentinel.py verify --all --check-consistency` | Verify all with consistency check |
+| `./sentinel.py pipeline` | Run full pre-commit pipeline |
+| `./sentinel.py retrace NAME --diff-only` | Show diff without updating |
+| `./sentinel.py retrace NAME --anchors-only` | Auto-update anchor line numbers |
+| `./sentinel.py install-hooks` | Install git pre-commit hooks |
+| `./sentinel.py report --format json` | Generate JSON report |
+| `./sentinel.py report --format markdown` | Generate Markdown report |
 
-**Preserve these sections VERBATIM** (unless explicitly changed):
-- Critical Invariants
-- Known Issues
-- Linked Tests
+## Exit Codes
 
-**Regenerate from source:**
-- Algorithm Steps (re-trace from code)
-- Data Flow (verify shapes)
-- Numerical Guards (check for new guards)
+| Code | Meaning |
+|------|---------|
+| 0 | All verification passed |
+| 1 | One or more anchors missing |
+| 2 | One or more anchors drifted beyond tolerance |
+| 3 | One or more anchor patterns are ambiguous |
+| 4 | Consistency check failed |
+| 5 | Assumption verification failed |
 
-**Always update:**
-- `Verified against: <new_commit_hash>`
-- Version History: add entry with date + change summary
+## Updating Sentinels
+
+When code changes require sentinel updates:
+
+1. **Update trace markdown first**
+   - Update "Verified against" commit hash
+   - Update Algorithm Steps line references
+   - Preserve Critical Invariants, Known Issues, Linked Tests
+
+2. **Update anchors.yaml** (if patterns changed)
+   ```bash
+   ./sentinel.py retrace <name> --anchors-only
+   ```
+
+3. **Update .sentinel-meta.yaml**
+   - Bump `verified_commit`
+   - Update `last_global_verification`
+
+4. **Commit together**
+   ```bash
+   git add traces/ anchors/ .sentinel-meta.yaml sentinel.py
+   git commit -m "sentinel: update <trace-name> for <change>"
+   ```
 
 ## Symbolic Shape Legend
 
-Used across all traces:
-- `B` = Batch size
-- `T` = Sequence length (time steps)
-- `K` = Maximum segment length
-- `C` = Number of classes/labels
-- `C_PAD` = Padded class count (power of 2 for Triton)
+| Symbol | Meaning |
+|--------|---------|
+| `B` | Batch size |
+| `T` | Sequence length |
+| `K` | Maximum segment length |
+| `C` | Number of classes |
+| `C_PAD` | Padded class count (power of 2) |
 
 ## Domain-Specific Invariants
 
-These must hold across all backends:
-
-| Invariant | Math | Python Check |
-|-----------|------|--------------|
-| Log-partition bounds | Z >= max_y s(x,y) | `assert partition >= viterbi_score` |
-| Probability simplex | sum_c exp(alpha_t^c) <= 1 | `assert alpha.exp().sum(dim=-1) <= 1 + eps` |
-| Padding sentinel | alpha_t^c = -inf for t > T | `assert (alpha[mask] == NEG_INF).all()` |
-| Prefix-sum init | cum_scores[t=0] = 0 | `assert (cum_scores[:, 0, :] == 0).all()` |
-| Ring buffer aliasing | alpha[t] overwrites alpha[t-K] | Ring index: `t % K`, never read after overwrite |
+| Invariant | Check |
+|-----------|-------|
+| Log-partition bounds | `partition >= viterbi_score` |
+| Padding sentinel | `alpha[t] == NEG_INF for t > T` |
+| Prefix-sum init | `cum_scores[:, 0, :] == 0` |
+| Ring buffer aliasing | `alpha[t]` overwrites `alpha[t-K]` |
 
 ## Example Invocations
 
-```
-/code-sentinel                                    # Show this overview
-Trace the Triton forward kernel                   # Load triton-forward-k3plus.md
-Why is K=1 using a different code path?           # Load k1-linear-crf.md
-Debug: NaN in backward pass with K=8              # Load triton-backward trace + debugging workflow
-Update the triton-forward sentinel                # Run Update Sentinel action
+```bash
+# Check health before debugging
+./sentinel.py status
+
+# Trace the Triton forward kernel
+./sentinel.py verify --trace triton-forward-k3plus
+
+# Debug NaN in backward pass
+./sentinel.py verify --trace triton-backward-k3plus
+
+# Pre-commit check
+./sentinel.py pipeline
+
+# Generate CI report
+./sentinel.py report --format json > sentinel-report.json
 ```
 
 ## Files Reference
 
 | File | Purpose |
 |------|---------|
-| `streaming/autograd.py` | Backend dispatch, autograd functions |
-| `streaming/triton_forward.py` | Triton forward kernels |
-| `streaming/triton_backward.py` | Triton backward kernel |
-| `streaming/pytorch_reference.py` | PyTorch reference implementations |
-| `streaming/constants.py` | Shared constants (NEG_INF) |
+| `sentinel.py` | Main CLI orchestrator |
+| `.sentinel-meta.yaml` | Machine-readable sentinel state |
+| `anchors/anchors.yaml` | Pattern -> line number mappings |
+| `anchors/verify-all.py` | Batch anchor verification |
+| `anchors/verify-anchor.sh` | Single anchor verification |
+| `verify-assumptions.py` | Assumption verification |
+| `hooks/pre-commit-*.sh` | Git hook scripts |

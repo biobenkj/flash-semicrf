@@ -1,0 +1,98 @@
+# Code Sentinel Anchor Definitions
+# Pattern-based anchors for verifying trace line references
+# Use optional `after:` field for disambiguation when pattern matches multiple lines
+
+# Triton Forward Kernel anchors
+triton-forward-k3plus:
+  KERNEL_ENTRY:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "def semi_crf_streaming_scan_kernel("
+    expected_line: 84
+    drift_tolerance: 20
+
+  MAIN_LOOP_START:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "for t in tl.range(1, T + 1):"
+    after: "def semi_crf_streaming_scan_kernel("
+    expected_line: 198
+    drift_tolerance: 30
+
+  RING_BUFFER_READ:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "ring_k_idx = start_pos % K"
+    after: "def semi_crf_streaming_scan_kernel("
+    expected_line: 212
+    drift_tolerance: 20
+
+  NEGINF_GUARD:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "is_all_neginf = max_scores < (NEG_INF + 1.0)"
+    expected_line: 296
+    drift_tolerance: 15
+
+  RING_BUFFER_WRITE:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "ring_t_idx = t % K"
+    after: "def semi_crf_streaming_scan_kernel("
+    expected_line: 320
+    drift_tolerance: 20
+
+  CHECKPOINT_SAVE:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0"
+    after: "def semi_crf_streaming_scan_kernel("
+    expected_line: 329
+    drift_tolerance: 25
+
+  KERNEL_LAUNCH:
+    file: src/torch_semimarkov/streaming/triton_forward.py
+    pattern: "def launch_streaming_triton_kernel("
+    expected_line: 811
+    drift_tolerance: 50
+
+# Dispatch anchors
+dispatch-overview:
+  CAN_USE_TRITON:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "can_use_triton = HAS_TRITON and use_triton"
+    expected_line: 636
+    drift_tolerance: 30
+
+  STREAMING_ENTRY:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "def semi_crf_streaming_forward("
+    expected_line: 474
+    drift_tolerance: 50
+
+  K1_DISPATCH:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "return LinearCRFStreaming.apply("
+    expected_line: 590
+    drift_tolerance: 30
+
+  K2_DISPATCH:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "return SemiCRFK2Streaming.apply("
+    expected_line: 616
+    drift_tolerance: 30
+
+  TRITON_DISPATCH:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "return SemiCRFStreamingTriton.apply("
+    expected_line: 642
+    drift_tolerance: 30
+
+# Autograd-kernel interface anchors
+autograd-kernel-interface:
+  TRITON_FORWARD_CLASS:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "class SemiCRFStreamingTriton("
+    expected_line: 162
+    drift_tolerance: 40
+
+  PARTITION_VALIDATION:
+    file: src/torch_semimarkov/streaming/autograd.py
+    pattern: "if not torch.isfinite(partition).all():"
+    after: "class SemiCRFStreamingTriton("
+    expected_line: 224
+    drift_tolerance: 30

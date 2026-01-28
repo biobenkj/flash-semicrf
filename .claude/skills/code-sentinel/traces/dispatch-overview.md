@@ -1,13 +1,43 @@
 # Sentinel: Dispatch Overview
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `40fe66b`
-**Linked tests:** `tests/test_streaming_triton.py::TestDispatch`
+**Verified against:**
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `40fe66b`
+- `src/torch_semimarkov/semimarkov.py` @ commit `40fe66b`
+
+**Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 
 ## Summary
 
-The dispatch hub routes Semi-CRF computations to the optimal backend based on K value, device, gradient requirements, and Triton availability. All paths enter through `semi_crf_streaming_forward()` at line 474.
+The torch-semimarkov library provides two API families:
 
-## Decision Tree
+1. **Streaming API** (`semi_crf_streaming_forward`) - Computes edges on-the-fly from cumulative scores. Memory-efficient for long sequences. Entry point: `autograd.py:474`
+
+2. **Non-Streaming API** (`SemiMarkov.logpartition`) - Operates on pre-computed edge tensors. Multiple algorithm variants. Entry point: `semimarkov.py:35`
+
+Both APIs use **identical duration indexing**: `dur_idx = k - 1` (0-based) for duration value `k`.
+
+## Active Assumptions
+
+### Mechanically Verified
+
+These are verified automatically via `python3 verify-assumptions.py dispatch-overview`.
+
+| ID | Assumption | Verification |
+|----|------------|--------------|
+| D1 | K=1 dispatches to LinearCRFStreaming | anchor: K1_DISPATCH |
+| D2 | K=2 dispatches to SemiCRFK2Streaming | anchor: K2_DISPATCH |
+| D3 | K>=3 GPU checks can_use_triton | anchor: CAN_USE_TRITON |
+| D4 | Triton path uses SemiCRFStreamingTriton | anchor: TRITON_DISPATCH |
+
+### Agent-Verified (on trace load)
+
+These require human/agent judgment when loading the trace.
+
+| ID | Assumption | Verification Guidance |
+|----|------------|----------------------|
+| D5 | K boundary conditions use correct comparisons | Inspect K==1, K==2, K>=3 conditionals in dispatch function (~lines 580-650) |
+
+## Decision Tree: Streaming API
 
 ```mermaid
 graph TD
@@ -48,7 +78,49 @@ graph TD
     V --> Z
 ```
 
-## Dispatch Conditions
+## Decision Tree: Non-Streaming API
+
+**Entry:** `SemiMarkov(semiring).logpartition()` at `semimarkov.py:35`
+
+```mermaid
+graph TD
+    A[logpartition] --> B{use_banded?}
+    B -->|yes| C[_dp_banded]
+    B -->|no| D{use_linear_scan?}
+    D -->|None auto| E{K*C > 200?}
+    E -->|yes| F[linear_scan=True]
+    E -->|no| G[linear_scan=False]
+    D -->|explicit| H{value}
+    F --> I{use_vectorized?}
+    G --> J[_dp_binary_tree]
+    H -->|True| I
+    H -->|False| J
+    I -->|yes| K[_dp_standard_vectorized]
+    I -->|no| L[_dp_scan_streaming]
+
+    C --> M[non-streaming-backends.md]
+    J --> M
+    K --> M
+    L --> M
+```
+
+## Non-Streaming Algorithm Lookup
+
+| Condition | Algorithm | Method | Trace |
+|-----------|-----------|--------|-------|
+| `use_banded=True` | Banded binary tree | `_dp_banded` | non-streaming-backends.md |
+| `K*C <= 200` (auto) | Binary tree | `_dp_binary_tree` | non-streaming-backends.md |
+| `K*C > 200`, vectorized | Vectorized scan | `_dp_standard_vectorized` | non-streaming-backends.md |
+| `K*C > 200`, default | Ring buffer scan | `_dp_scan_streaming` | non-streaming-backends.md |
+
+**Auto-selection:** `semimarkov.py:62-65`
+
+```python
+K_C_product = K * C
+use_linear_scan = K_C_product > 200
+```
+
+## Streaming Dispatch Conditions
 
 ### can_use_triton (line 636)
 
@@ -72,7 +144,7 @@ needs_grad = (
 )
 ```
 
-## Lookup Table
+## Streaming Lookup Table
 
 | K | Device | Triton | needs_grad | Boundaries | Path | Trace |
 |---|--------|--------|------------|------------|------|-------|
@@ -89,6 +161,8 @@ needs_grad = (
 
 ## Failure Mode Routing
 
+### Streaming API Issues
+
 | Symptom | Primary Trace | Secondary Trace | Check First |
 |---------|---------------|-----------------|-------------|
 | **NaN in loss** | triton-forward-k3plus.md | dispatch-overview.md | NEG_INF guards |
@@ -98,7 +172,18 @@ needs_grad = (
 | **K=1/K=2 mismatch** | k1-linear-crf.md / k2-fast-path.md | dispatch-overview.md | Dispatch conditions |
 | **Triton vs PyTorch diff** | triton-forward-k3plus.md | pytorch-forward-k3plus.md | Ring buffer indexing |
 
+### Non-Streaming API Issues
+
+| Symptom | Primary Trace | Check First |
+|---------|---------------|-------------|
+| **OOM with large edge tensor** | non-streaming-backends.md | Use streaming API instead |
+| **Slow binary tree** | non-streaming-backends.md | Check K*C > 200 threshold |
+| **Algorithm mismatch** | non-streaming-backends.md | Verify all algorithms produce same result |
+| **Duration index off-by-one** | non-streaming-backends.md | Verify `dur_idx = k - 1` |
+
 ## Entry Points
+
+### Streaming API (autograd.py)
 
 | Function | Line | Called When |
 |----------|------|-------------|
@@ -110,12 +195,38 @@ needs_grad = (
 | `launch_streaming_triton_kernel()` | 669 | K>=3, GPU, Triton, inference |
 | `semi_crf_streaming_forward_pytorch()` | 683 | K>=3, CPU, inference |
 
+### Non-Streaming API (semimarkov.py)
+
+| Function | Line | Called When |
+|----------|------|-------------|
+| `SemiMarkov.logpartition()` | 35 | Public API entry point |
+| `_dp_binary_tree()` | 85 | K*C <= 200 (auto) or explicit |
+| `_dp_scan_streaming()` | 150 | K*C > 200, default |
+| `_dp_standard()` | 230 | Legacy reference implementation |
+| `_dp_standard_vectorized()` | 277 | K*C > 200, use_vectorized=True |
+| `_dp_blocktriangular()` | 326 | Block-triangular variant |
+| `_dp_banded()` | 503 | use_banded=True |
+
 ## Critical Invariants
+
+### Duration Indexing (ALL backends)
+
+- [ ] Duration index formula: `dur_idx = k - 1` for duration value `k`
+- [ ] `duration_bias` shape: `(K, C)` where index 0 = duration 1
+- [ ] Edge tensor last dims: `(c_dst, c_src)` - destination first
+
+### Streaming API
 
 - [ ] K>=3 required for ring buffer architecture (Triton kernel constraint)
 - [ ] K=1/K=2 fast paths do NOT support boundary projections
 - [ ] Boundary projections force fallback to K>=3 path even for K=1/K=2
 - [ ] `cum_scores` MUST be float32 for numerical stability
+
+### Non-Streaming API
+
+- [ ] Auto-selection threshold: `K*C > 200` triggers linear scan
+- [ ] All algorithms produce identical partition values (numerical precision aside)
+- [ ] Ring buffer in `_dp_scan_streaming` uses `(head - (dur - 1)) % K`
 
 ## Numerical Guards
 
@@ -137,4 +248,5 @@ needs_grad = (
 
 ## Version History
 
-- **2026-01-27**: Initial trace @ commit `40fe66b`
+- **2026-01-28**: Added non-streaming backends (`semimarkov.py`) decision tree, algorithm lookup, entry points, and failure routing @ commit `40fe66b`
+- **2026-01-27**: Initial trace (streaming API only) @ commit `40fe66b`
