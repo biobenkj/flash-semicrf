@@ -542,6 +542,7 @@ class SemiMarkovCRFHead(nn.Module):
         lengths: Tensor,
         max_traceback_length: int = 10000,
         use_triton: bool = True,
+        backend: str = "auto",
     ) -> ViterbiResult:
         r"""Viterbi decode with path reconstruction.
 
@@ -551,6 +552,8 @@ class SemiMarkovCRFHead(nn.Module):
             max_traceback_length (int, optional): Maximum T for traceback. Longer
                 sequences return empty segment lists. Default: ``10000``
             use_triton (bool, optional): Use Triton kernels for forward pass. Default: ``True``
+            backend (str, optional): ``"auto"``, ``"streaming"``, ``"exact"``, or
+                ``"binary_tree_sharded"``. Default: ``"auto"``
 
         Returns:
             ViterbiResult: Named tuple with ``scores`` :math:`(\text{batch},)` and
@@ -579,10 +582,74 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores = torch.zeros(batch, T + 1, self.num_classes, dtype=torch.float32, device=device)
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
+        # Select backend
+        if backend == "auto":
+            backend_type = "streaming"
+        elif backend == "streaming":
+            backend_type = "streaming"
+        elif backend in ("exact", "binary_tree_sharded"):
+            backend_type = backend
+        else:
+            raise ValueError(
+                f"Unknown backend: {backend}. "
+                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
+            )
+
         # Check which sequences need traceback
         needs_traceback = lengths <= max_traceback_length
         any_needs_traceback = needs_traceback.any().item()
 
+        # Non-streaming backends use per-sequence traceback
+        if backend_type in ("exact", "binary_tree_sharded"):
+            all_segments: list[list[Segment]] = []
+            max_scores_list = []
+
+            for b in range(batch):
+                seq_len = int(lengths[b].item())
+                if seq_len > max_traceback_length:
+                    # Skip traceback for long sequences
+                    all_segments.append([])
+                    # Still need to compute score - use streaming for efficiency
+                    score = semi_crf_streaming_forward(
+                        cum_scores[b : b + 1],
+                        self.transition,
+                        self.duration_bias,
+                        lengths[b : b + 1],
+                        self.max_duration,
+                        semiring="max",
+                        use_triton=False,
+                    )
+                    max_scores_list.append(score)
+                else:
+                    # Use _traceback_single for per-sequence Viterbi with backpointers
+                    segments = self._traceback_single(cum_scores[b], seq_len)
+                    all_segments.append(segments)
+                    # Compute max score from segments
+                    if segments:
+                        max_scores_list.append(
+                            torch.tensor(
+                                sum(seg.score for seg in segments),
+                                device=device,
+                                dtype=torch.float32,
+                            )
+                        )
+                    else:
+                        # Empty segments - compute score via forward pass
+                        score = semi_crf_streaming_forward(
+                            cum_scores[b : b + 1],
+                            self.transition,
+                            self.duration_bias,
+                            lengths[b : b + 1],
+                            self.max_duration,
+                            semiring="max",
+                            use_triton=False,
+                        )
+                        max_scores_list.append(score.squeeze(0))
+
+            max_scores = torch.stack(max_scores_list)
+            return ViterbiResult(scores=max_scores, segments=all_segments)
+
+        # Streaming backend - use batched Viterbi with backpointers
         if any_needs_traceback:
             can_use_triton = False  # Triton backpointer disabled (memory corruption)
 

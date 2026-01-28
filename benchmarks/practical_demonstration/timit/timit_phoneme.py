@@ -973,9 +973,9 @@ class TIMITModel(nn.Module):
             hidden, lengths, labels, backend=backend, use_triton=use_triton
         )
 
-    def decode(self, features: Tensor, lengths: Tensor):
+    def decode(self, features: Tensor, lengths: Tensor, backend: str = "streaming"):
         hidden = self.encoder(features)
-        return self.crf.decode_with_traceback(hidden, lengths)
+        return self.crf.decode_with_traceback(hidden, lengths, backend=backend)
 
 
 class TIMITModelPytorchCRF(nn.Module):
@@ -1691,8 +1691,12 @@ def evaluate(
     model: TIMITModel | TIMITModelPytorchCRF,
     dataloader: DataLoader,
     device: torch.device,
+    backend: str = "streaming",
 ) -> tuple[TIMITMetrics, float]:
     """Evaluate model.
+
+    Args:
+        backend: Backend for decode (only used for TIMITModel, ignored for pytorch-crf).
 
     Returns:
         Tuple of (metrics, elapsed_time_seconds).
@@ -1714,7 +1718,11 @@ def evaluate(
         labels = batch["labels"].to(device)
         lengths = batch["lengths"].to(device)
 
-        result = model.decode(features, lengths)
+        # pytorch-crf doesn't support backend parameter
+        if is_pytorch_crf:
+            result = model.decode(features, lengths)
+        else:
+            result = model.decode(features, lengths, backend=backend)
 
         for i in range(len(lengths)):
             seq_len = lengths[i].item()
@@ -1897,7 +1905,7 @@ def train_model(
                 )
 
         if (epoch + 1) % log_every == 0 or epoch == epochs - 1:
-            test_metrics, inference_time = evaluate(model, test_loader, device)
+            test_metrics, inference_time = evaluate(model, test_loader, device, backend=backend)
 
             logger.info(
                 f"Epoch {epoch+1}/{epochs} | Loss: {train_loss:.4f} | "
@@ -1925,9 +1933,9 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
     print("=" * 60)
     print("\nThis shows how well each model captures phoneme duration patterns.")
     print("Lower MAE = better duration modeling. Semi-CRF should excel here.")
-    print("Semi Sharded and Semi Triton should have similar MAE (validates Triton).\n")
+    print("Semi PyTorch and Semi Triton should have similar MAE (validates Triton).\n")
 
-    # Get reference durations from semi_crf_triton (or sharded, they should be same)
+    # Get reference durations from semi_crf_triton (or pytorch, they should be same)
     ref_model = "semi_crf_triton"
     ref_stats = results[ref_model].duration_stats["per_phone"]
 
@@ -1937,14 +1945,14 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
 
     # Get stats from all models
     l_stats = results["linear_crf_triton"].duration_stats["per_phone"]
-    sh_stats = results["semi_crf_sharded"].duration_stats["per_phone"]
+    py_stats = results["semi_crf_pytorch"].duration_stats["per_phone"]
     tr_stats = results["semi_crf_triton"].duration_stats["per_phone"]
     p_stats = results["pytorch_crf"].duration_stats["per_phone"] if has_pytorch_crf else None
 
     if has_pytorch_crf:
         print(
-            f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Sh':>6} {'Tr':>6} │ "
-            f"{'MAE p':>6} {'MAE K1':>7} {'MAE Sh':>7} {'MAE Tr':>7}"
+            f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
+            f"{'MAE p':>6} {'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
         )
         print("-" * 90)
 
@@ -1952,90 +1960,90 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             ref_mean = ref_stats[phone]["ref_mean"]
             p_mean = p_stats[phone]["pred_mean"]
             l_mean = l_stats[phone]["pred_mean"]
-            sh_mean = sh_stats[phone]["pred_mean"]
+            py_mean = py_stats[phone]["pred_mean"]
             tr_mean = tr_stats[phone]["pred_mean"]
             p_mae = p_stats[phone]["mae"]
             l_mae = l_stats[phone]["mae"]
-            sh_mae = sh_stats[phone]["mae"]
+            py_mae = py_stats[phone]["mae"]
             tr_mae = tr_stats[phone]["mae"]
 
             # Highlight if semi-CRF is better than linear
-            best_semi_mae = min(sh_mae, tr_mae)
+            best_semi_mae = min(py_mae, tr_mae)
             s_marker = "*" if best_semi_mae < p_mae and best_semi_mae < l_mae else " "
 
             print(
                 f"{phone:<6} {ref_mean:>6.1f} {p_mean:>6.1f} {l_mean:>6.1f} "
-                f"{sh_mean:>6.1f} {tr_mean:>6.1f} │ "
-                f"{p_mae:>6.2f} {l_mae:>7.2f} {sh_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
+                f"{py_mean:>6.1f} {tr_mean:>6.1f} │ "
+                f"{p_mae:>6.2f} {l_mae:>7.2f} {py_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
             )
 
         # Overall stats
         print("-" * 90)
         p_overall = results["pytorch_crf"].duration_stats["overall"]
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        sh_overall = results["semi_crf_sharded"].duration_stats["overall"]
+        py_overall = results["semi_crf_pytorch"].duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
             f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{p_overall['mean_absolute_error']:>6.2f} "
             f"{l_overall['mean_absolute_error']:>7.2f} "
-            f"{sh_overall['mean_absolute_error']:>7.2f} "
+            f"{py_overall['mean_absolute_error']:>7.2f} "
             f"{tr_overall['mean_absolute_error']:>6.2f}"
         )
         print(
             f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{p_overall['duration_correlation']:>6.3f} "
             f"{l_overall['duration_correlation']:>7.3f} "
-            f"{sh_overall['duration_correlation']:>7.3f} "
+            f"{py_overall['duration_correlation']:>7.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
     else:
         print(
-            f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Sh':>6} {'Tr':>6} │ "
-            f"{'MAE K1':>7} {'MAE Sh':>7} {'MAE Tr':>7}"
+            f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
+            f"{'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
         )
         print("-" * 70)
 
         for phone in display_phones:
             ref_mean = ref_stats[phone]["ref_mean"]
             l_mean = l_stats[phone]["pred_mean"]
-            sh_mean = sh_stats[phone]["pred_mean"]
+            py_mean = py_stats[phone]["pred_mean"]
             tr_mean = tr_stats[phone]["pred_mean"]
             l_mae = l_stats[phone]["mae"]
-            sh_mae = sh_stats[phone]["mae"]
+            py_mae = py_stats[phone]["mae"]
             tr_mae = tr_stats[phone]["mae"]
 
-            best_semi_mae = min(sh_mae, tr_mae)
+            best_semi_mae = min(py_mae, tr_mae)
             s_marker = "*" if best_semi_mae < l_mae else " "
 
             print(
                 f"{phone:<6} {ref_mean:>6.1f} {l_mean:>6.1f} "
-                f"{sh_mean:>6.1f} {tr_mean:>6.1f} │ "
-                f"{l_mae:>7.2f} {sh_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
+                f"{py_mean:>6.1f} {tr_mean:>6.1f} │ "
+                f"{l_mae:>7.2f} {py_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
             )
 
         # Overall stats
         print("-" * 70)
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        sh_overall = results["semi_crf_sharded"].duration_stats["overall"]
+        py_overall = results["semi_crf_pytorch"].duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
             f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{l_overall['mean_absolute_error']:>7.2f} "
-            f"{sh_overall['mean_absolute_error']:>7.2f} "
+            f"{py_overall['mean_absolute_error']:>7.2f} "
             f"{tr_overall['mean_absolute_error']:>6.2f}"
         )
         print(
             f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{l_overall['duration_correlation']:>7.3f} "
-            f"{sh_overall['duration_correlation']:>7.3f} "
+            f"{py_overall['duration_correlation']:>7.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
 
     print("\n* = Semi-CRF has lowest MAE for this phone")
-    print("Sh = Semi-CRF Sharded (baseline), Tr = Semi-CRF Triton (optimized)")
+    print("Py = Semi-CRF PyTorch (baseline), Tr = Semi-CRF Triton (optimized)")
     print("Corr = correlation between predicted and reference mean durations")
 
 
@@ -2046,12 +2054,12 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
     Models compared:
     1. pytorch-crf (optional): External linear CRF baseline
     2. K=1 Triton: Linear CRF via torch-semimarkov streaming kernel
-    3. Semi-CRF sharded: K>1 with sharded binary tree (reference baseline)
+    3. Semi-CRF PyTorch: K>1 with PyTorch streaming (reference baseline)
     4. Semi-CRF Triton: K>1 with Triton streaming kernel (optimized)
 
     Validates:
     - linear_crf_triton ≈ pytorch_crf (Triton K=1 matches external linear CRF)
-    - semi_crf_triton ≈ semi_crf_sharded (Triton K>1 matches reference semi-CRF)
+    - semi_crf_triton ≈ semi_crf_pytorch (Triton K>1 matches reference semi-CRF)
     """
     results = {}
 
@@ -2070,28 +2078,28 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
 
     # 2. torch-semimarkov K=1 (linear CRF via Triton streaming)
     logger.info("=" * 60)
-    logger.info("Training LINEAR CRF (torch-semimarkov K=1, Triton)")
+    logger.info("Training LINEAR CRF (torch-semimarkov K=1, PyTorch)")
     logger.info("=" * 60)
     _, linear_metrics = train_model(
         data_dir, model_type="linear", backend="streaming", use_triton=True, **kwargs
     )
     results["linear_crf_triton"] = linear_metrics
 
-    # 3. Semi-CRF with sharded binary tree (reference baseline)
+    # 3. Semi-CRF with PyTorch streaming (reference semi-CRF baseline)
     logger.info("=" * 60)
-    logger.info(f"Training SEMI-CRF SHARDED (K={max_duration}, binary tree baseline)")
+    logger.info(f"Training SEMI-CRF PYTORCH (K={max_duration}, streaming baseline)")
     logger.info("=" * 60)
-    _, sharded_metrics = train_model(
+    _, pytorch_metrics = train_model(
         data_dir,
         model_type="semicrf",
         max_duration=max_duration,
-        backend="binary_tree_sharded",
-        use_triton=False,
+        backend="streaming",
+        use_triton=False,  # Pure PyTorch - validates Triton correctness
         **kwargs,
     )
-    results["semi_crf_sharded"] = sharded_metrics
+    results["semi_crf_pytorch"] = pytorch_metrics
 
-    # 4. Semi-CRF with Triton streaming (optimized)
+    # 4. Semi-CRF with Triton streaming (optimized memory)
     logger.info("=" * 60)
     logger.info(f"Training SEMI-CRF TRITON (K={max_duration}, streaming kernel)")
     logger.info("=" * 60)
@@ -2110,7 +2118,7 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
 
     # Print comparison
     logger.info("\n" + "=" * 60)
-    logger.info("4-WAY COMPARISON: Linear CRF vs Semi-CRF (baseline vs Triton)")
+    logger.info("4-WAY COMPARISON: Linear CRF vs Semi-CRF (baseline vs PyTorch/Triton)")
     logger.info("=" * 60)
 
     # Print 4-way comparison table
@@ -2177,120 +2185,120 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     if has_pytorch_crf:
         print(
             f"\n{'Metric':<20} {'pytorch-crf':>12} {'K=1 Triton':>12} "
-            f"{'Semi Sharded':>12} {'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi':>10}"
+            f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi':>10}"
         )
         print("-" * 100)
     else:
         print(
             f"\n{'Metric':<20} {'K=1 Triton':>12} "
-            f"{'Semi Sharded':>12} {'Semi Triton':>12} {'Δ Semi':>10}"
+            f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Semi':>10}"
         )
         print("-" * 80)
 
     # Get metrics
     l_metrics = results["linear_crf_triton"]
-    sh_metrics = results["semi_crf_sharded"]
+    py_metrics = results["semi_crf_pytorch"]
     tr_metrics = results["semi_crf_triton"]
     p_metrics = results.get("pytorch_crf")
 
     # Phone Error Rate (lower is better)
     if has_pytorch_crf:
         delta_linear = l_metrics.phone_error_rate - p_metrics.phone_error_rate
-        delta_semi = tr_metrics.phone_error_rate - sh_metrics.phone_error_rate
+        delta_semi = tr_metrics.phone_error_rate - py_metrics.phone_error_rate
         print(
             f"{'Phone Error Rate':<20} {p_metrics.phone_error_rate:>12.4f} "
-            f"{l_metrics.phone_error_rate:>12.4f} {sh_metrics.phone_error_rate:>12.4f} "
+            f"{l_metrics.phone_error_rate:>12.4f} {py_metrics.phone_error_rate:>12.4f} "
             f"{tr_metrics.phone_error_rate:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
         )
     else:
-        delta_semi = tr_metrics.phone_error_rate - sh_metrics.phone_error_rate
+        delta_semi = tr_metrics.phone_error_rate - py_metrics.phone_error_rate
         print(
             f"{'Phone Error Rate':<20} {l_metrics.phone_error_rate:>12.4f} "
-            f"{sh_metrics.phone_error_rate:>12.4f} {tr_metrics.phone_error_rate:>12.4f} "
+            f"{py_metrics.phone_error_rate:>12.4f} {tr_metrics.phone_error_rate:>12.4f} "
             f"{delta_semi:>+10.4f}"
         )
 
     # F1 scores (higher is better)
     for metric_name, display_name in [("boundary_f1", "Boundary F1"), ("segment_f1", "Segment F1")]:
         l_val = getattr(l_metrics, metric_name)
-        sh_val = getattr(sh_metrics, metric_name)
+        py_val = getattr(py_metrics, metric_name)
         tr_val = getattr(tr_metrics, metric_name)
 
         if has_pytorch_crf:
             p_val = getattr(p_metrics, metric_name)
             delta_linear = l_val - p_val
-            delta_semi = tr_val - sh_val
+            delta_semi = tr_val - py_val
             print(
                 f"{display_name:<20} {p_val:>12.4f} {l_val:>12.4f} "
-                f"{sh_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
+                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
             )
         else:
-            delta_semi = tr_val - sh_val
+            delta_semi = tr_val - py_val
             print(
                 f"{display_name:<20} {l_val:>12.4f} "
-                f"{sh_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
+                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
             )
 
     # Boundary F1 tolerances
     print("\nBoundary F1 at different tolerances:")
     for tol in [0, 1, 2]:
         l_val = l_metrics.boundary_f1_tolerances.get(tol, 0)
-        sh_val = sh_metrics.boundary_f1_tolerances.get(tol, 0)
+        py_val = py_metrics.boundary_f1_tolerances.get(tol, 0)
         tr_val = tr_metrics.boundary_f1_tolerances.get(tol, 0)
 
         if has_pytorch_crf:
             p_val = p_metrics.boundary_f1_tolerances.get(tol, 0)
             delta_linear = l_val - p_val
-            delta_semi = tr_val - sh_val
+            delta_semi = tr_val - py_val
             print(
                 f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} "
-                f"{sh_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
+                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
             )
         else:
-            delta_semi = tr_val - sh_val
+            delta_semi = tr_val - py_val
             print(
                 f"  tol={tol:<2} {l_val:>12.4f} "
-                f"{sh_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
+                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
             )
 
     # Timing comparison
     print("\nTiming (lower is better):")
     l_time = l_metrics.training_time_per_epoch
-    sh_time = sh_metrics.training_time_per_epoch
+    py_time = py_metrics.training_time_per_epoch
     tr_time = tr_metrics.training_time_per_epoch
 
     if has_pytorch_crf:
         p_time = p_metrics.training_time_per_epoch
         speedup_linear = p_time / l_time if l_time > 0 else 0
-        speedup_semi = sh_time / tr_time if tr_time > 0 else 0
+        speedup_semi = py_time / tr_time if tr_time > 0 else 0
         print(
             f"{'Train (s/epoch)':<20} {p_time:>12.2f} {l_time:>12.2f} "
-            f"{sh_time:>12.2f} {tr_time:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
+            f"{py_time:>12.2f} {tr_time:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
         )
     else:
-        speedup_semi = sh_time / tr_time if tr_time > 0 else 0
+        speedup_semi = py_time / tr_time if tr_time > 0 else 0
         print(
             f"{'Train (s/epoch)':<20} {l_time:>12.2f} "
-            f"{sh_time:>12.2f} {tr_time:>12.2f} {speedup_semi:>9.2f}x"
+            f"{py_time:>12.2f} {tr_time:>12.2f} {speedup_semi:>9.2f}x"
         )
 
     l_infer = l_metrics.inference_time
-    sh_infer = sh_metrics.inference_time
+    py_infer = py_metrics.inference_time
     tr_infer = tr_metrics.inference_time
 
     if has_pytorch_crf:
         p_infer = p_metrics.inference_time
         speedup_linear = p_infer / l_infer if l_infer > 0 else 0
-        speedup_semi = sh_infer / tr_infer if tr_infer > 0 else 0
+        speedup_semi = py_infer / tr_infer if tr_infer > 0 else 0
         print(
             f"{'Inference (s)':<20} {p_infer:>12.2f} {l_infer:>12.2f} "
-            f"{sh_infer:>12.2f} {tr_infer:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
+            f"{py_infer:>12.2f} {tr_infer:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
         )
     else:
-        speedup_semi = sh_infer / tr_infer if tr_infer > 0 else 0
+        speedup_semi = py_infer / tr_infer if tr_infer > 0 else 0
         print(
             f"{'Inference (s)':<20} {l_infer:>12.2f} "
-            f"{sh_infer:>12.2f} {tr_infer:>12.2f} {speedup_semi:>9.2f}x"
+            f"{py_infer:>12.2f} {tr_infer:>12.2f} {speedup_semi:>9.2f}x"
         )
 
     # Validation notes
@@ -2299,7 +2307,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     print("=" * 60)
     if has_pytorch_crf:
         print("Linear CRF: K=1 Triton should match pytorch-crf accuracy (Δ Linear ≈ 0)")
-    print("Semi-CRF: Triton should match sharded baseline accuracy (Δ Semi ≈ 0)")
+    print("Semi-CRF: Triton should match PyTorch baseline accuracy (Δ Semi ≈ 0)")
     print("Timing: Triton speedup shown as multiplier (e.g., 2.0x = twice as fast)")
 
 
@@ -2455,7 +2463,7 @@ def main():
                     "batch_size": args.batch_size,
                 },
                 "linear_crf_triton": results["linear_crf_triton"].to_dict(),
-                "semi_crf_sharded": results["semi_crf_sharded"].to_dict(),
+                "semi_crf_pytorch": results["semi_crf_pytorch"].to_dict(),
                 "semi_crf_triton": results["semi_crf_triton"].to_dict(),
             }
             # Include pytorch-crf results if available

@@ -2,7 +2,7 @@
 # Machine-readable state for automation and status queries
 
 version: 2.0
-last_global_verification: 2026-01-28T20:57:43Z
+last_global_verification: 2026-01-28T23:03:19Z
 
 # Note: Dual indexing scheme active during benchmarking phase
 # - Streaming backends: 0-based (dur_idx = k - 1) - production target
