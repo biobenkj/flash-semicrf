@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `09e86ed`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -236,7 +236,7 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 
 | Issue | Severity | Frequency | Resolution | Commit |
 |-------|----------|-----------|------------|--------|
-| Duration-dependent transition off-by-one | Critical | HAS_DURATION_TRANSITIONS | Use `dur_idx` not `k` for indexing | uncommitted |
+| Duration-dependent transition off-by-one | Critical | HAS_DURATION_TRANSITIONS | Use `dur_idx` not `k` for indexing | `09e86ed` |
 | K=1/K=2 ring buffer aliasing | Critical | Always | Dispatch to specialized paths | `870bd1f` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
 | Float16 overflow | High | Long sequences | Force float32 inputs | - |
@@ -262,4 +262,4 @@ if (partition < viterbi_score).any():
 ## Version History
 
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests
-- **2026-01-27**: Initial trace @ commit `40fe66b`
+- **2026-01-27**: Initial trace @ commit `09e86ed`

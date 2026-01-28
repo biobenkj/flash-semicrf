@@ -1,6 +1,6 @@
 # Sentinel: K=1 Linear CRF Fast Path
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `09e86ed`
 **Linked tests:** `tests/test_streaming.py::TestStreamingK1::test_streaming_k1_gradient_flow`
 
 ## Summary
@@ -101,4 +101,4 @@ def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
 
 ## Version History
 
-- **2026-01-27**: Initial trace @ commit `40fe66b`
+- **2026-01-27**: Initial trace @ commit `09e86ed`

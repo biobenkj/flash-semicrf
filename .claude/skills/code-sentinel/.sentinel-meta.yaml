@@ -11,7 +11,7 @@ last_global_verification: 2026-01-28T23:03:19Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -35,7 +35,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: 40fe66b
+    verified_commit: 26119fa
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
       - src/torch_semimarkov/semimarkov.py
@@ -68,7 +68,7 @@ sentinels:
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/triton_backward.py
     assumptions_mechanical: []
@@ -80,7 +80,7 @@ sentinels:
       - triton-forward-k3plus
 
   pytorch-forward-k3plus:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -91,7 +91,7 @@ sentinels:
     depends_on: []
 
   pytorch-backward-k3plus:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -103,7 +103,7 @@ sentinels:
       - pytorch-forward-k3plus
 
   k1-linear-crf:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -114,7 +114,7 @@ sentinels:
     depends_on: []
 
   k2-fast-path:
-    verified_commit: 40fe66b
+    verified_commit: 09e86ed
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -125,7 +125,7 @@ sentinels:
     depends_on: []
 
   non-streaming-backends:
-    verified_commit: 40fe66b
+    verified_commit: 26119fa
     source_files:
       - src/torch_semimarkov/semimarkov.py
     assumptions_mechanical: []
@@ -136,7 +136,7 @@ sentinels:
     depends_on: []
 
   crf-heads:
-    verified_commit: 40fe66b
+    verified_commit: 6d6c535
     source_files:
       - src/torch_semimarkov/nn.py
     assumptions_mechanical: [N1, N2, N3, N4, N5]

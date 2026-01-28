@@ -1,6 +1,6 @@
 # Sentinel: CRF Heads (nn.py)
 
-**Verified against:** `src/torch_semimarkov/nn.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/nn.py` @ commit `6d6c535`
 
 **Linked tests:** `tests/test_semimarkov.py`, `tests/test_streaming_triton.py::TestTritonBasic`
 
@@ -147,4 +147,4 @@ def _should_use_streaming(self, T: int) -> bool:
 
 ## Version History
 
-- **2026-01-28**: Initial trace @ commit `40fe66b`
+- **2026-01-28**: Initial trace @ commit `6d6c535`

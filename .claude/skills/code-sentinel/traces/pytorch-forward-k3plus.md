@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Forward (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `09e86ed`
 **Linked tests:** `tests/test_streaming.py::TestStreamingForward::test_forward_produces_finite_values`
 
 ## Summary
@@ -146,4 +146,4 @@ partition = torch.logsumexp(final_alpha, dim=-1)  # (B,)
 
 ## Version History
 
-- **2026-01-27**: Initial trace @ commit `40fe66b`
+- **2026-01-27**: Initial trace @ commit `09e86ed`

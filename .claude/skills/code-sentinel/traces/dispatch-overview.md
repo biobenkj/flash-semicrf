@@ -1,8 +1,8 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `40fe66b`
-- `src/torch_semimarkov/semimarkov.py` @ commit `40fe66b`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `26119fa`
+- `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 
@@ -257,5 +257,5 @@ needs_grad = (
 ## Version History
 
 - **2026-01-28**: Documented dual indexing scheme divergence (streaming 0-based vs non-streaming 1-based)
-- **2026-01-28**: Added non-streaming backends (`semimarkov.py`) decision tree, algorithm lookup, entry points, and failure routing @ commit `40fe66b`
-- **2026-01-27**: Initial trace (streaming API only) @ commit `40fe66b`
+- **2026-01-28**: Added non-streaming backends (`semimarkov.py`) decision tree, algorithm lookup, entry points, and failure routing @ commit `26119fa`
+- **2026-01-27**: Initial trace (streaming API only) @ commit `26119fa`

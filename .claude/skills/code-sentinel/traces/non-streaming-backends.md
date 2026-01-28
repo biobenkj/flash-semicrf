@@ -1,6 +1,6 @@
 # Sentinel: Non-Streaming Backends
 
-**Verified against:** `src/torch_semimarkov/semimarkov.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
 **Linked tests:** `tests/test_semimarkov.py`
 
 ## Summary
@@ -273,4 +273,4 @@ def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
 ## Version History
 
 - **2026-01-28**: Updated to document 1-based duration indexing (benchmarking divergence from streaming)
-- **2026-01-28**: Initial trace @ commit `40fe66b`
+- **2026-01-28**: Initial trace @ commit `26119fa`

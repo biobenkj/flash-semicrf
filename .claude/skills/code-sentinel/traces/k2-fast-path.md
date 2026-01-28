@@ -1,6 +1,6 @@
 # Sentinel: K=2 Specialized Path
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `09e86ed`
 **Linked tests:** `tests/test_streaming_triton.py::TestKSpecificPaths::test_k2_forward_correctness`
 
 ## Summary
@@ -114,4 +114,4 @@ def semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths):
 
 ## Version History
 
-- **2026-01-27**: Initial trace @ commit `40fe66b`
+- **2026-01-27**: Initial trace @ commit `09e86ed`
