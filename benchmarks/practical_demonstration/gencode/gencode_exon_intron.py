@@ -4,30 +4,35 @@ Exon/Intron Segmentation Benchmark using Gencode Annotations
 
 This benchmark demonstrates where Semi-CRFs outperform linear CRFs:
 - Exons and introns have dramatically different length distributions
-- Exons: median ~150bp, 95th percentile ~500bp, rarely >1kb
-- Introns: median ~1kb, can span >100kb
+- First exons ~100bp, internal exons ~150bp, last exons ~200bp
+- First introns ~2kb (longest), internal ~1kb, last ~500bp
+- Start/stop codons are exactly 3bp - perfect for duration modeling
 - A linear CRF cannot encode "this state tends to last N positions"
-- A semi-CRF explicitly penalizes implausible durations (3bp exon, 10bp intron)
+- A semi-CRF explicitly penalizes implausible durations
 
 Experimental Design:
-    Same encoder (BiLSTM or Mamba) with two CRF heads:
-    1. Linear CRF: K=1 (standard CRF, no duration modeling)
-    2. Semi-CRF: K=500 or K=1000 (explicit duration distributions)
-
-    Both use identical transition matrices and emission projections.
-    The only difference is whether duration is modeled.
+    Same encoder (BiLSTM or Mamba) with three CRF heads:
+    1. pytorch-crf: External linear CRF baseline (optional, if installed)
+    2. Linear CRF: K=1 (torch-semimarkov, no duration modeling)
+    3. Semi-CRF: K=500 (explicit duration distributions via Triton kernel)
 
 Data:
     - Gencode GTF annotations (human or mouse)
     - Reference genome FASTA
-    - Chromosome-based train/val/test split (e.g., train: chr1-18, val: chr19-20, test: chr21-22)
+    - Chromosome-based train/val/test split (train: chr1-18, val: chr19-20, test: chr21-22)
 
-Label scheme (5 classes):
+Label scheme (11 classes with position-based exon/intron labels):
     0: intergenic
-    1: 5'UTR
-    2: CDS (coding exon)
-    3: 3'UTR
-    4: intron
+    1: first_exon      (~100bp, characteristically short)
+    2: internal_exon   (~150bp, standard exon length)
+    3: last_exon       (~200bp, often longer)
+    4: first_intron    (~2kb, typically longest)
+    5: internal_intron (~1kb, standard intron length)
+    6: last_intron     (~500bp, shorter)
+    7: 5UTR            (~150bp)
+    8: 3UTR            (~500bp)
+    9: start_codon     (exactly 3bp - great for semi-CRF)
+    10: stop_codon     (exactly 3bp - great for semi-CRF)
 
 Metrics:
     1. Position-level F1 (macro and per-class)
@@ -36,25 +41,36 @@ Metrics:
     4. Duration calibration (KL divergence between predicted and true distributions)
 
 Requirements:
-    pip install pyfaidx gtfparse pandas torch lightning
+    pip install pyfaidx torch
+    # Optional:
+    pip install pytorch-crf  # For baseline comparison
+    pip install mamba-ssm    # For Mamba encoder (GPU only)
 
 Usage:
     # Preprocess data
-    python gencode_exon_intron.py preprocess \
-        --gtf gencode.v44.annotation.gtf.gz \
-        --fasta GRCh38.primary_assembly.genome.fa \
+    python gencode_exon_intron.py preprocess \\
+        --gtf gencode.v44.annotation.gtf.gz \\
+        --fasta GRCh38.primary_assembly.genome.fa \\
         --output-dir data/gencode_benchmark/
 
-    # Train and evaluate
-    python gencode_exon_intron.py train \
-        --data-dir data/gencode_benchmark/ \
-        --model semicrf \
-        --max-duration 500 \
-        --epochs 50
+    # Train with BiLSTM + semi-CRF (default)
+    python gencode_exon_intron.py train \\
+        --data-dir data/gencode_benchmark/ \\
+        --model semicrf --encoder bilstm
 
-    # Compare linear CRF vs semi-CRF
-    python gencode_exon_intron.py compare \
-        --data-dir data/gencode_benchmark/
+    # Train with Mamba + semi-CRF
+    python gencode_exon_intron.py train \\
+        --data-dir data/gencode_benchmark/ \\
+        --model semicrf --encoder mamba
+
+    # Compare all CRF types
+    python gencode_exon_intron.py compare \\
+        --data-dir data/gencode_benchmark/ \\
+        --encoder bilstm
+
+    # Development on CPU (no mamba-ssm required)
+    python gencode_exon_intron.py train \\
+        --encoder mamba_stub --device cpu
 """
 
 from __future__ import annotations
@@ -91,6 +107,24 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+# Mamba SSM encoder (optional)
+try:
+    from mamba_ssm import Mamba
+
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
+    Mamba = None  # type: ignore
+
+# pytorch-crf baseline (optional)
+try:
+    from torchcrf import CRF as TorchCRF
+
+    HAS_TORCHCRF = True
+except ImportError:
+    HAS_TORCHCRF = False
+    TorchCRF = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -101,10 +135,16 @@ logger = logging.getLogger(__name__)
 
 LABEL_SCHEME = {
     "intergenic": 0,
-    "5UTR": 1,
-    "CDS": 2,
-    "3UTR": 3,
-    "intron": 4,
+    "first_exon": 1,
+    "internal_exon": 2,
+    "last_exon": 3,
+    "first_intron": 4,
+    "internal_intron": 5,
+    "last_intron": 6,
+    "5UTR": 7,
+    "3UTR": 8,
+    "start_codon": 9,
+    "stop_codon": 10,
 }
 NUM_CLASSES = len(LABEL_SCHEME)
 LABEL_NAMES = list(LABEL_SCHEME.keys())
@@ -139,6 +179,8 @@ class GeneAnnotation:
     cds: list[tuple[int, int]] = field(default_factory=list)
     utrs_5: list[tuple[int, int]] = field(default_factory=list)
     utrs_3: list[tuple[int, int]] = field(default_factory=list)
+    start_codons: list[tuple[int, int]] = field(default_factory=list)
+    stop_codons: list[tuple[int, int]] = field(default_factory=list)
 
 
 class SegmentAnnotation(NamedTuple):
@@ -238,8 +280,8 @@ def load_gencode_annotations(
                     "strand": parsed["strand"],
                     "exons": [],
                     "cds": [],
-                    "start_codon": [],
-                    "stop_codon": [],
+                    "start_codons": [],
+                    "stop_codons": [],
                     "utrs": [],
                 }
 
@@ -257,6 +299,10 @@ def load_gencode_annotations(
                 t["utrs"].append((*coord, "5"))
             elif feature == "three_prime_UTR":
                 t["utrs"].append((*coord, "3"))
+            elif feature == "start_codon":
+                t["start_codons"].append(coord)
+            elif feature == "stop_codon":
+                t["stop_codons"].append(coord)
 
     logger.info(f"Loaded {len(transcripts)} transcripts")
 
@@ -332,6 +378,10 @@ def load_gencode_annotations(
         gene_start = min(s for s, e in exons)
         gene_end = max(e for s, e in exons)
 
+        # Get start and stop codons
+        start_codons = sorted(t.get("start_codons", []))
+        stop_codons = sorted(t.get("stop_codons", []))
+
         anno = GeneAnnotation(
             gene_id=gene_id,
             gene_name=t["gene_name"],
@@ -344,6 +394,8 @@ def load_gencode_annotations(
             cds=cds,
             utrs_5=utrs_5,
             utrs_3=utrs_3,
+            start_codons=start_codons,
+            stop_codons=stop_codons,
         )
         genes_by_chrom[t["chrom"]].append(anno)
 
@@ -363,17 +415,37 @@ def build_label_track(chrom_length: int, genes: list[GeneAnnotation]) -> np.ndar
     """
     Build position-wise label array for a chromosome.
 
-    Priority (highest to lowest): CDS > UTR > intron > intergenic
+    Uses position-based exon/intron labels to highlight duration differences:
+    - first_exon, internal_exon, last_exon (based on CDS position)
+    - first_intron, internal_intron, last_intron
+    - 5UTR, 3UTR
+    - start_codon, stop_codon (exactly 3bp, highest priority)
+
+    Priority (highest to lowest):
+        start_codon = stop_codon > exons > UTR > intron > intergenic
     """
     labels = np.zeros(chrom_length, dtype=np.int8)  # intergenic = 0
 
     for gene in genes:
-        # First mark all exonic regions as intron (will be overwritten by exons)
-        # This handles the space between exons within the gene
-        for i in range(len(gene.exons) - 1):
-            intron_start = gene.exons[i][1]
-            intron_end = gene.exons[i + 1][0]
-            labels[intron_start:intron_end] = LABEL_SCHEME["intron"]
+        sorted_exons = sorted(gene.exons)
+        num_exons = len(sorted_exons)
+
+        # Mark introns with position-based labels
+        for i in range(num_exons - 1):
+            intron_start = sorted_exons[i][1]
+            intron_end = sorted_exons[i + 1][0]
+
+            if num_exons == 2:
+                # Only one intron - use first_intron
+                intron_label = "first_intron"
+            elif i == 0:
+                intron_label = "first_intron"
+            elif i == num_exons - 2:
+                intron_label = "last_intron"
+            else:
+                intron_label = "internal_intron"
+
+            labels[intron_start:intron_end] = LABEL_SCHEME[intron_label]
 
         # Mark UTRs
         for start, end in gene.utrs_5:
@@ -381,9 +453,28 @@ def build_label_track(chrom_length: int, genes: list[GeneAnnotation]) -> np.ndar
         for start, end in gene.utrs_3:
             labels[start:end] = LABEL_SCHEME["3UTR"]
 
-        # Mark CDS (highest priority for exonic)
-        for start, end in gene.cds:
-            labels[start:end] = LABEL_SCHEME["CDS"]
+        # Mark CDS regions with position-based exon labels
+        sorted_cds = sorted(gene.cds)
+        num_cds = len(sorted_cds)
+
+        for i, (start, end) in enumerate(sorted_cds):
+            if num_cds == 1:
+                # Single CDS - use first_exon
+                exon_label = "first_exon"
+            elif i == 0:
+                exon_label = "first_exon"
+            elif i == num_cds - 1:
+                exon_label = "last_exon"
+            else:
+                exon_label = "internal_exon"
+
+            labels[start:end] = LABEL_SCHEME[exon_label]
+
+        # Mark start and stop codons (highest priority, exactly 3bp)
+        for start, end in gene.start_codons:
+            labels[start:end] = LABEL_SCHEME["start_codon"]
+        for start, end in gene.stop_codons:
+            labels[start:end] = LABEL_SCHEME["stop_codon"]
 
     return labels
 
@@ -662,6 +753,307 @@ class BiLSTMEncoder(nn.Module):
         return output
 
 
+class MambaBlockStub(nn.Module):
+    """Single Mamba block stub matching Mamba's API.
+
+    Approximates compute pattern without SSM-specific ops.
+    For development/testing on machines without GPU or mamba-ssm.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.d_inner = int(expand * d_model)
+
+        # Input projection (like Mamba's in_proj)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+
+        # Convolution (like Mamba's conv1d)
+        self.conv1d = nn.Conv1d(
+            self.d_inner,
+            self.d_inner,
+            kernel_size=d_conv,
+            padding=d_conv - 1,
+            groups=self.d_inner,
+            bias=True,
+        )
+
+        # SSM approximation (real Mamba has selective scan here)
+        self.ssm_proj = nn.Linear(self.d_inner, self.d_inner, bias=False)
+
+        # Output projection
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+
+        # Layer norm
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass matching Mamba block pattern.
+
+        Args:
+            x: Input tensor of shape (batch, seq_len, d_model)
+
+        Returns:
+            Output tensor of shape (batch, seq_len, d_model)
+        """
+        residual = x
+        x = self.norm(x)
+
+        # In projection: split into x and z branches
+        xz = self.in_proj(x)
+        x_branch, z = xz.chunk(2, dim=-1)
+
+        # Convolution (transpose for conv1d)
+        x_branch = x_branch.transpose(1, 2)
+        x_branch = self.conv1d(x_branch)[:, :, : x.shape[1]]  # Causal padding
+        x_branch = x_branch.transpose(1, 2)
+
+        # Activation
+        x_branch = F.silu(x_branch)
+
+        # SSM approximation
+        x_branch = self.ssm_proj(x_branch)
+        x_branch = F.silu(x_branch)
+
+        # Gating
+        x_branch = x_branch * F.silu(z)
+
+        # Output projection
+        out = self.out_proj(x_branch)
+
+        return residual + out
+
+
+class MambaEncoderStub(nn.Module):
+    """CPU-compatible Mamba encoder stub for development/testing.
+
+    Matches MambaEncoder API for drop-in replacement when mamba-ssm is not installed.
+    Uses bidirectional processing via forward + reversed passes.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = DNA_DIM,
+        hidden_dim: int = 256,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.d_model = hidden_dim // 2  # Half for each direction
+
+        # Input embedding
+        self.embed = nn.Linear(input_dim, self.d_model)
+
+        # Forward direction layers
+        self.forward_layers = nn.ModuleList(
+            [
+                MambaBlockStub(
+                    d_model=self.d_model,
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    expand=expand,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        # Backward direction layers
+        self.backward_layers = nn.ModuleList(
+            [
+                MambaBlockStub(
+                    d_model=self.d_model,
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    expand=expand,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: (batch, T, input_dim)
+        Returns:
+            hidden: (batch, T, hidden_dim)
+        """
+        # Embed input
+        h_fwd = self.embed(x)  # (batch, T, d_model)
+        h_bwd = h_fwd.flip(dims=[1])  # Reverse for backward pass
+
+        # Forward direction
+        for layer in self.forward_layers:
+            h_fwd = layer(h_fwd)
+            h_fwd = self.dropout(h_fwd)
+
+        # Backward direction
+        for layer in self.backward_layers:
+            h_bwd = layer(h_bwd)
+            h_bwd = self.dropout(h_bwd)
+
+        # Reverse backward output and concatenate
+        h_bwd = h_bwd.flip(dims=[1])
+        hidden = torch.cat([h_fwd, h_bwd], dim=-1)  # (batch, T, hidden_dim)
+
+        return self.norm(hidden)
+
+
+class MambaEncoder(nn.Module):
+    """Bidirectional Mamba SSM encoder for DNA sequences.
+
+    Uses forward + reversed Mamba layers concatenated for bidirectional output.
+    Requires mamba-ssm package to be installed.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = DNA_DIM,
+        hidden_dim: int = 256,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        num_layers: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        if not HAS_MAMBA:
+            raise ImportError(
+                "mamba-ssm required for MambaEncoder. " "Install with: pip install mamba-ssm"
+            )
+
+        self.hidden_dim = hidden_dim
+        self.d_model = hidden_dim // 2  # Half for each direction
+
+        # Input embedding
+        self.embed = nn.Linear(input_dim, self.d_model)
+
+        # Forward direction Mamba layers
+        self.forward_layers = nn.ModuleList(
+            [
+                Mamba(
+                    d_model=self.d_model,
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    expand=expand,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        # Backward direction Mamba layers
+        self.backward_layers = nn.ModuleList(
+            [
+                Mamba(
+                    d_model=self.d_model,
+                    d_state=d_state,
+                    d_conv=d_conv,
+                    expand=expand,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: (batch, T, input_dim)
+        Returns:
+            hidden: (batch, T, hidden_dim)
+        """
+        # Embed input
+        h_fwd = self.embed(x)  # (batch, T, d_model)
+        h_bwd = h_fwd.flip(dims=[1])  # Reverse for backward pass
+
+        # Forward direction
+        for layer in self.forward_layers:
+            h_fwd = layer(h_fwd) + h_fwd  # Residual connection
+            h_fwd = self.dropout(h_fwd)
+
+        # Backward direction
+        for layer in self.backward_layers:
+            h_bwd = layer(h_bwd) + h_bwd  # Residual connection
+            h_bwd = self.dropout(h_bwd)
+
+        # Reverse backward output and concatenate
+        h_bwd = h_bwd.flip(dims=[1])
+        hidden = torch.cat([h_fwd, h_bwd], dim=-1)  # (batch, T, hidden_dim)
+
+        return self.norm(hidden)
+
+
+def create_encoder(
+    encoder_type: Literal["bilstm", "mamba", "mamba_stub"] = "bilstm",
+    input_dim: int = DNA_DIM,
+    hidden_dim: int = 256,
+    num_layers: int = 2,
+    dropout: float = 0.1,
+    # Mamba-specific
+    d_state: int = 16,
+    d_conv: int = 4,
+    expand: int = 2,
+) -> nn.Module:
+    """Factory function to create encoder by type.
+
+    Args:
+        encoder_type: One of "bilstm", "mamba", "mamba_stub"
+        input_dim: Input dimension (DNA_DIM=5 for one-hot)
+        hidden_dim: Output hidden dimension
+        num_layers: Number of encoder layers
+        dropout: Dropout rate
+        d_state: Mamba SSM state dimension
+        d_conv: Mamba local convolution width
+        expand: Mamba expansion factor
+
+    Returns:
+        Encoder module with forward(x) -> (batch, T, hidden_dim)
+    """
+    if encoder_type == "bilstm":
+        return BiLSTMEncoder(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+    elif encoder_type == "mamba":
+        return MambaEncoder(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+    elif encoder_type == "mamba_stub":
+        return MambaEncoderStub(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}")
+
+
 class ExonIntronModel(nn.Module):
     """
     Combined encoder + CRF head for exon/intron segmentation.
@@ -711,6 +1103,81 @@ class ExonIntronModel(nn.Module):
         """Viterbi decoding."""
         hidden = self.encoder(sequence)
         return self.crf.decode_with_traceback(hidden, lengths)
+
+
+class ExonIntronModelPytorchCRF(nn.Module):
+    """
+    Exon/Intron model using pytorch-crf for baseline comparison.
+
+    Uses the same encoder interface but replaces SemiMarkovCRFHead
+    with torchcrf.CRF (linear CRF, no duration modeling).
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        num_classes: int = NUM_CLASSES,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        if not HAS_TORCHCRF:
+            raise ImportError(
+                "pytorch-crf required for this model. " "Install with: pip install pytorch-crf"
+            )
+        self.encoder = encoder
+        self.emission_proj = nn.Linear(hidden_dim, num_classes)
+        self.crf = TorchCRF(num_classes, batch_first=True)
+
+    def forward(self, sequence: Tensor, _lengths: Tensor) -> Tensor:
+        """Forward pass returning emission scores."""
+        hidden = self.encoder(sequence)
+        return self.emission_proj(hidden)
+
+    def compute_loss(
+        self,
+        sequence: Tensor,
+        lengths: Tensor,
+        labels: Tensor,
+        **_kwargs,
+    ) -> Tensor:
+        """
+        Compute NLL loss using pytorch-crf.
+
+        Args:
+            sequence: Input features (batch, T, input_dim)
+            lengths: Sequence lengths (batch,)
+            labels: Per-position labels (batch, T)
+            **_kwargs: Ignored (for API compatibility with ExonIntronModel)
+        """
+        hidden = self.encoder(sequence)
+        emissions = self.emission_proj(hidden)
+
+        _, seq_len = sequence.shape[:2]
+        mask = torch.arange(seq_len, device=sequence.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # pytorch-crf requires valid labels (no -100), replace padding with 0
+        labels_clean = labels.clone()
+        labels_clean[labels == -100] = 0
+
+        # pytorch-crf.forward() returns log-likelihood, we want NLL
+        log_likelihood = self.crf(emissions, labels_clean, mask=mask, reduction="mean")
+        return -log_likelihood
+
+    def decode(self, sequence: Tensor, lengths: Tensor) -> list[list[int]]:
+        """
+        Viterbi decode to get best label sequences.
+
+        Returns:
+            List of label sequences (one per batch element).
+        """
+        hidden = self.encoder(sequence)
+        emissions = self.emission_proj(hidden)
+
+        _, seq_len = sequence.shape[:2]
+        mask = torch.arange(seq_len, device=sequence.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # Returns list of lists (batch_size x variable_length)
+        return self.crf.decode(emissions, mask=mask)
 
 
 # =============================================================================
@@ -969,11 +1436,19 @@ def train_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model: ExonIntronModel,
+    model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
+    is_pytorch_crf: bool = False,
 ) -> SegmentMetrics:
-    """Evaluate model on a dataset."""
+    """Evaluate model on a dataset.
+
+    Args:
+        model: Model to evaluate (ExonIntronModel or ExonIntronModelPytorchCRF)
+        dataloader: Data loader
+        device: Device
+        is_pytorch_crf: If True, model is ExonIntronModelPytorchCRF (returns list[list[int]])
+    """
     model.eval()
 
     all_predictions = []
@@ -991,23 +1466,27 @@ def evaluate(
 
         for i in range(len(lengths)):
             seq_len = lengths[i].item()
-
-            # Get predicted labels from segments
-            # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
-            # Convert to exclusive for numpy slicing: [start:end+1]
-            pred_labels = np.zeros(seq_len, dtype=np.int64)
-            for seg in result.segments[i]:
-                pred_labels[seg.start : seg.end + 1] = seg.label
-
             true_labels = labels[i, :seq_len].cpu().numpy()
+
+            if is_pytorch_crf:
+                # pytorch-crf returns list[list[int]]
+                pred_labels = np.array(result[i][:seq_len], dtype=np.int64)
+                pred_segs = extract_segments(pred_labels)
+            else:
+                # torch-semimarkov returns DecodeResult with segments
+                # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
+                # Convert to exclusive for numpy slicing: [start:end+1]
+                pred_labels = np.zeros(seq_len, dtype=np.int64)
+                for seg in result.segments[i]:
+                    pred_labels[seg.start : seg.end + 1] = seg.label
+                pred_segs = [
+                    SegmentAnnotation(s.start, s.end + 1, s.label) for s in result.segments[i]
+                ]
+
+            true_segs = extract_segments(true_labels)
 
             all_predictions.append(pred_labels)
             all_targets.append(true_labels)
-
-            # Convert to SegmentAnnotation
-            pred_segs = [SegmentAnnotation(s.start, s.end + 1, s.label) for s in result.segments[i]]
-            true_segs = extract_segments(true_labels)
-
             all_pred_segments.append(pred_segs)
             all_true_segments.append(true_segs)
 
@@ -1037,7 +1516,8 @@ def evaluate(
 
 def train_model(
     data_dir: Path,
-    model_type: Literal["linear", "semicrf"] = "semicrf",
+    model_type: Literal["pytorch-crf", "linear", "semicrf"] = "semicrf",
+    encoder_type: Literal["bilstm", "mamba", "mamba_stub"] = "bilstm",
     max_duration: int = 500,
     hidden_dim: int = 256,
     num_layers: int = 2,
@@ -1045,11 +1525,30 @@ def train_model(
     learning_rate: float = 1e-3,
     epochs: int = 50,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
-) -> tuple[ExonIntronModel, dict]:
+    # Mamba-specific hyperparameters
+    d_state: int = 16,
+    d_conv: int = 4,
+    expand: int = 2,
+) -> tuple[nn.Module, SegmentMetrics | None]:
     """
     Train a model and return it with metrics.
+
+    Args:
+        data_dir: Directory containing preprocessed data
+        model_type: CRF type - "pytorch-crf", "linear" (K=1), or "semicrf" (K>1)
+        encoder_type: Encoder type - "bilstm", "mamba", or "mamba_stub"
+        max_duration: Maximum segment duration K (for semicrf)
+        hidden_dim: Hidden dimension for encoder and CRF
+        num_layers: Number of encoder layers (2 for BiLSTM, 4 recommended for Mamba)
+        batch_size: Training batch size
+        learning_rate: Learning rate
+        epochs: Number of training epochs
+        device: Device to train on
+        d_state: Mamba SSM state dimension
+        d_conv: Mamba local convolution width
+        expand: Mamba expansion factor
     """
-    device = torch.device(device)
+    device_obj = torch.device(device)
 
     # Load data
     train_dataset = GencodeDataset(data_dir / "train.jsonl")
@@ -1062,33 +1561,65 @@ def train_model(
         val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
     )
 
-    # Build model
-    encoder = BiLSTMEncoder(hidden_dim=hidden_dim, num_layers=num_layers)
+    # Adjust layers for encoder type (Mamba typically uses more layers)
+    encoder_layers = num_layers if encoder_type == "bilstm" else max(num_layers, 4)
 
-    k = 1 if model_type == "linear" else max_duration
-    model = ExonIntronModel(
-        encoder=encoder,
-        max_duration=k,
+    # Build encoder
+    encoder = create_encoder(
+        encoder_type=encoder_type,
         hidden_dim=hidden_dim,
-    ).to(device)
+        num_layers=encoder_layers,
+        d_state=d_state,
+        d_conv=d_conv,
+        expand=expand,
+    )
+
+    # Build model based on type
+    if model_type == "pytorch-crf":
+        if not HAS_TORCHCRF:
+            raise ImportError(
+                "pytorch-crf required for this model. Install with: pip install pytorch-crf"
+            )
+        model: nn.Module = ExonIntronModelPytorchCRF(
+            encoder=encoder,
+            hidden_dim=hidden_dim,
+        ).to(device_obj)
+        k = 1
+    elif model_type == "linear":
+        k = 1
+        model = ExonIntronModel(
+            encoder=encoder,
+            max_duration=k,
+            hidden_dim=hidden_dim,
+        ).to(device_obj)
+    else:  # semicrf
+        k = max_duration
+        model = ExonIntronModel(
+            encoder=encoder,
+            max_duration=k,
+            hidden_dim=hidden_dim,
+        ).to(device_obj)
 
     logger.info(
-        f"Model: {model_type}, K={k}, params={sum(p.numel() for p in model.parameters()):,}"
+        f"Model: {model_type} + {encoder_type}, K={k}, "
+        f"params={sum(p.numel() for p in model.parameters()):,}"
     )
+
+    is_pytorch_crf = model_type == "pytorch-crf"
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    best_val_f1 = 0
-    best_metrics = None
+    best_val_f1 = 0.0
+    best_metrics: SegmentMetrics | None = None
 
     for epoch in range(epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
+        train_loss = train_epoch(model, train_loader, optimizer, device_obj)
         scheduler.step()
 
         # Evaluate every 5 epochs
         if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
-            val_metrics = evaluate(model, val_loader, device)
+            val_metrics = evaluate(model, val_loader, device_obj, is_pytorch_crf)
 
             logger.info(
                 f"Epoch {epoch+1}/{epochs} | Loss: {train_loss:.4f} | "
@@ -1104,58 +1635,135 @@ def train_model(
     return model, best_metrics
 
 
-def compare_models(data_dir: Path, max_duration: int = 500, **kwargs):
+def compare_models(
+    data_dir: Path,
+    encoder_type: Literal["bilstm", "mamba", "mamba_stub"] = "bilstm",
+    max_duration: int = 500,
+    **kwargs,
+):
     """
-    Compare linear CRF vs semi-CRF on the benchmark.
-    """
-    results = {}
+    Compare CRF models in a 3-way comparison.
 
-    # Train linear CRF
+    Models compared:
+    1. pytorch-crf (optional): External linear CRF baseline
+    2. K=1 torch-semimarkov: Linear CRF via streaming kernel
+    3. K>1 torch-semimarkov: Full semi-CRF with duration modeling
+
+    All use the same encoder (BiLSTM or Mamba).
+    """
+    results: dict[str, SegmentMetrics | None] = {}
+
+    # 1. pytorch-crf baseline (optional)
+    if HAS_TORCHCRF:
+        logger.info("=" * 60)
+        logger.info(f"Training PYTORCH-CRF ({encoder_type} encoder)")
+        logger.info("=" * 60)
+        _, pytorch_crf_metrics = train_model(
+            data_dir,
+            model_type="pytorch-crf",
+            encoder_type=encoder_type,
+            **kwargs,
+        )
+        results["pytorch_crf"] = pytorch_crf_metrics
+    else:
+        logger.warning("pytorch-crf not installed, skipping baseline")
+
+    # 2. torch-semimarkov K=1 (linear CRF)
     logger.info("=" * 60)
-    logger.info("Training LINEAR CRF (K=1)")
+    logger.info(f"Training LINEAR CRF K=1 ({encoder_type} encoder)")
     logger.info("=" * 60)
-    _, linear_metrics = train_model(data_dir, model_type="linear", **kwargs)
+    _, linear_metrics = train_model(
+        data_dir,
+        model_type="linear",
+        encoder_type=encoder_type,
+        **kwargs,
+    )
     results["linear_crf"] = linear_metrics
 
-    # Train semi-CRF
+    # 3. Semi-CRF K>1
     logger.info("=" * 60)
-    logger.info(f"Training SEMI-CRF (K={max_duration})")
+    logger.info(f"Training SEMI-CRF K={max_duration} ({encoder_type} encoder)")
     logger.info("=" * 60)
     _, semicrf_metrics = train_model(
-        data_dir, model_type="semicrf", max_duration=max_duration, **kwargs
+        data_dir,
+        model_type="semicrf",
+        encoder_type=encoder_type,
+        max_duration=max_duration,
+        **kwargs,
     )
     results["semi_crf"] = semicrf_metrics
 
     # Print comparison
+    _print_comparison(results)
+
+    return results
+
+
+def _print_comparison(results: dict[str, SegmentMetrics | None]) -> None:
+    """Print comparison table for model results."""
     logger.info("\n" + "=" * 60)
-    logger.info("COMPARISON: Linear CRF vs Semi-CRF")
+    logger.info("COMPARISON RESULTS")
     logger.info("=" * 60)
 
-    print(f"\n{'Metric':<30} {'Linear CRF':>15} {'Semi-CRF':>15} {'Δ':>10}")
-    print("-" * 70)
+    # Determine which models we have
+    models = [k for k, v in results.items() if v is not None]
+    if len(models) < 2:
+        print("Not enough models for comparison")
+        return
 
+    # Header
+    header = f"{'Metric':<25}"
+    for model in models:
+        header += f" {model:>15}"
+    if "semi_crf" in models and "linear_crf" in models:
+        header += f" {'Δ(semi-lin)':>12}"
+    print(f"\n{header}")
+    print("-" * len(header))
+
+    # Main metrics
     for metric_name in ["position_f1_macro", "boundary_f1", "segment_f1"]:
-        linear_val = getattr(results["linear_crf"], metric_name)
-        semi_val = getattr(results["semi_crf"], metric_name)
-        delta = semi_val - linear_val
-        print(f"{metric_name:<30} {linear_val:>15.4f} {semi_val:>15.4f} {delta:>+10.4f}")
+        row = f"{metric_name:<25}"
+        vals = {}
+        for model in models:
+            if results[model] is not None:
+                val = getattr(results[model], metric_name)
+                vals[model] = val
+                row += f" {val:>15.4f}"
+            else:
+                row += f" {'N/A':>15}"
+        if "semi_crf" in vals and "linear_crf" in vals:
+            delta = vals["semi_crf"] - vals["linear_crf"]
+            row += f" {delta:>+12.4f}"
+        print(row)
 
     # Boundary F1 at different tolerances
     print("\nBoundary F1 at different tolerances:")
     for tol in [0, 1, 2, 5, 10]:
-        linear_val = results["linear_crf"].boundary_f1_tolerance.get(tol, 0)
-        semi_val = results["semi_crf"].boundary_f1_tolerance.get(tol, 0)
-        delta = semi_val - linear_val
-        print(f"  tol={tol:<3} {linear_val:>15.4f} {semi_val:>15.4f} {delta:>+10.4f}")
+        row = f"  tol={tol:<3}"
+        vals = {}
+        for model in models:
+            if results[model] is not None:
+                val = results[model].boundary_f1_tolerance.get(tol, 0)
+                vals[model] = val
+                row += f" {val:>15.4f}"
+            else:
+                row += f" {'N/A':>15}"
+        if "semi_crf" in vals and "linear_crf" in vals:
+            delta = vals["semi_crf"] - vals["linear_crf"]
+            row += f" {delta:>+12.4f}"
+        print(row)
 
-    # Duration calibration
+    # Duration calibration (KL divergence)
     print("\nDuration KL divergence (lower is better):")
     for label in LABEL_NAMES:
-        linear_kl = results["linear_crf"].duration_kl.get(label, float("nan"))
-        semi_kl = results["semi_crf"].duration_kl.get(label, float("nan"))
-        print(f"  {label:<15} {linear_kl:>15.4f} {semi_kl:>15.4f}")
-
-    return results
+        row = f"  {label:<20}"
+        for model in models:
+            if results[model] is not None:
+                kl = results[model].duration_kl.get(label, float("nan"))
+                row += f" {kl:>15.4f}"
+            else:
+                row += f" {'N/A':>15}"
+        print(row)
 
 
 # =============================================================================
@@ -1184,23 +1792,59 @@ def main():
     # Train command
     train_parser = subparsers.add_parser("train", help="Train a model")
     train_parser.add_argument("--data-dir", type=Path, required=True)
-    train_parser.add_argument("--model", choices=["linear", "semicrf"], default="semicrf")
+    train_parser.add_argument(
+        "--model",
+        choices=["pytorch-crf", "linear", "semicrf"],
+        default="semicrf",
+        help="Model type: pytorch-crf (external lib), linear (K=1), semicrf (K>1)",
+    )
+    train_parser.add_argument(
+        "--encoder",
+        choices=["bilstm", "mamba", "mamba_stub"],
+        default="bilstm",
+        help="Encoder type: bilstm (default), mamba (requires mamba-ssm), mamba_stub (CPU dev)",
+    )
     train_parser.add_argument("--max-duration", type=int, default=500)
     train_parser.add_argument("--hidden-dim", type=int, default=256)
+    train_parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=2,
+        help="Number of encoder layers (2 for BiLSTM, 4 recommended for Mamba)",
+    )
     train_parser.add_argument("--epochs", type=int, default=50)
     train_parser.add_argument("--batch-size", type=int, default=32)
     train_parser.add_argument("--lr", type=float, default=1e-3)
+    train_parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
+    # Mamba-specific
+    train_parser.add_argument("--d-state", type=int, default=16, help="Mamba SSM state dimension")
+    train_parser.add_argument("--d-conv", type=int, default=4, help="Mamba local convolution width")
+    train_parser.add_argument("--expand", type=int, default=2, help="Mamba expansion factor")
 
     # Compare command
-    compare_parser = subparsers.add_parser("compare", help="Compare linear CRF vs semi-CRF")
+    compare_parser = subparsers.add_parser(
+        "compare", help="Compare CRF models (pytorch-crf, linear, semi-CRF)"
+    )
     compare_parser.add_argument("--data-dir", type=Path, required=True)
+    compare_parser.add_argument(
+        "--encoder",
+        choices=["bilstm", "mamba", "mamba_stub"],
+        default="bilstm",
+        help="Encoder type for all models",
+    )
     compare_parser.add_argument("--max-duration", type=int, default=500)
     compare_parser.add_argument("--hidden-dim", type=int, default=256)
+    compare_parser.add_argument("--num-layers", type=int, default=2)
     compare_parser.add_argument("--epochs", type=int, default=50)
     compare_parser.add_argument("--batch-size", type=int, default=32)
+    compare_parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
     compare_parser.add_argument(
         "--output-json", type=Path, default=None, help="Save results to JSON file"
     )
+    # Mamba-specific
+    compare_parser.add_argument("--d-state", type=int, default=16)
+    compare_parser.add_argument("--d-conv", type=int, default=4)
+    compare_parser.add_argument("--expand", type=int, default=2)
 
     args = parser.parse_args()
 
@@ -1209,22 +1853,36 @@ def main():
             args.gtf, args.fasta, args.output_dir, chunk_size=args.chunk_size, overlap=args.overlap
         )
     elif args.command == "train":
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         train_model(
             args.data_dir,
             model_type=args.model,
+            encoder_type=args.encoder,
             max_duration=args.max_duration,
             hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.lr,
+            device=device,
+            d_state=args.d_state,
+            d_conv=args.d_conv,
+            expand=args.expand,
         )
     elif args.command == "compare":
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         results = compare_models(
             args.data_dir,
+            encoder_type=args.encoder,
             max_duration=args.max_duration,
             hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            device=device,
+            d_state=args.d_state,
+            d_conv=args.d_conv,
+            expand=args.expand,
         )
         if args.output_json:
             from datetime import datetime
@@ -1233,13 +1891,13 @@ def main():
                 "task": "gencode",
                 "timestamp": datetime.now().isoformat(),
                 "config": {
+                    "encoder_type": args.encoder,
                     "max_duration": args.max_duration,
                     "hidden_dim": args.hidden_dim,
                     "epochs": args.epochs,
                     "batch_size": args.batch_size,
                 },
-                "linear_crf": results["linear_crf"].to_dict(),
-                "semi_crf": results["semi_crf"].to_dict(),
+                "results": {k: v.to_dict() if v is not None else None for k, v in results.items()},
             }
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
             with open(args.output_json, "w") as f:
