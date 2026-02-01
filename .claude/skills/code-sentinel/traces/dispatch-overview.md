@@ -1,7 +1,7 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `26119fa`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `UNCOMMITTED`
 - `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
@@ -129,7 +129,7 @@ use_linear_scan = K_C_product > 200
 
 ## Streaming Dispatch Conditions
 
-### can_use_triton (line 636)
+### can_use_triton (line 641)
 
 ```python
 can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
@@ -139,7 +139,7 @@ can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 - `use_triton`: User parameter (default True)
 - `cum_scores.is_cuda`: Input is on GPU
 
-### needs_grad (lines 573-579)
+### needs_grad (lines 578-584)
 
 ```python
 needs_grad = (
@@ -194,13 +194,13 @@ needs_grad = (
 
 | Function | Line | Called When |
 |----------|------|-------------|
-| `semi_crf_streaming_forward()` | 474 | Public API entry point |
-| `LinearCRFStreaming.apply()` | 590 | K=1, needs_grad, no boundaries |
-| `SemiCRFK2Streaming.apply()` | 616 | K=2, needs_grad, no boundaries |
-| `SemiCRFStreamingTriton.apply()` | 642 | K>=3, GPU, Triton, needs_grad |
-| `SemiCRFStreaming.apply()` | 655 | K>=3, no Triton, needs_grad |
-| `launch_streaming_triton_kernel()` | 669 | K>=3, GPU, Triton, inference |
-| `semi_crf_streaming_forward_pytorch()` | 683 | K>=3, CPU, inference |
+| `semi_crf_streaming_forward()` | 479 | Public API entry point |
+| `LinearCRFStreaming.apply()` | 595 | K=1, needs_grad, no boundaries |
+| `SemiCRFK2Streaming.apply()` | 621 | K=2, needs_grad, no boundaries |
+| `SemiCRFStreamingTriton.apply()` | 647 | K>=3, GPU, Triton, needs_grad |
+| `SemiCRFStreaming.apply()` | 660 | K>=3, no Triton, needs_grad |
+| `launch_streaming_triton_kernel()` | 674 | K>=3, GPU, Triton, inference |
+| `semi_crf_streaming_forward_pytorch()` | 688 | K>=3, CPU, inference |
 
 ### Non-Streaming API (semimarkov.py)
 
@@ -241,11 +241,11 @@ needs_grad = (
 | Location | Guard | Purpose |
 |----------|-------|---------|
 | autograd.py:88-95 | `torch.isfinite(partition)` | Validate partition before PyTorch backward |
-| autograd.py:224-231 | `torch.isfinite(partition)` | Validate partition before Triton backward |
-| autograd.py:339-345 | `torch.isfinite(partition)` | Validate partition before K=1 backward |
-| autograd.py:431-437 | `torch.isfinite(partition)` | Validate partition before K=2 backward |
+| autograd.py:228-235 | `torch.isfinite(partition)` | Validate partition before Triton backward |
+| autograd.py:344-350 | `torch.isfinite(partition)` | Validate partition before K=1 backward |
+| autograd.py:436-442 | `torch.isfinite(partition)` | Validate partition before K=2 backward |
 | autograd.py:115-121 | `torch.isfinite(grad_cum_scores)` | Validate PyTorch backward output |
-| autograd.py:254-265 | `torch.isfinite(grad_*)` | Validate Triton backward outputs |
+| autograd.py:258-269 | `torch.isfinite(grad_*)` | Validate Triton backward outputs |
 
 ## Known Issues
 
@@ -256,6 +256,7 @@ needs_grad = (
 
 ## Version History
 
+- **2026-02-01**: Updated line numbers for autograd.py changes (log_norm_checkpoints support)
 - **2026-01-28**: Documented dual indexing scheme divergence (streaming 0-based vs non-streaming 1-based)
 - **2026-01-28**: Added non-streaming backends (`semimarkov.py`) decision tree, algorithm lookup, entry points, and failure routing @ commit `26119fa`
 - **2026-01-27**: Initial trace (streaming API only) @ commit `26119fa`

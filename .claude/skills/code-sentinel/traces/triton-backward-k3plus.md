@@ -1,11 +1,13 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `09e86ed`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `UNCOMMITTED`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
 
 The Triton backward kernel computes gradients for the Semi-CRF partition function using the forward-backward algorithm with memory-efficient streaming checkpoints. For each checkpoint segment (processed in reverse), it recomputes alpha values forward, then computes beta backward while accumulating gradients.
+
+**Numerical Stability (T > 100K)**: Uses relative log-marginal computation (Flash Attention pattern) to prevent overflow when alpha + beta >> log_Z at extreme scale. The log_norm_checkpoints from forward pass are used to bridge the gap between normalized alpha values and the full-scale partition function.
 
 ## Shape Legend
 
@@ -33,13 +35,14 @@ Inputs (from forward):
   duration_bias: (K, C)                  <- Original input
   lengths: (B,)                          <- Original input
   log_Z: (B,)                            <- Partition from forward
-  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved ring states
+  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved ring states (normalized)
+  log_norm_checkpoints: (B, num_ckpts)   <- Cumulative normalization factors
   grad_output: (B,)                      <- Upstream gradient
 
-Launcher allocates (triton_backward.py:897-920):
+Launcher allocates (triton_backward.py:1000-1020):
   alpha_buffer: (B, SEGMENT_SIZE, C_PAD) <- Recomputed alpha within segment
   beta_ring: (B, K, C_PAD)               <- Beta ring buffer
-  grad_cum_scores: (B, T+1, C_PAD) float64 <- Output gradient
+  grad_cum_scores: (B, T+1, C_PAD) float64 <- Output gradient (float64 for T=100k+ precision)
   grad_tr_workspace: (B, C, C) or (B, K, C, C) float64 <- Per-batch accumulator
   grad_db_workspace: (B, K, C) float64   <- Per-batch accumulator
 
@@ -78,16 +81,31 @@ for t in range(seg_start, seg_end):
 ### Phase 2: Beta Computation + Gradient Accumulation
 
 ```python
+# Load cumulative log normalization factor for this checkpoint
+log_norm_at_ckpt = log_norm_checkpoints[ckpt_idx]
+
 # Beta backward while accumulating gradients
 for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
     beta_t = logsumexp_k(beta[t+k] + edge[t -> t+k])
 
-    # Compute marginal probabilities
+    # Compute marginal probabilities using relative log-marginal (Flash Attention pattern)
     for k in range(1, K+1):
-        log_marginal = alpha[t] + edge[t, t+k] + beta[t+k] - log_Z
-        marginal = exp(log_marginal) * grad_output
+        # Step 1: Compute log_joint (without log_Z subtraction)
+        log_joint = alpha[t] + edge[t, t+k] + beta[t+k]
 
-        # Accumulate gradients (clamp log_marginal to prevent exp overflow)
+        # Step 2: Find local reference and compute relative marginal
+        local_ref = max(log_joint)
+        marginal_unnorm = exp(log_joint - local_ref)
+
+        # Step 3: Apply scale factor using log_norm_at_ckpt
+        # This bridges normalized alpha (~0) to full-scale log_Z (~250k at T=100k)
+        log_scale = local_ref + log_norm_at_ckpt - log_Z
+        scale = exp(clamp(log_scale, min=-700, max=0))
+
+        # Step 4: Final marginal
+        marginal = marginal_unnorm * scale * grad_output
+
+        # Accumulate gradients
         grad_cum_scores[t:t+k] += marginal
         grad_transition += marginal
         grad_duration_bias[k] += marginal
@@ -107,7 +125,8 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 | Metric | Value |
 |--------|-------|
 | **Expected dtype** | float32 inputs, float64 accumulators |
-| **Accumulator dtype** | float64 (triton_backward.py:897-905) |
+| **Accumulator dtype** | float64 for all gradients (triton_backward.py:1014-1020) |
+| **grad_cum_scores dtype** | float64 (was float32, changed for T=100k+ precision) |
 | **Alpha buffer** | `(B, SEGMENT_SIZE, C_PAD) * 4` bytes |
 | **Beta ring** | `(B, K, C_PAD) * 4` bytes |
 | **Grad workspace** | `(B, C, C) * 8` or `(B, K, C, C) * 8` bytes (float64) |
@@ -119,11 +138,12 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 
 | What | Status | Why |
 |------|--------|-----|
-| `ring_checkpoints` | Loaded | Saved in forward |
+| `ring_checkpoints` | Loaded | Saved in forward (normalized) |
+| `log_norm_checkpoints` | Loaded | Cumulative normalization factors |
 | `alpha[seg_start:seg_end]` | Recomputed | From checkpoint, forward through segment |
 | `beta` values | Computed | Backward from final position |
 | `edge` potentials | Recomputed | On-the-fly from cum_scores |
-| `log_marginal` | Computed | alpha + edge + beta - log_Z |
+| `log_marginal` | Computed | Relative log-marginal with scale correction |
 
 **Memory tradeoff**: sqrt(T*K) checkpoints, recompute O(checkpoint_interval) forward within each segment.
 
@@ -205,5 +225,6 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-01**: Added log_norm_checkpoints support for T=100k+ stability; relative log-marginal computation (Flash Attention pattern); grad_cum_scores now uses float64; removed epsilon from logsumexp
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests
 - **2026-01-27**: Initial trace @ commit `09e86ed`

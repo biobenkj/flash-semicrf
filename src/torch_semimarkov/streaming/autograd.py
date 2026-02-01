@@ -176,16 +176,18 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         num_warps: int = 4,
     ) -> torch.Tensor:
         # Use Triton kernel for forward
-        partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
-            cum_scores.detach(),
-            transition.detach(),
-            duration_bias.detach(),
-            lengths,
-            K,
-            semiring,
-            proj_start=proj_start.detach() if proj_start is not None else None,
-            proj_end=proj_end.detach() if proj_end is not None else None,
-            num_warps=num_warps,
+        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+            launch_streaming_triton_kernel(
+                cum_scores.detach(),
+                transition.detach(),
+                duration_bias.detach(),
+                lengths,
+                K,
+                semiring,
+                proj_start=proj_start.detach() if proj_start is not None else None,
+                proj_end=proj_end.detach() if proj_end is not None else None,
+                num_warps=num_warps,
+            )
         )
 
         # Save for backward
@@ -195,6 +197,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -214,6 +217,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -241,6 +245,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
                 lengths,
                 partition,
                 ring_checkpoints,
+                log_norm_checkpoints,
                 ctx.checkpoint_interval,
                 grad_output,
                 proj_start=proj_start,

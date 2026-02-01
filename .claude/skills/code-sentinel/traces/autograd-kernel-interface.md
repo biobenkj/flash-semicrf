@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `40fe66b`
+**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `UNCOMMITTED`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -17,18 +17,19 @@ Documents the contract between autograd functions (`SemiCRFStreamingTriton`, `Se
 
 ## ctx.save_for_backward() Semantics
 
-### SemiCRFStreamingTriton (lines 192-205)
+### SemiCRFStreamingTriton (lines 196-210)
 
 ```python
 ctx.save_for_backward(
-    cum_scores,        # (B, T+1, C) - with gradients
-    transition,        # (C, C) or (K, C, C) - with gradients
-    duration_bias,     # (K, C) - with gradients
-    lengths,           # (B,) - no gradients
-    ring_checkpoints,  # (B, num_ckpts, K, C_PAD) - from forward kernel
-    partition,         # (B,) - forward output, validated before backward
-    proj_start,        # (B, T, C) or None - optional, with gradients
-    proj_end,          # (B, T, C) or None - optional, with gradients
+    cum_scores,           # (B, T+1, C) - with gradients
+    transition,           # (C, C) or (K, C, C) - with gradients
+    duration_bias,        # (K, C) - with gradients
+    lengths,              # (B,) - no gradients
+    ring_checkpoints,     # (B, num_ckpts, K, C_PAD) - from forward kernel
+    log_norm_checkpoints, # (B, num_ckpts) - cumulative normalization factors
+    partition,            # (B,) - forward output, validated before backward
+    proj_start,           # (B, T, C) or None - optional, with gradients
+    proj_end,             # (B, T, C) or None - optional, with gradients
 )
 ctx.K = K                           # int constant
 ctx.semiring = semiring             # str constant
@@ -48,7 +49,8 @@ Same tensors saved, minus `num_warps`.
 | `transition` | Yes | Needed for edge computation |
 | `duration_bias` | Yes | Needed for edge computation |
 | `lengths` | Yes | Needed for masking |
-| `ring_checkpoints` | Yes | Checkpointed alpha states |
+| `ring_checkpoints` | Yes | Checkpointed alpha states (normalized) |
+| `log_norm_checkpoints` | Yes | Cumulative normalization factors for T=100k+ stability |
 | `partition` | Yes | Validated before backward, used for normalization |
 | `proj_start/end` | Yes | Needed if boundaries used |
 | **Alpha values** | Partial | Only checkpoints saved; recompute forward between checkpoints |
@@ -131,23 +133,26 @@ if not torch.isfinite(grad_cum_scores).all():
 ### Triton Forward: `launch_streaming_triton_kernel()`
 
 ```python
-partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
-    cum_scores.detach(),      # Detached - kernel doesn't need gradients
-    transition.detach(),
-    duration_bias.detach(),
-    lengths,
-    K,
-    semiring,
-    proj_start=proj_start.detach() if proj_start is not None else None,
-    proj_end=proj_end.detach() if proj_end is not None else None,
-    num_warps=num_warps,
+partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+    launch_streaming_triton_kernel(
+        cum_scores.detach(),      # Detached - kernel doesn't need gradients
+        transition.detach(),
+        duration_bias.detach(),
+        lengths,
+        K,
+        semiring,
+        proj_start=proj_start.detach() if proj_start is not None else None,
+        proj_end=proj_end.detach() if proj_end is not None else None,
+        num_warps=num_warps,
+    )
 )
 ```
 
 Returns:
 - `partition`: (B,) log partition values
-- `ring_checkpoints`: (B, num_ckpts, K, C_PAD) for backward
+- `ring_checkpoints`: (B, num_ckpts, K, C_PAD) for backward (normalized)
 - `checkpoint_interval`: int actual interval used
+- `log_norm_checkpoints`: (B, num_ckpts) cumulative normalization factors
 
 ### Triton Backward: `launch_streaming_triton_backward()`
 
@@ -159,7 +164,8 @@ grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj
         duration_bias,
         lengths,
         partition,            # Forward output
-        ring_checkpoints,     # Checkpoints from forward
+        ring_checkpoints,     # Checkpoints from forward (normalized)
+        log_norm_checkpoints, # Cumulative normalization factors
         checkpoint_interval,
         grad_output,          # Upstream gradient
         proj_start=proj_start,
@@ -207,4 +213,5 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
+- **2026-02-01**: Added log_norm_checkpoints to save_for_backward and kernel interfaces for T=100k+ numerical stability
 - **2026-01-27**: Initial trace @ commit `40fe66b`

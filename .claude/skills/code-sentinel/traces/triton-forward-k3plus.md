@@ -1,11 +1,13 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `09e86ed`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `UNCOMMITTED`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
 
 The Triton forward kernel computes the Semi-CRF partition function on GPU using O(KC) ring buffer memory. Edge potentials are computed on-the-fly from cumulative scores via prefix-sum decomposition. This is the production path for genome-scale sequences (T > 10K) with K >= 3.
+
+**Numerical Stability (T > 100K)**: Uses Flash Attention-style checkpoint normalization to prevent alpha values from growing unbounded at extreme sequence lengths. Log normalization factors are tracked cumulatively and added back to produce the correct partition function.
 
 ## Shape Legend
 
@@ -41,9 +43,9 @@ These require human/agent judgment when loading the trace.
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
 | `SemiCRFStreamingTriton.forward()` | autograd.py:166 | K>=3, GPU, needs_grad, use_triton |
-| `launch_streaming_triton_kernel()` | triton_forward.py:811 | Direct inference or from autograd |
+| `launch_streaming_triton_kernel()` | triton_forward.py:889 | Direct inference or from autograd |
 | `semi_crf_streaming_scan_kernel()` | triton_forward.py:84 | Log semiring (partition function) |
-| `semi_crf_streaming_scan_kernel_max()` | triton_forward.py:370 | Max semiring (Viterbi) |
+| `semi_crf_streaming_scan_kernel_max()` | triton_forward.py:441 | Max semiring (Viterbi) |
 
 ## Dispatch Conditions
 
@@ -68,19 +70,21 @@ Inputs:
   proj_start: (B, T, C) optional      <- Start boundary scores
   proj_end: (B, T, C) optional        <- End boundary scores
 
-Launcher allocates (triton_forward.py:906-919):
+Launcher allocates (triton_forward.py:988-1007):
   partition: (B,)                     <- Output
   ring_buffer: (B, K, C_PAD)          <- Live ring buffer (initialized: [0,:,0,:C]=0, rest=NEG_INF)
   ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved states for backward
+  log_norm_checkpoints: (B, num_ckpts)       <- Cumulative normalization factors
 
 Kernel produces:
   partition: (B,)                     <- Log partition function
   ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Checkpoints at interval boundaries
+  log_norm_checkpoints: (B, num_ckpts)       <- For numerical stability at extreme T
 ```
 
 ## Algorithm Steps
 
-### 1. Buffer Initialization (triton_forward.py:911-919)
+### 1. Buffer Initialization (triton_forward.py:988-1007)
 
 ```python
 ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
@@ -88,13 +92,15 @@ ring_buffer[:, 0, :C] = 0.0  # alpha[0, c] = 0.0 for all valid labels
 
 ring_checkpoints = torch.full((batch, num_ckpts, K, C_PAD), NEG_INF, ...)
 ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
+
+log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
 ```
 
-### 2. Kernel Launch (triton_forward.py:936-981)
+### 2. Kernel Launch (triton_forward.py:1028-1076)
 
 Grid: `(batch,)` - one program per batch element
 
-### 3. Main Forward Loop (triton_forward.py:198-354)
+### 3. Main Forward Loop (triton_forward.py:206-420)
 
 ```
 for t in range(1, T + 1):  # t = 1, 2, ..., T
@@ -105,43 +111,60 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
         k_valid = (k <= t) & (k <= K)
         start_pos = t - k
 
-        # 3a. Read alpha[start_pos] from ring buffer (line 212-219)
+        # 3a. Read alpha[start_pos] from ring buffer (line 220-227)
         ring_k_idx = start_pos % K
         alpha_prev = load(ring_buffer[ring_k_idx])  # (C_PAD,)
 
-        # 3b. Compute edge on-the-fly (lines 221-283)
+        # 3b. Compute edge on-the-fly (lines 229-291)
         content_score = cum_scores[t] - cum_scores[start_pos]  # (C_PAD,)
         segment_score = content_score + duration_bias[k-1]     # (C_PAD,)
         if HAS_BOUNDARIES:
             segment_score += proj_start[start_pos] + proj_end[t-1]
         edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
 
-        # 3c. Compute scores and logsumexp over c_src (lines 285-301)
+        # 3c. Compute scores and logsumexp over c_src (lines 299-311)
         scores = alpha_prev[None, :] + edge_block  # (C_PAD, C_PAD)
         score_for_k = logsumexp(scores, axis=1)    # (C_PAD,) - with NEG_INF guard
 
-        # 3d. Accumulate into alpha_t via logsumexp (lines 306-314)
+        # 3d. Accumulate into alpha_t via logsumexp (lines 316-324)
         alpha_t = logsumexp_2way(alpha_t, score_for_k)  # with NEG_INF guard
 
-    # 3e. Store to ring buffer (lines 319-325)
+    # 3e. Store to ring buffer (lines 329-335)
     ring_t_idx = t % K
     store(ring_buffer[ring_t_idx], alpha_t)
 
-    # 3f. Checkpoint at interval boundaries (lines 327-348)
+    # 3f. Checkpoint with normalization (lines 338-400)
     if t % CHECKPOINT_INTERVAL == 0:
         ckpt_idx = t // CHECKPOINT_INTERVAL
+
+        # 3f-i. Normalize alpha for numerical stability at extreme T
+        shift = max(alpha_t)  # Find normalization factor
+        accum_log_norm += shift  # Track cumulative shift
+        alpha_t = alpha_t - shift  # Normalize current alpha
+
+        # 3f-ii. Normalize entire ring buffer for consistency
+        for k_norm in range(K):
+            ring_buffer[k_norm] -= shift
+
+        # 3f-iii. Save normalized state to checkpoint
         for k_save in range(K):
             store(ring_checkpoints[ckpt_idx, k_save], ring_buffer[k_save])
+        store(log_norm_checkpoints[ckpt_idx], accum_log_norm)
 
-    # 3g. Capture final alpha at sequence end (lines 350-354)
+    # 3g. Capture final alpha at sequence end (lines 405-408)
     if t == seq_len:
         final_alpha = alpha_t
 ```
 
-### 4. Final Reduction (triton_forward.py:356-367)
+### 4. Final Reduction (triton_forward.py:419-439)
 
 ```python
-partition = logsumexp(final_alpha, axis=0)  # Reduce over labels
+# Compute raw partition from normalized final_alpha
+raw_partition = logsumexp(final_alpha, axis=0)  # Reduce over labels
+
+# Add back cumulative normalization to get true partition function
+partition = raw_partition + accum_log_norm
+
 store(out_ptr + batch_idx, partition)
 ```
 
@@ -201,23 +224,26 @@ Backward recomputes forward between checkpoints using saved ring states.
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| triton_forward.py:295-301 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
-| triton_forward.py:309-314 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
-| triton_forward.py:359-364 | Final logsumexp guard | Prevent NaN in partition output |
-| autograd.py:224-231 | `torch.isfinite(partition)` | Validate before backward |
+| triton_forward.py:304-311 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
+| triton_forward.py:316-324 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
+| triton_forward.py:340-400 | Checkpoint normalization | Prevent alpha overflow at extreme T (100k+) |
+| triton_forward.py:419-430 | Final logsumexp guard | Prevent NaN in partition output |
+| autograd.py:228-235 | `torch.isfinite(partition)` | Validate before backward |
 
-## NEG_INF Handling Pattern
+## NEG_INF Handling Pattern (Flash Attention Style)
 
 ```python
-# The critical guard pattern used throughout (triton_forward.py:295-301):
+# The critical guard pattern used throughout (triton_forward.py:304-311):
+# Flash Attention pattern: no epsilon needed inside log
+# The NEG_INF guard handles the zero case
 max_val = tl.max(scores, axis=...)
 is_all_neginf = max_val < (NEG_INF + 1.0)  # NEG_INF = -1e9
 max_val_safe = tl.where(is_all_neginf, 0.0, max_val)
-log_sum = tl.log(tl.sum(tl.exp(scores - max_val_safe[..., None]), axis=...) + 1e-10)
+log_sum = tl.log(tl.sum(tl.exp(scores - max_val_safe[..., None]), axis=...))
 result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 ```
 
-**Why**: Without this guard, `scores - max_val` yields 0 when all inputs are NEG_INF, causing `exp(0) = 1` instead of preserving NEG_INF.
+**Why**: Without this guard, `scores - max_val` yields 0 when all inputs are NEG_INF, causing `exp(0) = 1` instead of preserving NEG_INF. The `+ 1e-10` epsilon was removed following Flash Attention's pattern - the NEG_INF guard already handles the degenerate case.
 
 ## Recomputation Logic (For Backward Pass)
 
@@ -226,7 +252,8 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | `cum_scores` | Yes | ctx.save_for_backward |
 | `transition` | Yes | ctx.save_for_backward |
 | `duration_bias` | Yes | ctx.save_for_backward |
-| `ring_checkpoints` | Yes | Checkpointed alpha states |
+| `ring_checkpoints` | Yes | Checkpointed alpha states (normalized) |
+| `log_norm_checkpoints` | Yes | Cumulative normalization factors |
 | `partition` | Yes | Validated before backward |
 | **Alpha values** | Partial | Only checkpoints; recompute between them |
 | **Edge potentials** | No | Recomputed on-the-fly in backward |
@@ -261,5 +288,6 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-01**: Added Flash Attention-style checkpoint normalization for T=100k+ stability; removed epsilon from logsumexp; return type now includes `log_norm_checkpoints`
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests
 - **2026-01-27**: Initial trace @ commit `09e86ed`

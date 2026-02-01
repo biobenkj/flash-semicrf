@@ -646,25 +646,52 @@ def preprocess_gencode(
     output_dir: Path,
     chunk_size: int = 10000,
     overlap: int = 500,
+    train_chroms: list[str] | None = None,
+    val_chroms: list[str] | None = None,
+    test_chroms: list[str] | None = None,
 ):
     """
     Preprocess Gencode annotations into train/val/test chunks.
+
+    Args:
+        gtf_path: Path to Gencode GTF file
+        fasta_path: Path to reference genome FASTA
+        output_dir: Output directory for processed data
+        chunk_size: Size of each chunk in base pairs
+        overlap: Overlap between adjacent chunks
+        train_chroms: Override default training chromosomes (chr1-18).
+            Use e.g. ["chr1"] to start with a smaller dataset for debugging.
+        val_chroms: Override default validation chromosomes (chr19-20).
+        test_chroms: Override default test chromosomes (chr21-22).
     """
     if not HAS_PYFAIDX:
         raise ImportError("pyfaidx required for preprocessing: pip install pyfaidx")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use provided chromosomes or defaults
+    effective_train_chroms = train_chroms if train_chroms is not None else TRAIN_CHROMS
+    effective_val_chroms = val_chroms if val_chroms is not None else VAL_CHROMS
+    effective_test_chroms = test_chroms if test_chroms is not None else TEST_CHROMS
+
     # Load reference genome
     logger.info(f"Loading reference genome from {fasta_path}")
     genome = pyfaidx.Fasta(str(fasta_path))
 
     # Load annotations
-    all_chroms = TRAIN_CHROMS + VAL_CHROMS + TEST_CHROMS
+    all_chroms = effective_train_chroms + effective_val_chroms + effective_test_chroms
     genes_by_chrom = load_gencode_annotations(gtf_path, chroms=all_chroms)
 
+    logger.info(f"Training chromosomes: {effective_train_chroms}")
+    logger.info(f"Validation chromosomes: {effective_val_chroms}")
+    logger.info(f"Test chromosomes: {effective_test_chroms}")
+
     # Process each split
-    for split_name, chroms in [("train", TRAIN_CHROMS), ("val", VAL_CHROMS), ("test", TEST_CHROMS)]:
+    for split_name, chroms in [
+        ("train", effective_train_chroms),
+        ("val", effective_val_chroms),
+        ("test", effective_test_chroms),
+    ]:
         logger.info(f"Processing {split_name} split: {chroms}")
 
         chunks = []
@@ -1549,6 +1576,9 @@ def train_epoch(
     sampler: DistributedSampler | None = None,
     epoch: int = 0,
     distributed: bool = False,
+    crf_reg: float = 0.0,
+    emission_clamp: float = 0.0,
+    debug_first_batch: bool = False,
 ) -> float:
     """Train for one epoch.
 
@@ -1560,6 +1590,11 @@ def train_epoch(
         sampler: Optional DistributedSampler (for DDP training)
         epoch: Current epoch number (for sampler shuffling)
         distributed: Whether running in distributed mode (for loss aggregation)
+        crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only).
+            Helps prevent gradient explosion from unbounded transition/duration_bias.
+        emission_clamp: If > 0, clamp encoder outputs to [-emission_clamp, emission_clamp].
+            Helps with numerical stability at very long sequences (T > 50k).
+        debug_first_batch: If True, log encoder output statistics on first batch.
     """
     # Set epoch for proper shuffling in distributed mode
     if sampler is not None:
@@ -1569,13 +1604,111 @@ def train_epoch(
     total_loss = 0.0
     num_batches = 0
 
-    for batch in dataloader:
+    for batch_idx, batch in enumerate(dataloader):
         sequence = batch["sequence"].to(device)
         labels = batch["labels"].to(device)
         lengths = batch["lengths"].to(device)
 
+        # Debug: Check encoder output statistics on first batch
+        if debug_first_batch and batch_idx == 0 and epoch == 0 and is_main_process():
+            base_model = model.module if hasattr(model, "module") else model
+            if isinstance(base_model, ExonIntronModel):
+                with torch.no_grad():
+                    hidden = base_model.encoder(sequence)
+                    h_mean = hidden.mean().item()
+                    h_std = hidden.std().item()
+                    h_min = hidden.min().item()
+                    h_max = hidden.max().item()
+                    h_nan = torch.isnan(hidden).sum().item()
+                    h_inf = torch.isinf(hidden).sum().item()
+                    logger.info(
+                        f"Encoder output stats (first batch): "
+                        f"mean={h_mean:.4f}, std={h_std:.4f}, "
+                        f"min={h_min:.4f}, max={h_max:.4f}, "
+                        f"NaN={h_nan}, Inf={h_inf}"
+                    )
+                    if h_nan > 0 or h_inf > 0:
+                        logger.error("Encoder producing NaN/Inf! Check encoder initialization.")
+                    if abs(h_max) > 100 or abs(h_min) > 100:
+                        logger.warning(
+                            f"Encoder outputs are large (|max|={max(abs(h_max), abs(h_min)):.1f}). "
+                            "Consider using --emission-clamp 50 for numerical stability."
+                        )
+
+                    # Log emission scores after CRF projection
+                    if base_model.crf.projection is not None:
+                        emissions = base_model.crf.projection(hidden)
+                        e_mean = emissions.mean().item()
+                        e_std = emissions.std().item()
+                        e_min = emissions.min().item()
+                        e_max = emissions.max().item()
+                        logger.info(
+                            f"Emission scores (after CRF projection): "
+                            f"mean={e_mean:.4f}, std={e_std:.4f}, "
+                            f"min={e_min:.4f}, max={e_max:.4f}"
+                        )
+
+                        # Log CRF parameters for comparison
+                        trans = base_model.crf.transition
+                        dur = base_model.crf.duration_bias
+                        logger.info(
+                            f"CRF transition: mean={trans.mean().item():.4f}, "
+                            f"std={trans.std().item():.4f}, "
+                            f"range=[{trans.min().item():.4f}, {trans.max().item():.4f}]"
+                        )
+                        logger.info(
+                            f"CRF duration_bias: mean={dur.mean().item():.4f}, "
+                            f"std={dur.std().item():.4f}, "
+                            f"range=[{dur.min().item():.4f}, {dur.max().item():.4f}]"
+                        )
+
+                        # Warn if emission scale dominates CRF parameters
+                        emission_scale = max(abs(e_min), abs(e_max))
+                        crf_scale = max(
+                            abs(trans.min().item()),
+                            abs(trans.max().item()),
+                            abs(dur.min().item()),
+                            abs(dur.max().item()),
+                        )
+                        if emission_scale > 10 * crf_scale:
+                            logger.warning(
+                                f"Emission scale ({emission_scale:.2f}) >> CRF scale ({crf_scale:.2f}). "
+                                "CRF transitions/durations may have minimal effect on segmentation."
+                            )
+                        elif crf_scale > 10 * emission_scale:
+                            logger.warning(
+                                f"CRF scale ({crf_scale:.2f}) >> Emission scale ({emission_scale:.2f}). "
+                                "CRF parameters may dominate over learned emissions."
+                            )
+
         optimizer.zero_grad()
-        loss = model.compute_loss(sequence, lengths, labels)
+
+        # Optionally clamp encoder outputs for numerical stability
+        if emission_clamp > 0:
+            base_model = model.module if hasattr(model, "module") else model
+            if isinstance(base_model, ExonIntronModel):
+                # Forward through encoder with clamping
+                hidden = base_model.encoder(sequence)
+                hidden = torch.clamp(hidden, min=-emission_clamp, max=emission_clamp)
+                loss = base_model.crf.compute_loss(
+                    hidden,
+                    lengths,
+                    labels,
+                    backend=base_model.backend,
+                    use_triton=base_model.use_triton,
+                )
+            else:
+                loss = model.compute_loss(sequence, lengths, labels)
+        else:
+            loss = model.compute_loss(sequence, lengths, labels)
+
+        # Add CRF parameter regularization for Semi-Markov models
+        if crf_reg > 0:
+            # Get the underlying model (unwrap DDP if necessary)
+            base_model = model.module if hasattr(model, "module") else model
+            if isinstance(base_model, ExonIntronModel):
+                loss = loss + crf_reg * base_model.crf.parameter_penalty()
+
         loss.backward()
 
         # Gradient clipping
@@ -1698,6 +1831,11 @@ def train_model(
     use_triton: bool = True,  # Default: use Triton (not PyTorch fallback)
     # Logging
     log_every: int = 1,  # Evaluate and log every N epochs
+    # Regularization
+    weight_decay: float = 1e-5,
+    crf_reg: float = 0.0,
+    # Numerical stability
+    emission_clamp: float = 0.0,  # Clamp encoder outputs for long sequences
     # Distributed training
     distributed: bool = False,
     rank: int = 0,
@@ -1723,6 +1861,9 @@ def train_model(
         backend: Backend for semi-CRF - "streaming" (default), "exact", or "auto"
         use_triton: Whether to use Triton kernels (default True)
         log_every: Evaluate and log every N epochs (default 1)
+        weight_decay: AdamW weight decay (default 1e-5)
+        crf_reg: L2 regularization for CRF parameters (Semi-Markov only).
+            Helps prevent gradient explosion from unbounded transition/duration_bias.
         distributed: Enable distributed training (DDP)
         rank: GPU rank for distributed training
         world_size: Total number of GPUs for distributed training
@@ -1817,7 +1958,7 @@ def train_model(
 
     is_pytorch_crf = model_type == "pytorch-crf"
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_f1 = 0.0
@@ -1832,6 +1973,9 @@ def train_model(
             sampler=train_sampler,
             epoch=epoch,
             distributed=distributed,
+            crf_reg=crf_reg,
+            emission_clamp=emission_clamp,
+            debug_first_batch=True,  # Always show encoder stats on first batch
         )
         scheduler.step()
 
@@ -1851,6 +1995,22 @@ def train_model(
                 if val_metrics.boundary_f1 > best_val_f1:
                     best_val_f1 = val_metrics.boundary_f1
                     best_metrics = val_metrics
+
+                # Log CRF parameter magnitudes for debugging gradient explosion
+                base_model = model.module if hasattr(model, "module") else model
+                if isinstance(base_model, ExonIntronModel):
+                    trans_max = base_model.crf.transition.abs().max().item()
+                    dur_max = base_model.crf.duration_bias.abs().max().item()
+                    logger.debug(
+                        f"Epoch {epoch+1} CRF params: "
+                        f"transition_max={trans_max:.4f}, duration_bias_max={dur_max:.4f}"
+                    )
+                    if trans_max > 20 or dur_max > 20:
+                        logger.warning(
+                            f"Epoch {epoch+1}: CRF parameters drifting high! "
+                            f"trans_max={trans_max:.2f}, dur_max={dur_max:.2f}. "
+                            f"Consider increasing --crf-reg."
+                        )
 
             # Synchronize all processes after evaluation
             if distributed and dist.is_initialized():
@@ -2042,6 +2202,27 @@ def main():
     )
     preprocess_parser.add_argument("--chunk-size", type=int, default=10000)
     preprocess_parser.add_argument("--overlap", type=int, default=500)
+    preprocess_parser.add_argument(
+        "--train-chroms",
+        type=str,
+        default=None,
+        help="Comma-separated list of training chromosomes (e.g., 'chr1' or 'chr1,chr2'). "
+        "Default: chr1-chr18. Use this to start with a smaller dataset for debugging.",
+    )
+    preprocess_parser.add_argument(
+        "--val-chroms",
+        type=str,
+        default=None,
+        help="Comma-separated list of validation chromosomes (e.g., 'chr19,chr20'). "
+        "Default: chr19-chr20.",
+    )
+    preprocess_parser.add_argument(
+        "--test-chroms",
+        type=str,
+        default=None,
+        help="Comma-separated list of test chromosomes (e.g., 'chr21,chr22'). "
+        "Default: chr21-chr22.",
+    )
 
     # Train command
     train_parser = subparsers.add_parser("train", help="Train a model")
@@ -2069,6 +2250,26 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=50)
     train_parser.add_argument("--batch-size", type=int, default=32)
     train_parser.add_argument("--lr", type=float, default=1e-3)
+    train_parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-5,
+        help="AdamW weight decay (default: 1e-5)",
+    )
+    train_parser.add_argument(
+        "--crf-reg",
+        type=float,
+        default=0.0,
+        help="L2 regularization for CRF parameters (transition, duration_bias). "
+        "Helps prevent gradient explosion. Try 1e-4 to 1e-3 if training unstable.",
+    )
+    train_parser.add_argument(
+        "--emission-clamp",
+        type=float,
+        default=0.0,
+        help="Clamp encoder outputs to [-X, X] for numerical stability at long sequences (T > 50k). "
+        "Try 50 or 100 if seeing NaN in backward pass. Default: 0 (disabled).",
+    )
     train_parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
     # Mamba-specific
     train_parser.add_argument("--d-state", type=int, default=16, help="Mamba SSM state dimension")
@@ -2157,15 +2358,44 @@ def main():
     args = parser.parse_args()
 
     if args.command == "preprocess":
+        # Parse chromosomes if provided
+        train_chroms = None
+        if args.train_chroms:
+            train_chroms = [c.strip() for c in args.train_chroms.split(",")]
+
+        val_chroms = None
+        if args.val_chroms:
+            val_chroms = [c.strip() for c in args.val_chroms.split(",")]
+
+        test_chroms = None
+        if args.test_chroms:
+            test_chroms = [c.strip() for c in args.test_chroms.split(",")]
+
         preprocess_gencode(
-            args.gtf, args.fasta, args.output_dir, chunk_size=args.chunk_size, overlap=args.overlap
+            args.gtf,
+            args.fasta,
+            args.output_dir,
+            chunk_size=args.chunk_size,
+            overlap=args.overlap,
+            train_chroms=train_chroms,
+            val_chroms=val_chroms,
+            test_chroms=test_chroms,
         )
     elif args.command == "train":
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Auto-detect chunk size from preprocessed data
+        seq_len = 10000  # Default
+        train_file = args.data_dir / "train.jsonl"
+        if train_file.exists():
+            with open(train_file) as f:
+                first_line = json.loads(f.readline())
+                seq_len = len(first_line.get("labels", [0] * 10000))
+
         # Print diagnostics before training
         print_diagnostics(
             batch_size=args.batch_size,
-            seq_len=10000,  # Default chunk size
+            seq_len=seq_len,
             max_duration=args.max_duration,
         )
 
@@ -2179,6 +2409,9 @@ def main():
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "learning_rate": args.lr,
+            "weight_decay": args.weight_decay,
+            "crf_reg": args.crf_reg,
+            "emission_clamp": args.emission_clamp,
             "d_state": args.d_state,
             "d_conv": args.d_conv,
             "expand": args.expand,
@@ -2213,10 +2446,19 @@ def main():
             train_model(args.data_dir, device=device, **train_kwargs)
     elif args.command == "compare":
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Auto-detect chunk size from preprocessed data
+        seq_len = 10000  # Default
+        train_file = args.data_dir / "train.jsonl"
+        if train_file.exists():
+            with open(train_file) as f:
+                first_line = json.loads(f.readline())
+                seq_len = len(first_line.get("labels", [0] * 10000))
+
         # Print diagnostics before comparison
         print_diagnostics(
             batch_size=args.batch_size,
-            seq_len=10000,  # Default chunk size
+            seq_len=seq_len,
             max_duration=args.max_duration,
         )
         results = compare_models(

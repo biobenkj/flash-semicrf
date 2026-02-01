@@ -129,6 +129,10 @@ if HAS_TRITON:
         # Strides for boundary_marginals (batch, T) - only used if RETURN_BOUNDARY_MARGINALS
         stride_bm_b,
         stride_bm_t,
+        # Log normalization checkpoints for numerical stability at extreme T
+        log_norm_ckpt_ptr,  # (batch, num_ckpts) - cumulative log normalization factors
+        stride_lnc_b,
+        stride_lnc_n,
         # Autotuned parameter (must be at end for @triton.autotune)
         TILE_C: tl.constexpr,
     ):
@@ -298,6 +302,17 @@ if HAS_TRITON:
             if seg_end > T:
                 seg_end = T
 
+            # Load cumulative log normalization factor for this checkpoint
+            # IMPORTANT: Use ckpt_idx (logical index), NOT ckpt_idx_loop (loop counter)
+            # This is needed to restore the scale when computing marginals
+            log_norm_at_ckpt = tl.load(
+                log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n
+            )
+
+            # Debug: show checkpoint loading (remove after validation)
+            if batch_idx == 0:
+                tl.device_print("BWD loading ckpt_idx, log_norm:", ckpt_idx, log_norm_at_ckpt)
+
             # Only process segments within sequence length
             if seg_start < seq_len:
                 # === Phase 1: Recompute alpha for this segment ===
@@ -427,12 +442,13 @@ if HAS_TRITON:
 
                                 # Logsumexp over c_src
                                 # Guard against all-NEG_INF case to prevent undefined arithmetic
+                                # Flash Attention pattern: no epsilon needed inside log
+                                # The NEG_INF guard handles the zero case
                                 max_scores = tl.max(scores, axis=1)
                                 is_all_neginf = max_scores < (NEG_INF + 1.0)
                                 max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
                                 log_sum_exp = tl.log(
                                     tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1)
-                                    + 1e-10
                                 )
                                 score_for_k = tl.where(
                                     is_all_neginf, NEG_INF, max_scores + log_sum_exp
@@ -441,6 +457,7 @@ if HAS_TRITON:
 
                                 # Accumulate via logsumexp
                                 # Guard against both inputs being NEG_INF
+                                # Flash Attention pattern: no epsilon needed
                                 max_alpha = tl.maximum(alpha_t, score_for_k)
                                 is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (
                                     score_for_k < (NEG_INF + 1.0)
@@ -449,7 +466,6 @@ if HAS_TRITON:
                                 log_sum_exp_acc = tl.log(
                                     tl.exp(alpha_t - max_alpha_safe)
                                     + tl.exp(score_for_k - max_alpha_safe)
-                                    + 1e-10
                                 )
                                 alpha_t = tl.where(
                                     is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc
@@ -601,19 +617,88 @@ if HAS_TRITON:
                                     edge_tile = segment_score_tile[:, None] + transition_tile
 
                                     # === Compute marginal tile (TILE_C, C_PAD) ===
+                                    # Use relative log-marginal computation for numerical stability
+                                    # at extreme scale (T=100k+). Following Flash Attention pattern:
+                                    #   1. Compute log_joint without normalizing by log_Z
+                                    #   2. Subtract local_ref (max over tile) to keep exp bounded
+                                    #   3. Apply scale factor exp(local_ref - log_Z) separately
+                                    # This prevents overflow when alpha + beta >> log_Z at scale.
                                     beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
                                     edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
 
-                                    log_marginal_tile = (
+                                    # Step 1: Compute log_joint (without log_Z subtraction)
+                                    log_joint_tile = (
                                         alpha_t_clamped[None, :]  # (1, C_PAD) for c_src
                                         + edge_tile_clamped  # (TILE_C, C_PAD)
                                         + beta_tile_clamped[:, None]  # (TILE_C, 1) for c_dst
-                                        - log_Z
                                     )
-                                    log_marginal_tile = tl.minimum(
-                                        tl.maximum(log_marginal_tile, -700.0), 700.0
+
+                                    # Step 2: Find local reference (max over valid entries in tile)
+                                    # Mask out invalid entries with NEG_INF before taking max
+                                    log_joint_masked = tl.where(
+                                        tile_mask_2d, log_joint_tile, NEG_INF
                                     )
-                                    marginal_tile = tl.exp(log_marginal_tile)
+                                    local_ref = tl.max(log_joint_masked)
+                                    # Guard against all-NEG_INF case (empty tile)
+                                    is_local_ref_neginf = local_ref < (NEG_INF + 1.0)
+                                    local_ref_safe = tl.where(is_local_ref_neginf, 0.0, local_ref)
+
+                                    # Step 3: Compute relative log-marginal (bounded in (-∞, 0])
+                                    log_marginal_rel = log_joint_tile - local_ref_safe
+
+                                    # Step 4: Compute unnormalized marginal (bounded in (0, 1])
+                                    marginal_unnorm = tl.exp(log_marginal_rel)
+
+                                    # Step 5: CRITICAL - Add log_norm_at_ckpt to bridge the gap
+                                    #   alpha_t is normalized (~0), log_Z is full (~250k at T=100k)
+                                    #   log_norm_at_ckpt contains the accumulated shift (~125k at midpoint)
+                                    #
+                                    #   Example at t=50k:
+                                    #     local_ref ≈ 125,000 (beta mass)
+                                    #     log_norm_at_ckpt ≈ 125,000 (forward mass to checkpoint)
+                                    #     log_Z ≈ 250,000
+                                    #     log_scale = (125k + 125k) - 250k ≈ 0  ✓
+                                    #
+                                    log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
+
+                                    # Temporary debug (remove after validation):
+                                    if batch_idx == 0 and t % 10000 == 0:
+                                        # Check forward-backward identity:
+                                        # true_alpha + beta = log_Z
+                                        # (normalized_alpha + log_norm) + beta = log_Z
+                                        max_alpha = tl.max(
+                                            tl.where(
+                                                c_mask[None, :], alpha_t_clamped[None, :], NEG_INF
+                                            )
+                                        )
+                                        max_beta = tl.max(
+                                            tl.where(
+                                                c_dst_mask_tile[:, None],
+                                                beta_tile_clamped[:, None],
+                                                NEG_INF,
+                                            )
+                                        )
+                                        tl.device_print(
+                                            "BWD t, max_alpha, max_beta:", t, max_alpha, max_beta
+                                        )
+                                        tl.device_print(
+                                            "BWD true_alpha+beta vs log_Z:",
+                                            max_alpha + log_norm_at_ckpt + max_beta,
+                                            log_Z,
+                                        )
+                                        tl.device_print("BWD log_scale:", log_scale)
+
+                                    # Step 6: Defensive clamping (scale should be ≤ 1 for valid marginals)
+                                    log_scale_clamped = tl.minimum(
+                                        log_scale, 0.0
+                                    )  # Upper bound: scale ≤ 1
+                                    log_scale_clamped = tl.maximum(
+                                        log_scale_clamped, -700.0
+                                    )  # Prevent underflow
+                                    scale = tl.exp(log_scale_clamped)
+
+                                    # Step 7: Final marginal = unnorm * scale
+                                    marginal_tile = marginal_unnorm * scale
                                     marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
 
                                     # === Accumulate gradients from this tile ===
@@ -748,11 +833,13 @@ if HAS_TRITON:
                                     m_beta_k = m_new
 
                                 # === After all c_dst tiles: finalize beta_k ===
+                                # Flash Attention pattern: no epsilon needed inside log
+                                # The NEG_INF guard (is_beta_k_neginf) handles the zero case
                                 is_beta_k_neginf = m_beta_k < (NEG_INF + 1.0)
                                 beta_k = tl.where(
                                     is_beta_k_neginf,
                                     NEG_INF,
-                                    m_beta_k + tl.log(l_beta_k + 1e-10),
+                                    m_beta_k + tl.log(l_beta_k),
                                 )
                                 beta_k = tl.where(c_mask, beta_k, NEG_INF)
 
@@ -766,15 +853,16 @@ if HAS_TRITON:
                                     )
 
                                 # Accumulate beta_k into new_beta via logsumexp over k
+                                # Flash Attention pattern: no epsilon needed inside log
+                                # The is_both_neginf_beta guard handles the case where both
+                                # inputs are NEG_INF (sum of exps would be 0)
                                 max_new = tl.maximum(new_beta, beta_k)
                                 is_both_neginf_beta = (new_beta < (NEG_INF + 1.0)) & (
                                     beta_k < (NEG_INF + 1.0)
                                 )
                                 max_new_safe = tl.where(is_both_neginf_beta, 0.0, max_new)
                                 log_sum_exp_new = tl.log(
-                                    tl.exp(new_beta - max_new_safe)
-                                    + tl.exp(beta_k - max_new_safe)
-                                    + 1e-10
+                                    tl.exp(new_beta - max_new_safe) + tl.exp(beta_k - max_new_safe)
                                 )
                                 new_beta = tl.where(
                                     is_both_neginf_beta, NEG_INF, max_new + log_sum_exp_new
@@ -795,6 +883,7 @@ if HAS_TRITON:
         lengths: torch.Tensor,
         log_Z: torch.Tensor,
         ring_checkpoints: torch.Tensor,
+        log_norm_checkpoints: torch.Tensor,
         checkpoint_interval: int,
         grad_output: torch.Tensor,
         proj_start: torch.Tensor = None,
@@ -803,7 +892,7 @@ if HAS_TRITON:
         num_warps: int = 4,
         validate_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None, return_boundary_marginals=False, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+        r"""launch_streaming_triton_backward(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, log_norm_checkpoints, checkpoint_interval, grad_output, proj_start=None, proj_end=None, return_boundary_marginals=False, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
 
         Launch the Triton backward kernel with proper buffer allocation.
 
@@ -821,6 +910,8 @@ if HAS_TRITON:
             log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
             ring_checkpoints (Tensor): Saved ring buffer states of shape
                 :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+            log_norm_checkpoints (Tensor): Cumulative log normalization factors
+                at each checkpoint of shape :math:`(\text{batch}, \text{num\_ckpts})`.
             checkpoint_interval (int): Interval used during forward pass.
             grad_output (Tensor): Upstream gradient of shape :math:`(\text{batch},)`.
             proj_start (Tensor, optional): Start boundary scores of shape
@@ -907,6 +998,9 @@ if HAS_TRITON:
         else:
             ring_ckpts_padded = ring_checkpoints.contiguous()
 
+        # Ensure log normalization checkpoints are contiguous
+        log_norm_checkpoints = log_norm_checkpoints.contiguous()
+
         # Allocate working memory
         alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
         beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
@@ -920,9 +1014,10 @@ if HAS_TRITON:
         accum_dtype = torch.float64
 
         # Allocate gradient outputs with C_PAD
-        # grad_cum_scores uses float32: each batch writes to its own slice (no cross-batch atomics)
-        # so float32 precision is sufficient. This reduces memory bandwidth by 50%.
-        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=torch.float32)
+        # NUMERICAL STABILITY: Use float64 for grad_cum_scores at large T (100k+).
+        # Even though each batch writes to its own slice (no cross-batch atomics),
+        # within-batch accumulation over 100k timesteps causes float32 precision loss.
+        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=accum_dtype)
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=accum_dtype)
 
         # Allocate per-batch workspace buffers with higher precision
@@ -970,6 +1065,7 @@ if HAS_TRITON:
             stride_gtw_b, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
 
         stride_gdbw_b, stride_gdbw_k, stride_gdbw_c = grad_db_workspace.stride()
+        stride_lnc_b, stride_lnc_n = log_norm_checkpoints.stride()
 
         # Use actual gradients or dummies for kernel call
         grad_ps_for_kernel = grad_proj_start if has_boundaries else grad_cum_scores
@@ -1040,6 +1136,9 @@ if HAS_TRITON:
                 stride_gdbw_c,
                 stride_bm_b,
                 stride_bm_t,
+                log_norm_checkpoints,
+                stride_lnc_b,
+                stride_lnc_n,
                 TILE_C=16,  # DO NOT INCREASE - TILE_C=32 causes register spills (14x slowdown)
                 num_warps=num_warps,
             )
@@ -1077,8 +1176,7 @@ if HAS_TRITON:
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 
         # Slice padded gradients back to actual class count C
-        # grad_cum_scores: float32 → original dtype (may be no-op if dtype is float32)
-        # grad_transition/grad_duration_bias: float64 → original dtype
+        # All gradient accumulators use float64 → original dtype
         grad_cum_scores = grad_cum_scores[:, :, :C].to(dtype)
         grad_transition = grad_transition.to(dtype)
         grad_duration_bias = grad_duration_bias.to(dtype)

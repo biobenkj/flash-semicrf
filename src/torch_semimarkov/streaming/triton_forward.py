@@ -128,6 +128,10 @@ if HAS_TRITON:
         stride_ckpt_n,
         stride_ckpt_k,
         stride_ckpt_c,
+        # Log normalization checkpoints for numerical stability at extreme T
+        log_norm_ckpt_ptr,  # (batch, num_ckpts) - cumulative log normalization factors
+        stride_lnc_b,
+        stride_lnc_n,
     ):
         r"""Streaming Semi-CRF forward scan with on-the-fly edge computation (log semiring).
 
@@ -193,6 +197,10 @@ if HAS_TRITON:
 
         # Track final alpha for each batch element
         final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+
+        # Cumulative log normalization factor for numerical stability at extreme T
+        # This tracks the total shift applied to alpha values at checkpoint boundaries
+        accum_log_norm = 0.0
 
         # Main forward loop: t = 1, 2, ..., T
         for t in tl.range(1, T + 1):
@@ -292,13 +300,12 @@ if HAS_TRITON:
 
                 # Logsumexp over c_src (axis=1) -> (C_PAD,)
                 # Guard against all-NEG_INF case to prevent undefined arithmetic
-                # When max_scores == NEG_INF, scores - max_scores would be 0 (incorrect)
+                # Flash Attention pattern: no epsilon needed inside log
+                # The NEG_INF guard handles the zero case
                 max_scores = tl.max(scores, axis=1)
                 is_all_neginf = max_scores < (NEG_INF + 1.0)
                 max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
-                log_sum_exp = tl.log(
-                    tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1) + 1e-10
-                )
+                log_sum_exp = tl.log(tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1))
                 score_for_k = tl.where(is_all_neginf, NEG_INF, max_scores + log_sum_exp)
 
                 # Mask invalid durations and labels
@@ -306,11 +313,12 @@ if HAS_TRITON:
 
                 # Accumulate into alpha_t via logsumexp
                 # Guard against both inputs being NEG_INF to prevent undefined arithmetic
+                # Flash Attention pattern: no epsilon needed
                 max_alpha = tl.maximum(alpha_t, score_for_k)
                 is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (score_for_k < (NEG_INF + 1.0))
                 max_alpha_safe = tl.where(is_both_neginf, 0.0, max_alpha)
                 log_sum_exp_acc = tl.log(
-                    tl.exp(alpha_t - max_alpha_safe) + tl.exp(score_for_k - max_alpha_safe) + 1e-10
+                    tl.exp(alpha_t - max_alpha_safe) + tl.exp(score_for_k - max_alpha_safe)
                 )
                 alpha_t = tl.where(is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc)
 
@@ -330,7 +338,42 @@ if HAS_TRITON:
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
-                # Save entire ring buffer to checkpoint
+                # ===== NORMALIZATION STEP (for numerical stability at extreme T) =====
+                # Following Flash Attention pattern: normalize at checkpoints to prevent
+                # alpha values from growing unbounded (e.g., to ±250,000 at T=100k)
+
+                # 1. Find max alpha value for normalization (over valid C only)
+                alpha_for_norm = tl.where(c_mask, alpha_t, NEG_INF)
+                max_val = tl.max(alpha_for_norm)
+
+                # Guard against all-NEG_INF case (shouldn't happen, but be safe)
+                is_all_neginf = max_val < (NEG_INF + 1.0)
+                shift = tl.where(is_all_neginf, 0.0, max_val)
+
+                # 2. Update cumulative normalization factor
+                accum_log_norm = accum_log_norm + shift
+
+                # 3. CRITICAL: Update alpha_t register BEFORE final_alpha capture
+                #    This ensures consistency if seq_len falls on a checkpoint boundary
+                alpha_t = alpha_t - shift
+
+                # 4. Normalize ALL K slots in ring buffer
+                #    The ring buffer is used for K more iterations after checkpoint,
+                #    so all slots must be shifted to maintain consistency
+                for k_norm in tl.range(0, K):
+                    ring_val = tl.load(
+                        ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
+                        mask=c_mask,
+                        other=NEG_INF,
+                    )
+                    ring_val_shifted = ring_val - shift
+                    tl.store(
+                        ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
+                        ring_val_shifted,
+                        mask=c_mask,
+                    )
+
+                # 5. Save normalized ring buffer to checkpoint
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
@@ -348,21 +391,48 @@ if HAS_TRITON:
                         mask=save_mask,
                     )
 
+                # 6. Save cumulative log normalization factor
+                #    All threads compute the same value; store once per checkpoint
+                if ckpt_idx < NUM_CKPTS:
+                    tl.store(
+                        log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n,
+                        accum_log_norm,
+                    )
+
             # Capture final alpha at sequence end (t == seq_len)
             # At iteration t, alpha_t represents segments ending at position t-1
             # For sequence of length L, we need alpha at t=L (segments ending at L-1)
             is_final = t == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
 
+            # DEBUG: Print forward pass statistics at final position (T=100k diagnostic)
+            # Uncomment these lines to diagnose numerical stability at extreme scale
+            if batch_idx == 0 and is_final:
+                tl.device_print("FWD seq_len=", seq_len)
+                tl.device_print("FWD final_alpha_max=", tl.max(alpha_t))
+                tl.device_print("FWD final_alpha_min=", tl.min(alpha_t))
+
         # Final reduction: logsumexp over labels
         # Guard against all-NEG_INF case to prevent undefined arithmetic
+        # Flash Attention pattern: no epsilon needed inside log
+        # The NEG_INF guard handles the zero case
         final_alpha_masked = tl.where(c_mask, final_alpha, NEG_INF)
         max_val = tl.max(final_alpha_masked, axis=0)
         is_final_neginf = max_val < (NEG_INF + 1.0)
         max_val_safe = tl.where(is_final_neginf, 0.0, max_val)
         exp_fa = tl.where(c_mask, tl.exp(final_alpha - max_val_safe), 0.0)
         sum_exp = tl.sum(exp_fa, axis=0)
-        partition = tl.where(is_final_neginf, NEG_INF, max_val + tl.log(sum_exp + 1e-10))
+        raw_partition = tl.where(is_final_neginf, NEG_INF, max_val + tl.log(sum_exp))
+
+        # Add back cumulative normalization to get true partition function
+        # final_alpha contains normalized values; accum_log_norm contains the total shift
+        partition = raw_partition + accum_log_norm
+
+        # DEBUG: Print partition (log_Z) for T=100k diagnostic
+        # Uncomment these lines to diagnose numerical stability at extreme scale
+        if batch_idx == 0:
+            tl.device_print("FWD log_Z=", partition)
+            tl.device_print("FWD max_final_alpha=", max_val)
 
         # Store result
         tl.store(out_ptr + batch_idx, partition)
@@ -407,6 +477,10 @@ if HAS_TRITON:
         stride_ckpt_n,
         stride_ckpt_k,
         stride_ckpt_c,
+        # Log normalization checkpoints (not used for max semiring, but kept for API consistency)
+        log_norm_ckpt_ptr,
+        stride_lnc_b,
+        stride_lnc_n,
     ):
         r"""Streaming Semi-CRF forward scan with max semiring (Viterbi decoding).
 
@@ -824,8 +898,8 @@ if HAS_TRITON:
         proj_end: torch.Tensor = None,
         num_warps: int = 4,
         validate_cache: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, int]
+    ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, int, Tensor]
 
         Launch the streaming Triton kernel with proper buffer allocation.
 
@@ -854,12 +928,15 @@ if HAS_TRITON:
                 consistency and warn on config changes. Default: ``True``
 
         Returns:
-            tuple[Tensor, Tensor, int]: Tuple of:
+            tuple[Tensor, Tensor, int, Tensor]: Tuple of:
                 - **partition** (Tensor): Partition function values of shape
                   :math:`(\text{batch},)`.
                 - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
                   :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
                 - **checkpoint_interval** (int): Actual interval used.
+                - **log_norm_checkpoints** (Tensor): Cumulative log normalization
+                  factors at each checkpoint of shape
+                  :math:`(\text{batch}, \text{num\_ckpts})`.
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
@@ -922,6 +999,11 @@ if HAS_TRITON:
         )
         ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 
+        # Log normalization checkpoint storage for numerical stability at extreme T
+        # Stores cumulative log normalization factor at each checkpoint boundary
+        # Memory cost: negligible (14 × batch × 4 bytes at T=100k)
+        log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
+
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
 
@@ -935,6 +1017,7 @@ if HAS_TRITON:
         stride_db_k, stride_db_c = duration_bias.stride()
         stride_ring_b, stride_ring_k, stride_ring_c = ring_buffer.stride()
         stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_checkpoints.stride()
+        stride_lnc_b, stride_lnc_n = log_norm_checkpoints.stride()
 
         # Launch kernel with device context for multi-GPU support
         grid = (batch,)
@@ -981,13 +1064,16 @@ if HAS_TRITON:
                 stride_ckpt_n,
                 stride_ckpt_k,
                 stride_ckpt_c,
+                log_norm_checkpoints,
+                stride_lnc_b,
+                stride_lnc_n,
                 num_warps=num_warps,
             )
 
         # Trim padding from checkpoints for return
         ring_checkpoints = ring_checkpoints[:, :, :, :C]
 
-        return partition, ring_checkpoints, checkpoint_interval
+        return partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints
 
     def launch_streaming_triton_kernel_max_bp(
         cum_scores: torch.Tensor,

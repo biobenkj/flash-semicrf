@@ -275,6 +275,116 @@ if should_checkpoint:
 
 ---
 
+## Per-Checkpoint Log Normalization
+
+### The Problem: Numerical Overflow at T=100k
+
+At extreme sequence lengths (T ≥ 100,000), the forward-backward algorithm accumulates log-space values that grow proportionally with T. For a sequence with mean emission score μ ≈ -0.3 per position:
+
+```text
+α[T] ≈ μ × T ≈ -0.3 × 100,000 ≈ -30,000
+log_Z ≈ -30,000 (similar magnitude)
+```
+
+The problem manifests in the backward pass when computing marginals:
+
+```text
+log_marginal = α[t] + edge + β[t'] - log_Z
+scale = exp(log_marginal)
+```
+
+**Without normalization**, the forward-backward identity `α[t] + β[t] ≈ log_Z` can drift due to accumulated floating-point error:
+
+| Metric | Expected | Observed (Broken) |
+|--------|----------|-------------------|
+| `α[t] + β[t]` | ≈ log_Z | 330k - 360k |
+| `log_Z` | - | 257k |
+| `log_scale` | ≈ 0 | +70k to +100k |
+| `exp(log_scale)` | ≈ 1 | **Inf** |
+
+This causes `scale` to overflow, producing NaN gradients.
+
+### The Solution: Checkpoint-Boundary Normalization
+
+Following the **Flash Attention** pattern, we normalize the ring buffer at checkpoint boundaries and track the cumulative normalization factor:
+
+```text
+Forward pass at checkpoint i:
+  1. shift = max(α_t)           # Find normalization constant
+  2. α_t ← α_t - shift          # Normalize current alpha
+  3. ring_buffer ← ring_buffer - shift  # Normalize all K slots
+  4. accum_log_norm += shift    # Track cumulative shift
+  5. Save ring_buffer to checkpoint
+  6. Save accum_log_norm to log_norm_checkpoints[i]
+
+Final partition:
+  log_Z = logsumexp(α_T) + accum_log_norm
+```
+
+The backward pass restores the identity by adding `log_norm_at_ckpt`:
+
+```text
+Backward pass at segment from checkpoint i:
+  1. Load log_norm_at_ckpt from log_norm_checkpoints[i]
+  2. Recompute α from checkpoint (normalized values)
+  3. Compute β backward
+  4. Marginal: log_scale = (α + edge + β) + log_norm_at_ckpt - log_Z
+                                            ^^^^^^^^^^^^^^^^
+                                            Restores the true α magnitude
+```
+
+**Why this works**: At checkpoint i (roughly position t = i × interval), the accumulated shift `log_norm ≈ μ × t`. Adding it back bridges the gap:
+
+```text
+Example at t=50,000 (midpoint of T=100k):
+  normalized_α ≈ 0 (after shift)
+  log_norm ≈ 125,000 (accumulated shift)
+  β ≈ 125,000 (backward mass)
+  log_Z ≈ 250,000
+
+  log_scale = (0 + edge + 125k) + 125k - 250k ≈ 0  ✓
+```
+
+### Memory Impact
+
+The additional storage is negligible:
+
+```python
+log_norm_checkpoints: (batch, num_checkpoints)
+# At T=100k with ~14 checkpoints: 14 × batch × 4 bytes = 56 bytes/sequence
+```
+
+### Literature Grounding
+
+This technique synthesizes established methods:
+
+1. **Flash Attention (Dao et al., 2022)** — Online softmax with running max/sum normalization, correcting at tile boundaries. Our checkpoint normalization follows the same pattern.
+
+2. **HMM Scaling (Rabiner, 1989)** — Classical forward-backward algorithms use "scaling coefficients" at each timestep to prevent underflow. We apply the same principle at checkpoint granularity.
+
+3. **CTC (Graves et al., 2006)** — Connectionist Temporal Classification uses similar log-space normalization for numerical stability.
+
+4. **Gradient Checkpointing (Chen et al., 2016)** — Saving intermediate state for memory-efficient backprop; we extend this to include normalization state.
+
+### Implementation Details
+
+**Forward kernel** ([triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py)):
+
+- Checkpoint normalization block: lines 330-380
+- Final partition computation with `accum_log_norm`: line ~405
+
+**Backward kernel** ([triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py)):
+
+- Load `log_norm_at_ckpt` at segment start: line ~305
+- Add to marginal computation: line ~650
+
+**Autograd** ([autograd.py](../src/torch_semimarkov/streaming/autograd.py)):
+
+- Save `log_norm_checkpoints` in forward: `save_for_backward`
+- Pass to backward kernel: backward launcher call
+
+---
+
 ## Backward Pass Walkthrough
 
 ### Two-Phase Algorithm
@@ -427,6 +537,10 @@ NEG_INF = -1e9
 alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
 ```
 
+### Forward-Backward Identity at Scale
+
+At extreme sequence lengths (T ≥ 100k), accumulated floating-point error can violate the forward-backward identity `α[t] + β[t] ≈ log_Z`, causing marginal scale factors to overflow. This is solved by **per-checkpoint log normalization** — see the dedicated section [Per-Checkpoint Log Normalization](#per-checkpoint-log-normalization) for details.
+
 ---
 
 ## Performance Characteristics
@@ -463,6 +577,7 @@ Streaming memory scales as O(batch × T × C), not O(batch × T × K × C²):
 2. **Gradient NaN**: Usually caused by:
    - Not zero-centering before cumsum
    - Using float16 for cum_scores
+   - At T ≥ 100k: forward-backward identity violation (see [Per-Checkpoint Log Normalization](#per-checkpoint-log-normalization))
 
 3. **Wrong partition value**: Check that `cum_scores[:, 0, :]` is all zeros (the boundary condition)
 
