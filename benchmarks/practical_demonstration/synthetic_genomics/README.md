@@ -12,16 +12,20 @@ Unlike real genomic data (e.g., GENCODE) where ground truth distributions are co
 2. **Controlled experiments**: We can ablate duration learning (uniform vs learned) to isolate the mechanism
 3. **Clear success criterion**: The "money plot" shows whether learned distributions match true distributions
 
-## Four-Way Model Comparison
+## Five-Way Model Comparison
 
-| Model | K | Duration | What It Tests |
-|-------|---|----------|---------------|
-| **softmax** | N/A | None | Pure position-wise baseline |
-| **linear** | 1 | None | CRF structure without duration modeling |
-| **semicrf** | 1000 | Learned | Full Semi-CRF capability |
-| **semicrf_uniform** | 1000 | Uniform | Ablation: segment structure without duration |
+| Model | K | Duration | Library | What It Tests |
+|-------|---|----------|---------|---------------|
+| **softmax** | N/A | None | N/A | Pure position-wise baseline |
+| **pytorch-crf** | 1 | None | torchcrf | External linear CRF baseline |
+| **linear** | 1 | None | torch-semimarkov | Linear CRF, same codebase as semi-CRF |
+| **semicrf** | 1000 | Learned | torch-semimarkov | Full Semi-CRF capability |
+| **semicrf_uniform** | 1000 | Uniform | torch-semimarkov | Ablation: segment structure without duration |
 
-The key comparison: if `semicrf` >> `semicrf_uniform` on boundary F1 and duration KL, then **learned duration distributions are the mechanism** driving performance.
+**Key comparisons:**
+- `linear` vs `pytorch-crf`: Validates torch-semimarkov K=1 matches external baseline
+- `semicrf` vs `linear`: Shows benefit of duration modeling
+- `semicrf` vs `semicrf_uniform`: Isolates learned duration as the mechanism
 
 ## Quick Start
 

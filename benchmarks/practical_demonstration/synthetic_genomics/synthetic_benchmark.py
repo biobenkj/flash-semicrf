@@ -76,6 +76,15 @@ except ImportError:
     HAS_MAMBA = False
     Mamba = None  # type: ignore
 
+# pytorch-crf baseline (optional)
+try:
+    from torchcrf import CRF as TorchCRF
+
+    HAS_TORCHCRF = True
+except ImportError:
+    HAS_TORCHCRF = False
+    TorchCRF = None  # type: ignore
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -562,6 +571,68 @@ class SoftmaxModel(nn.Module):
         return logits.argmax(dim=-1)  # (batch, T)
 
 
+class PytorchCRFModel(nn.Module):
+    """
+    Mamba/BiLSTM → external pytorch-crf baseline.
+
+    Uses the torchcrf library (pip install pytorch-crf) for comparison.
+    This is a linear CRF without duration modeling.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        num_classes: int = NUM_CLASSES,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        if not HAS_TORCHCRF:
+            raise ImportError(
+                "pytorch-crf required for this model. Install with: pip install pytorch-crf"
+            )
+        self.encoder = encoder
+        self.emission_proj = nn.Linear(hidden_dim, num_classes)
+        self.crf = TorchCRF(num_classes, batch_first=True)
+
+    def forward(self, sequence: Tensor, lengths: Tensor) -> Tensor:
+        """Forward pass returning emission scores."""
+        hidden = self.encoder(sequence)
+        return self.emission_proj(hidden)
+
+    def compute_loss(
+        self,
+        sequence: Tensor,
+        lengths: Tensor,
+        labels: Tensor,
+        **kwargs,
+    ) -> Tensor:
+        """Compute NLL loss using pytorch-crf."""
+        hidden = self.encoder(sequence)
+        emissions = self.emission_proj(hidden)
+
+        _, seq_len = sequence.shape[:2]
+        mask = torch.arange(seq_len, device=sequence.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # pytorch-crf requires valid labels (no -100), replace padding with 0
+        labels_clean = labels.clone()
+        labels_clean[labels == -100] = 0
+
+        # pytorch-crf.forward() returns log-likelihood, we want NLL
+        log_likelihood = self.crf(emissions, labels_clean, mask=mask, reduction="mean")
+        return -log_likelihood
+
+    def decode(self, sequence: Tensor, lengths: Tensor, **kwargs) -> list[list[int]]:
+        """Viterbi decode to get best label sequences."""
+        hidden = self.encoder(sequence)
+        emissions = self.emission_proj(hidden)
+
+        _, seq_len = sequence.shape[:2]
+        mask = torch.arange(seq_len, device=sequence.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # Returns list of lists (batch_size x variable_length)
+        return self.crf.decode(emissions, mask=mask)
+
+
 class SemiCRFModel(nn.Module):
     """
     Mamba/BiLSTM → Semi-CRF model.
@@ -633,7 +704,7 @@ class SemiCRFModel(nn.Module):
 
 
 def create_model(
-    model_type: Literal["softmax", "linear", "semicrf", "semicrf_uniform"],
+    model_type: Literal["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"],
     encoder_type: Literal["bilstm", "mamba", "mamba_stub"],
     input_dim: int,
     num_classes: int = NUM_CLASSES,
@@ -651,7 +722,8 @@ def create_model(
 
     Model types:
     - softmax: Per-position softmax (baseline)
-    - linear: Linear CRF (K=1, no duration modeling)
+    - pytorch-crf: External pytorch-crf library (linear CRF baseline)
+    - linear: torch-semimarkov K=1 (linear CRF, same codebase as semi-CRF)
     - semicrf: Semi-CRF with learned duration
     - semicrf_uniform: Semi-CRF with uniform duration (ablation)
     """
@@ -667,6 +739,12 @@ def create_model(
 
     if model_type == "softmax":
         return SoftmaxModel(
+            encoder=encoder,
+            num_classes=num_classes,
+            hidden_dim=hidden_dim,
+        )
+    elif model_type == "pytorch-crf":
+        return PytorchCRFModel(
             encoder=encoder,
             num_classes=num_classes,
             hidden_dim=hidden_dim,
@@ -1017,7 +1095,9 @@ def evaluate(
     all_pred_segments = []
     all_true_segments = []
 
+    # Determine model type for decode handling
     is_softmax = isinstance(model, SoftmaxModel)
+    is_pytorch_crf = isinstance(model, PytorchCRFModel)
 
     start_time = time.time()
     num_seqs = 0
@@ -1035,7 +1115,11 @@ def evaluate(
             true_labels = labels[i, :seq_len].cpu().numpy()
 
             if is_softmax:
+                # Softmax returns (batch, T) tensor
                 pred_labels = result[i, :seq_len].cpu().numpy()
+            elif is_pytorch_crf:
+                # pytorch-crf returns list[list[int]]
+                pred_labels = np.array(result[i][:seq_len], dtype=np.int64)
             else:
                 # torch-semimarkov returns DecodeResult with segments
                 # Segment.end is INCLUSIVE, convert to exclusive
@@ -1087,7 +1171,7 @@ def evaluate(
 
 
 def train_model(
-    model_type: Literal["softmax", "linear", "semicrf", "semicrf_uniform"],
+    model_type: Literal["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"],
     train_sequences: list[SyntheticSequence],
     val_sequences: list[SyntheticSequence],
     test_sequences: list[SyntheticSequence],
@@ -1400,11 +1484,21 @@ def cmd_run(args):
     ground_truth = get_ground_truth_distributions(all_seqs, NUM_CLASSES, args.max_duration)
 
     # Train all models
-    model_types = ["softmax", "linear", "semicrf", "semicrf_uniform"]
+    # 5-way comparison:
+    # - softmax: per-position baseline
+    # - pytorch-crf: external library linear CRF baseline (if available)
+    # - linear: torch-semimarkov K=1 (same codebase as semi-CRF)
+    # - semicrf: Semi-CRF with learned duration
+    # - semicrf_uniform: Semi-CRF with uniform duration (ablation)
+    model_types = ["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"]
     results = {}
     pred_distributions = {}
 
     for model_type in model_types:
+        # Skip pytorch-crf if not installed
+        if model_type == "pytorch-crf" and not HAS_TORCHCRF:
+            logger.info(f"Skipping {model_type} (pytorch-crf not installed)")
+            continue
         logger.info(f"\n{'='*60}")
         logger.info(f"Training {model_type}...")
         logger.info(f"{'='*60}")
@@ -1450,17 +1544,20 @@ def cmd_run(args):
 
         model.eval()
         all_pred_segments = []
+        is_softmax = isinstance(model, SoftmaxModel)
+        is_pytorch_crf = isinstance(model, PytorchCRFModel)
         with torch.no_grad():
             for batch in test_loader:
                 sequence = batch["sequence"].to(device_obj)
                 lengths = batch["lengths"].to(device_obj)
                 result = model.decode(sequence, lengths)
 
-                is_softmax = isinstance(model, SoftmaxModel)
                 for i in range(len(lengths)):
                     seq_len = lengths[i].item()
                     if is_softmax:
                         pred_labels = result[i, :seq_len].cpu().numpy()
+                    elif is_pytorch_crf:
+                        pred_labels = np.array(result[i][:seq_len], dtype=np.int64)
                     else:
                         pred_labels = np.zeros(seq_len, dtype=np.int64)
                         for seg in result.segments[i]:
