@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `UNCOMMITTED`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `d7b802c`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -34,9 +34,9 @@ These are verified automatically via `python3 verify-assumptions.py triton-forwa
 
 These require human/agent judgment when loading the trace.
 
-| ID | Assumption | Verification Guidance |
-|----|------------|----------------------|
-| A4 | C_PAD is power of 2 | Check C_PAD assignment in launcher (~line 881) uses `2 ** math.ceil(math.log2(C))` |
+| ID | Assumption          | Verification Guidance                                                    |
+|----|---------------------|--------------------------------------------------------------------------|
+| A4 | C_PAD is power of 2 | Check C_PAD assignment in launcher (line 962) uses `_next_power_of_2(C)` |
 
 ## Entry Points
 
@@ -50,10 +50,10 @@ These require human/agent judgment when loading the trace.
 ## Dispatch Conditions
 
 ```python
-# autograd.py:636
+# autograd.py:641
 can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 
-# autograd.py:640-652
+# autograd.py:643-652
 if needs_grad:
     if can_use_triton:
         return SemiCRFStreamingTriton.apply(...)  # This path
@@ -70,7 +70,7 @@ Inputs:
   proj_start: (B, T, C) optional      <- Start boundary scores
   proj_end: (B, T, C) optional        <- End boundary scores
 
-Launcher allocates (triton_forward.py:988-1007):
+Launcher allocates (triton_forward.py:992-1005):
   partition: (B,)                     <- Output
   ring_buffer: (B, K, C_PAD)          <- Live ring buffer (initialized: [0,:,0,:C]=0, rest=NEG_INF)
   ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved states for backward
@@ -84,7 +84,7 @@ Kernel produces:
 
 ## Algorithm Steps
 
-### 1. Buffer Initialization (triton_forward.py:988-1007)
+### 1. Buffer Initialization (triton_forward.py:992-1005)
 
 ```python
 ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
@@ -96,11 +96,11 @@ ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
 ```
 
-### 2. Kernel Launch (triton_forward.py:1028-1076)
+### 2. Kernel Launch (triton_forward.py:1030-1071)
 
 Grid: `(batch,)` - one program per batch element
 
-### 3. Main Forward Loop (triton_forward.py:206-420)
+### 3. Main Forward Loop (triton_forward.py:206-407)
 
 ```
 for t in range(1, T + 1):  # t = 1, 2, ..., T
@@ -156,7 +156,7 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
         final_alpha = alpha_t
 ```
 
-### 4. Final Reduction (triton_forward.py:419-439)
+### 4. Final Reduction (triton_forward.py:415-438)
 
 ```python
 # Compute raw partition from normalized final_alpha
@@ -224,11 +224,11 @@ Backward recomputes forward between checkpoints using saved ring states.
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| triton_forward.py:304-311 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
-| triton_forward.py:316-324 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
+| triton_forward.py:306-309 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
+| triton_forward.py:315-323 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
 | triton_forward.py:340-400 | Checkpoint normalization | Prevent alpha overflow at extreme T (100k+) |
-| triton_forward.py:419-430 | Final logsumexp guard | Prevent NaN in partition output |
-| autograd.py:228-235 | `torch.isfinite(partition)` | Validate before backward |
+| triton_forward.py:419-425 | Final logsumexp guard | Prevent NaN in partition output |
+| autograd.py:228 | `torch.isfinite(partition)` | Validate before backward |
 
 ## NEG_INF Handling Pattern (Flash Attention Style)
 
@@ -288,6 +288,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-02**: Anchored to commit `d7b802c`; corrected line references for A4 verification (881→962), dispatch conditions (636→641), buffer init (988-1007→992-1005), kernel launch (1028-1076→1030-1071), main loop (206-420→206-407), final reduction (419-439→415-438), numerical guards
 - **2026-02-01**: Added Flash Attention-style checkpoint normalization for T=100k+ stability; removed epsilon from logsumexp; return type now includes `log_norm_checkpoints`
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests
 - **2026-01-27**: Initial trace @ commit `09e86ed`
