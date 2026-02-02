@@ -243,7 +243,8 @@ if HAS_TRITON:
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
         # Load batch-specific values
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast seq_len to int32 to match loop variable type from tl.range
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
         log_Z = tl.load(log_Z_ptr + batch_idx)
         grad_out = tl.load(grad_output_ptr + batch_idx)
 

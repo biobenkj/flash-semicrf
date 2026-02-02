@@ -166,7 +166,9 @@ if HAS_TRITON:
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
         # Load sequence length
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast to int32 to match loop variable type from tl.range (int32)
+        # Avoids silent comparison failures between int32 and int64
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
         # Base pointers
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
@@ -205,7 +207,8 @@ if HAS_TRITON:
         # Main forward loop: t = 1, 2, ..., T
         for t in tl.range(1, T + 1):
             # Include t == seq_len to compute alpha at final position
-            active = t <= seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
 
             # Accumulate alpha[t] = logsumexp over (k, c_src)
             alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
@@ -352,8 +355,10 @@ if HAS_TRITON:
                 max_val = tl.max(alpha_for_norm)
 
                 # Guard against all-NEG_INF case (inactive sequence or numerical issue)
-                is_all_neginf = max_val < (NEG_INF + 1.0)
-                shift = tl.where(is_all_neginf, 0.0, max_val)
+                # WORKAROUND: The comparison `max_val < (NEG_INF + 1.0)` fails silently in Triton
+                # for variable-length sequences due to unclear type/comparison issues.
+                # Instead, use `active` directly to determine if we should apply shift.
+                shift = tl.where(active, max_val, 0.0)
 
                 # 2. Update cumulative normalization factor
                 #    shift is 0 for inactive sequences, so no phantom updates
@@ -411,15 +416,9 @@ if HAS_TRITON:
             # Capture final alpha at sequence end (t == seq_len)
             # At iteration t, alpha_t represents segments ending at position t-1
             # For sequence of length L, we need alpha at t=L (segments ending at L-1)
-            is_final = t == seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
-
-            # DEBUG: Print forward pass statistics at final position (T=100k diagnostic)
-            # Uncomment these lines to diagnose numerical stability at extreme scale
-            # if batch_idx == 0 and is_final:
-            #     tl.device_print("FWD seq_len=", seq_len)
-            #     tl.device_print("FWD final_alpha_max=", tl.max(alpha_t))
-            #     tl.device_print("FWD final_alpha_min=", tl.min(alpha_t))
 
         # Final reduction: logsumexp over labels
         # Guard against all-NEG_INF case to prevent undefined arithmetic
@@ -513,7 +512,8 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast to int32 to match loop variable type from tl.range
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_base = ring_ptr + batch_idx * stride_ring_b
@@ -541,7 +541,8 @@ if HAS_TRITON:
 
         for t in tl.range(1, T + 1):
             # Include t == seq_len to compute alpha at final position
-            active = t <= seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
             alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
             # Loop over valid segment durations k = 1, 2, ..., min(K, t)
@@ -657,7 +658,8 @@ if HAS_TRITON:
             # Capture final alpha at sequence end (t == seq_len)
             # At iteration t, alpha_t represents segments ending at position t-1
             # For sequence of length L, we need alpha at t=L (segments ending at L-1)
-            is_final = t == seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
 
         # Max semiring: max over labels
@@ -737,7 +739,8 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast to int32 to match loop variable type from tl.range
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_base = ring_ptr + batch_idx * stride_ring_b
@@ -758,7 +761,8 @@ if HAS_TRITON:
         final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
         for t in tl.range(1, T + 1):
-            active = t <= seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
             alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
             # Initialize backpointer tracking for this timestep
@@ -888,7 +892,8 @@ if HAS_TRITON:
                         mask=save_mask,
                     )
 
-            is_final = t == seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
 
         # Max over labels with argmax for final label
