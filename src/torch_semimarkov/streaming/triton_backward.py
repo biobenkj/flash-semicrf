@@ -1005,29 +1005,30 @@ if HAS_TRITON:
         alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
         beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
-        # NUMERICAL STABILITY NOTE: Previously used float64 for gradient accumulation.
-        # With per-checkpoint log normalization (log_norm_checkpoints), values stay
-        # bounded within each checkpoint block (~1024 positions), so float32 is
-        # sufficient. The kernel-internal accumulators still use tl.float64 for
-        # safety during log-sum-exp operations.
-        accum_dtype = torch.float32
+        # NUMERICAL STABILITY: Selective precision for gradient tensors.
+        # - grad_cum_scores: O(B×T×C) but per-position (no cross-T accumulation) → float32 OK
+        # - grad_transition, grad_duration_bias: small but accumulated across all T → need float64
+        # The kernel-internal accumulators still use tl.float64 for log-sum-exp safety.
 
         # Allocate gradient outputs with C_PAD
-        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=accum_dtype)
-        grad_duration_bias = torch.zeros(K, C, device=device, dtype=accum_dtype)
+        # grad_cum_scores is per-position, doesn't accumulate across T → float32 sufficient
+        grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=torch.float32)
+        # grad_duration_bias accumulates across all T positions → needs float64
+        grad_duration_bias = torch.zeros(K, C, device=device, dtype=torch.float64)
 
-        # Allocate per-batch workspace buffers with higher precision
+        # Allocate per-batch workspace buffers
+        # These accumulate across T, so need float64 for numerical stability at large T
         # IMPORTANT: Allocate with C_PAD to prevent OOB memory access from masked-out
         # threads (indices C to C_PAD-1).
         if has_duration_transitions:
             # Duration-dependent: (batch, K, C_PAD, C_PAD)
             grad_tr_workspace = torch.zeros(
-                batch, K, C_PAD, C_PAD, device=device, dtype=accum_dtype
+                batch, K, C_PAD, C_PAD, device=device, dtype=torch.float64
             )
         else:
             # Static: (batch, C_PAD, C_PAD)
-            grad_tr_workspace = torch.zeros(batch, C_PAD, C_PAD, device=device, dtype=accum_dtype)
-        grad_db_workspace = torch.zeros(batch, K, C_PAD, device=device, dtype=accum_dtype)
+            grad_tr_workspace = torch.zeros(batch, C_PAD, C_PAD, device=device, dtype=torch.float64)
+        grad_db_workspace = torch.zeros(batch, K, C_PAD, device=device, dtype=torch.float64)
 
         # Allocate boundary marginals output if requested
         if return_boundary_marginals:
@@ -1159,18 +1160,19 @@ if HAS_TRITON:
         # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
         # Slice workspaces back to actual class count C before einsum reduction
         # (they were allocated with C_PAD to prevent OOB memory access)
+        # Convert grad_output to float64 to match workspace dtype for accumulated gradients
+        grad_output_f64 = grad_output.to(torch.float64)
         if has_duration_transitions:
             grad_tr_workspace = grad_tr_workspace[:, :, :C, :C]
-            grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output)
+            grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output_f64)
         else:
             grad_tr_workspace = grad_tr_workspace[:, :C, :C]
-            grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output)
+            grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output_f64)
 
         grad_db_workspace = grad_db_workspace[:, :, :C]
-        grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output)
+        grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 
-        # Slice padded gradients back to actual class count C
-        # Convert accum_dtype (float32) → original dtype if different
+        # Slice padded gradients back to actual class count C and convert to original dtype
         grad_cum_scores = grad_cum_scores[:, :, :C].to(dtype)
         grad_transition = grad_transition.to(dtype)
         grad_duration_bias = grad_duration_bias.to(dtype)
