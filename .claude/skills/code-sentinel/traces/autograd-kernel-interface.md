@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `UNCOMMITTED`
+**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `b00a066`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -213,5 +213,6 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
+- **2026-02-02**: Anchored to commit `b00a066`
 - **2026-02-01**: Added log_norm_checkpoints to save_for_backward and kernel interfaces for T=100k+ numerical stability
 - **2026-01-27**: Initial trace @ commit `40fe66b`

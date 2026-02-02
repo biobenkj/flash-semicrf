@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `UNCOMMITTED`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `d7b802c` (+ uncommitted)
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -22,8 +22,8 @@ The Triton backward kernel computes gradients for the Semi-CRF partition functio
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFStreamingTriton.backward()` | autograd.py:210 | Backward through SemiCRFStreamingTriton |
-| `launch_streaming_triton_backward()` | triton_backward.py:788 | Main launcher |
+| `SemiCRFStreamingTriton.backward()` | autograd.py:213 | Backward through SemiCRFStreamingTriton |
+| `launch_streaming_triton_backward()` | triton_backward.py:879 | Main launcher |
 | `semi_crf_streaming_backward_kernel()` | triton_backward.py:54 | The Triton kernel |
 
 ## Data Flow
@@ -39,12 +39,13 @@ Inputs (from forward):
   log_norm_checkpoints: (B, num_ckpts)   <- Cumulative normalization factors
   grad_output: (B,)                      <- Upstream gradient
 
-Launcher allocates (triton_backward.py:1000-1020):
+Launcher allocates (triton_backward.py:1005-1030):
   alpha_buffer: (B, SEGMENT_SIZE, C_PAD) <- Recomputed alpha within segment
   beta_ring: (B, K, C_PAD)               <- Beta ring buffer
-  grad_cum_scores: (B, T+1, C_PAD) float64 <- Output gradient (float64 for T=100k+ precision)
-  grad_tr_workspace: (B, C, C) or (B, K, C, C) float64 <- Per-batch accumulator
-  grad_db_workspace: (B, K, C) float64   <- Per-batch accumulator
+  grad_cum_scores: (B, T+1, C_PAD) float32 <- Output gradient (float32 sufficient with log_norm)
+  grad_tr_workspace: (B, C, C) or (B, K, C, C) float32 <- Per-batch accumulator
+  grad_db_workspace: (B, K, C) float32   <- Per-batch accumulator
+  NOTE: Kernel-internal accumulators use tl.float64 for log-sum-exp operations
 
 Outputs:
   grad_cum_scores: (B, T+1, C) original dtype <- Scaled by grad_output
@@ -124,9 +125,9 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 
 | Metric | Value |
 |--------|-------|
-| **Expected dtype** | float32 inputs, float64 accumulators |
-| **Accumulator dtype** | float64 for all gradients (triton_backward.py:1014-1020) |
-| **grad_cum_scores dtype** | float64 (was float32, changed for T=100k+ precision) |
+| **Expected dtype** | float32 inputs, float32 accumulators (kernel uses tl.float64 internally) |
+| **Accumulator dtype** | float32 for workspace tensors (triton_backward.py:1013); tl.float64 in kernel |
+| **grad_cum_scores dtype** | float32 (reverted from float64; log_norm keeps values bounded) |
 | **Alpha buffer** | `(B, SEGMENT_SIZE, C_PAD) * 4` bytes |
 | **Beta ring** | `(B, K, C_PAD) * 4` bytes |
 | **Grad workspace** | `(B, C, C) * 8` or `(B, K, C, C) * 8` bytes (float64) |
@@ -151,9 +152,9 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| autograd.py:224-231 | `torch.isfinite(partition)` | Validate partition before backward |
-| triton_backward.py (kernel) | Clamp log_marginal | Prevent exp() overflow: `clamp(log_marginal, min=-80, max=80)` |
-| autograd.py:254-265 | `torch.isfinite(grad_*)` | Validate all backward outputs |
+| autograd.py:228-235 | `torch.isfinite(partition)` | Validate partition before backward |
+| triton_backward.py (kernel) | Clamp log_scale | Prevent exp() overflow: `clamp(log_scale, min=-700, max=0)` |
+| autograd.py:264-277 | `torch.isfinite(grad_*)` | Validate all backward outputs |
 
 ## Gradient Reduction
 
@@ -167,13 +168,14 @@ The Triton kernel produces **per-batch** gradients for shared parameters. Autogr
 # (This happens in the launcher, not autograd)
 ```
 
-In the launcher (triton_backward.py:944-963):
+In the launcher (triton_backward.py:1159-1180):
 ```python
-# Convert from float64 workspace to original dtype
-# Slice from C_PAD back to C
-grad_cum_scores = grad_cum_scores_ws[:, :, :C].to(dtype)
-grad_transition = grad_tr_workspace[:, :C, :C].sum(dim=0).to(dtype)  # or [:, :, :C, :C] for K,C,C
-grad_duration_bias = grad_db_workspace[:, :, :C].sum(dim=0).to(dtype)
+# Slice workspaces back to actual class count C
+# Convert accum_dtype (float32) → original dtype if different
+grad_cum_scores = grad_cum_scores[:, :, :C].to(dtype)
+grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace[:, :, :C, :C], grad_output)
+# or for non-duration-dependent: "bij, b -> ij"
+grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace[:, :, :C], grad_output)
 ```
 
 ## Known Issues
@@ -182,7 +184,7 @@ grad_duration_bias = grad_db_workspace[:, :, :C].sum(dim=0).to(dtype)
 |-------|----------|-----------|------------|--------|
 | Duration-dependent transition off-by-one | Critical | HAS_DURATION_TRANSITIONS | Use `dur_idx` not `k` for indexing | `09e86ed` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
-| Float32 accumulator overflow | High | Long sequences, large C | Use float64 accumulators | triton_backward.py:897 |
+| Float32 accumulator overflow | Resolved | Long sequences, large C | log_norm_checkpoints keeps values bounded; kernel uses tl.float64 internally | d7b802c |
 | Wrong checkpoint_interval | Critical | Mismatched forward/backward | Pass same interval to both | autograd.py:244 |
 | grad_output not scaled | Medium | Wrong gradient magnitude | Triton kernel scales internally | - |
 
@@ -225,6 +227,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
-- **2026-02-01**: Added log_norm_checkpoints support for T=100k+ stability; relative log-marginal computation (Flash Attention pattern); grad_cum_scores now uses float64; removed epsilon from logsumexp
+- **2026-02-02**: Reverted workspace accumulators from float64 to float32 (uncommitted); log_norm_checkpoints keeps values bounded within checkpoint blocks, so float32 is sufficient; kernel-internal accumulators still use tl.float64 for log-sum-exp safety
+- **2026-02-01**: Added log_norm_checkpoints support for T=100k+ stability; relative log-marginal computation (Flash Attention pattern); removed epsilon from logsumexp
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests
 - **2026-01-27**: Initial trace @ commit `09e86ed`

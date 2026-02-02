@@ -2,7 +2,7 @@
 # Machine-readable state for automation and status queries
 
 version: 2.0
-last_global_verification: 2026-01-28T23:03:19Z
+last_global_verification: 2026-02-02T00:00:00Z
 
 # Note: Dual indexing scheme active during benchmarking phase
 # - Streaming backends: 0-based (dur_idx = k - 1) - production target
@@ -11,7 +11,7 @@ last_global_verification: 2026-01-28T23:03:19Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: 09e86ed
+    verified_commit: d7b802c
     source_files:
       - src/torch_semimarkov/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -54,7 +54,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: 40fe66b
+    verified_commit: b00a066
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
     assumptions_mechanical: []
@@ -62,19 +62,22 @@ sentinels:
     anchors:
       - TRITON_FORWARD_CLASS
       - PARTITION_VALIDATION
-    linked_tests: []
+    linked_tests:
+      - tests/test_streaming_triton.py::TestTritonGradients
     status: VERIFIED
     depends_on: []
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: 09e86ed
+    verified_commit: d7b802c
     source_files:
       - src/torch_semimarkov/streaming/triton_backward.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
-    linked_tests: []
+    linked_tests:
+      - tests/test_streaming_triton.py::TestTritonGradients
+      - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
     status: VERIFIED
     depends_on:
       - triton-forward-k3plus
