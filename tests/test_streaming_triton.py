@@ -63,7 +63,7 @@ class TestTritonStreamingKernel:
         )
 
         # Triton kernel
-        partition_triton, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        partition_triton, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -80,7 +80,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -97,7 +97,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -115,7 +115,7 @@ class TestTritonStreamingKernel:
                 cum_scores, transition, duration_bias, lengths, K
             )
 
-            partition_triton, _, _ = launch_streaming_triton_kernel(
+            partition_triton, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores, transition, duration_bias, lengths, K
             )
 
@@ -135,7 +135,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -154,7 +154,7 @@ class TestTritonStreamingKernel:
                 cum_scores, transition, duration_bias, lengths, K
             )
 
-            partition_triton, _, _ = launch_streaming_triton_kernel(
+            partition_triton, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores, transition, duration_bias, lengths, K
             )
 
@@ -173,7 +173,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -186,7 +186,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        partition_triton, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        partition_triton, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -199,7 +199,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        _, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        _, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -227,7 +227,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -247,7 +247,7 @@ class TestTritonStreamingKernel:
         )
 
         # Triton kernel
-        partition_triton, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        partition_triton, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -265,7 +265,7 @@ class TestTritonStreamingKernel:
         )
 
         # Forward through Triton
-        partition, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        partition, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -469,7 +469,7 @@ class TestTritonStreamingTraining:
         )
 
         # Run forward
-        partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
+        partition, ring_checkpoints, checkpoint_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -576,7 +576,7 @@ class TestTritonStreamingBoundaries:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -608,7 +608,7 @@ class TestTritonStreamingBoundaries:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -673,7 +673,7 @@ class TestTritonStreamingBoundaries:
         )
 
         # Run forward
-        partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
+        partition, ring_checkpoints, checkpoint_interval, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -731,7 +731,7 @@ class TestTritonStreamingBoundaries:
             proj_end=proj_end,
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -812,7 +812,7 @@ class TestTritonStreamingBenchmark:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -875,7 +875,7 @@ class TestDurationDependentTransitions:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -894,7 +894,7 @@ class TestDurationDependentTransitions:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -1032,7 +1032,7 @@ class TestDurationDependentTransitions:
         partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition_static, duration_bias, lengths, K
         )
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition_static, duration_bias, lengths, K
         )
 
@@ -1888,7 +1888,7 @@ if __name__ == "__main__":
         print(f"\nPyTorch partition: {partition_pytorch}")
 
         # Triton kernel
-        partition_triton, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+        partition_triton, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         print(f"Triton partition:  {partition_triton}")

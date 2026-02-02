@@ -716,6 +716,7 @@ def create_model(
     expand: int = 2,
     backend: str = "streaming",
     use_triton: bool = True,
+    dropout: float = 0.1,
 ) -> nn.Module:
     """
     Create a model based on type.
@@ -735,6 +736,7 @@ def create_model(
         d_state=d_state,
         d_conv=d_conv,
         expand=expand,
+        dropout=dropout,
     )
 
     if model_type == "softmax":
@@ -1038,8 +1040,18 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int = 0,
+    crf_reg: float = 0.0,
 ) -> float:
-    """Train for one epoch."""
+    """Train for one epoch.
+
+    Args:
+        model: The model to train
+        dataloader: Training data loader
+        optimizer: Optimizer
+        device: Device to train on
+        epoch: Current epoch number
+        crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only)
+    """
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -1055,6 +1067,11 @@ def train_epoch(
 
         optimizer.zero_grad()
         loss = model.compute_loss(sequence, lengths, labels_clean)
+
+        # Add CRF parameter regularization for Semi-Markov models
+        if crf_reg > 0 and isinstance(model, SemiCRFModel):
+            loss = loss + crf_reg * model.crf.parameter_penalty()
+
         loss.backward()
 
         # Gradient clipping
@@ -1187,8 +1204,33 @@ def train_model(
     log_every: int = 10,
     backend: str = "streaming",
     use_triton: bool = True,
+    weight_decay: float = 1e-5,
+    crf_reg: float = 0.0,
+    dropout: float = 0.1,
 ) -> tuple[nn.Module, BenchmarkMetrics]:
-    """Train a model and return it with test metrics."""
+    """Train a model and return it with test metrics.
+
+    Args:
+        model_type: Type of model to train
+        train_sequences: Training sequences
+        val_sequences: Validation sequences
+        test_sequences: Test sequences
+        encoder_type: Type of encoder (bilstm, mamba, mamba_stub)
+        features: Feature encoding (onehot, kmer)
+        max_duration: Maximum segment duration K
+        hidden_dim: Hidden dimension
+        num_layers: Number of encoder layers
+        batch_size: Batch size
+        learning_rate: Learning rate
+        epochs: Number of epochs
+        device: Device to train on
+        log_every: Log every N epochs
+        backend: Semi-CRF backend
+        use_triton: Whether to use Triton kernels
+        weight_decay: AdamW weight decay
+        crf_reg: L2 regularization for CRF parameters
+        dropout: Dropout rate for encoder
+    """
     device_obj = torch.device(device)
 
     # Create datasets
@@ -1223,6 +1265,7 @@ def train_model(
         num_layers=num_layers,
         backend=backend,
         use_triton=use_triton,
+        dropout=dropout,
     ).to(device_obj)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -1232,7 +1275,7 @@ def train_model(
         f"params={num_params:,}"
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     loss_curve = []
@@ -1243,7 +1286,9 @@ def train_model(
     peak_memory = 0.0
 
     for epoch in range(epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device_obj, epoch=epoch)
+        train_loss = train_epoch(
+            model, train_loader, optimizer, device_obj, epoch=epoch, crf_reg=crf_reg
+        )
         scheduler.step()
         loss_curve.append(train_loss)
 
@@ -1396,15 +1441,6 @@ def print_comparison_table(results: dict[str, BenchmarkMetrics]):
     print("RESULTS COMPARISON")
     print("=" * 100)
 
-    headers = [
-        "Model",
-        "Boundary F1",
-        "Segment F1",
-        "Position F1",
-        "Duration KL",
-        "Time (s)",
-        "Memory (GB)",
-    ]
     print(
         f"{'Model':<20} {'Boundary F1':>12} {'Segment F1':>12} {'Position F1':>12} "
         f"{'Duration KL':>12} {'Time (s)':>10} {'Mem (GB)':>10}"
@@ -1483,14 +1519,15 @@ def cmd_run(args):
     all_seqs = train_seqs + val_seqs + test_seqs
     ground_truth = get_ground_truth_distributions(all_seqs, NUM_CLASSES, args.max_duration)
 
-    # Train all models
+    # Train all models (or subset if --models specified)
     # 5-way comparison:
     # - softmax: per-position baseline
     # - pytorch-crf: external library linear CRF baseline (if available)
     # - linear: torch-semimarkov K=1 (same codebase as semi-CRF)
     # - semicrf: Semi-CRF with learned duration
     # - semicrf_uniform: Semi-CRF with uniform duration (ablation)
-    model_types = ["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"]
+    all_model_types = ["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"]
+    model_types = args.models if args.models else all_model_types
     results = {}
     pred_distributions = {}
 
@@ -1520,6 +1557,9 @@ def cmd_run(args):
             log_every=args.log_every,
             backend=args.backend,
             use_triton=not args.no_triton,
+            weight_decay=args.weight_decay,
+            crf_reg=args.crf_reg,
+            dropout=args.dropout,
         )
 
         results[model_type] = metrics
@@ -1684,6 +1724,32 @@ def main():
     run_parser.add_argument("--log-every", type=int, default=10, help="Log every N epochs")
     run_parser.add_argument("--backend", default="streaming", help="Semi-CRF backend")
     run_parser.add_argument("--no-triton", action="store_true", help="Disable Triton kernels")
+    run_parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-5,
+        help="AdamW weight decay (default: 1e-5)",
+    )
+    run_parser.add_argument(
+        "--crf-reg",
+        type=float,
+        default=0.0,
+        help="L2 regularization for CRF parameters (transition, duration_bias). "
+        "Helps prevent gradient explosion. Try 1e-4 to 1e-3 if training unstable.",
+    )
+    run_parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate for encoder (default: 0.1)",
+    )
+    run_parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"],
+        default=None,
+        help="Models to run (default: all). Example: --models semicrf semicrf_uniform",
+    )
 
     # Compare command
     cmp_parser = subparsers.add_parser("compare", help="Compare results")

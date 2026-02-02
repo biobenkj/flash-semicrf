@@ -60,7 +60,7 @@ class TestTritonMarginalsBasic:
         )
 
         # Triton (need forward pass first for checkpoints)
-        log_Z_triton, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z_triton, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -70,6 +70,7 @@ class TestTritonMarginalsBasic:
             lengths,
             log_Z_triton,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -127,7 +128,7 @@ class TestTritonMarginalsBasic:
         )
 
         # Triton
-        log_Z_triton, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z_triton, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -137,6 +138,7 @@ class TestTritonMarginalsBasic:
             lengths,
             log_Z_triton,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -187,7 +189,7 @@ class TestTritonMarginalsEdgeCases:
         )
 
         # Triton
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -197,6 +199,7 @@ class TestTritonMarginalsEdgeCases:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -242,7 +245,7 @@ class TestTritonMarginalsEdgeCases:
         )
 
         # Triton
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -252,6 +255,7 @@ class TestTritonMarginalsEdgeCases:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -297,7 +301,7 @@ class TestTritonMarginalsEdgeCases:
         )
 
         # Triton
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -307,6 +311,7 @@ class TestTritonMarginalsEdgeCases:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -352,7 +357,7 @@ class TestTritonMarginalsEdgeCases:
         )
 
         # Triton
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
@@ -362,6 +367,7 @@ class TestTritonMarginalsEdgeCases:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
         )
 
@@ -479,7 +485,7 @@ class TestBackwardCompatibility:
         grad_output = torch.ones(batch, device=cuda_device)
 
         # Forward
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -539,7 +545,7 @@ class TestBackwardCompatibility:
         grad_output = torch.ones(batch, device=cuda_device)
 
         # Forward
-        log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 

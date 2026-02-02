@@ -374,7 +374,7 @@ class TestK3TritonBoundary:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -457,7 +457,7 @@ class TestK3TritonBoundary:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -482,7 +482,7 @@ class TestK3TritonBoundary:
         )
 
         # Triton kernel
-        partition_triton, _, _ = launch_streaming_triton_kernel(
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -519,7 +519,7 @@ class TestK3TritonBoundary:
         duration_bias_k3[:2, :] = duration_bias_k2
         duration_bias_k3[2, :] = torch.randn(C, device="cuda") * 0.1
 
-        partition_k3, _, _ = launch_streaming_triton_kernel(
+        partition_k3, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias_k3, lengths, K=3
         )
 
@@ -587,7 +587,7 @@ class TestKBoundaryTransitions:
         duration_bias_k3[:2, :] = duration_bias_k2
         duration_bias_k3[2, :] = torch.randn(C, device="cuda") * 0.1
 
-        partition_k3, _, _ = launch_streaming_triton_kernel(
+        partition_k3, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias_k3, lengths, K=3
         )
 
@@ -625,7 +625,7 @@ class TestKBoundaryTransitions:
 
         # K=3 should use Triton
         duration_bias_k3 = torch.randn(3, C, device="cuda") * 0.1
-        partition_k3_triton, _, _ = launch_streaming_triton_kernel(
+        partition_k3_triton, _, _, _ = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias_k3, lengths, K=3
         )
         partition_k3_dispatch = semi_crf_streaming_forward(

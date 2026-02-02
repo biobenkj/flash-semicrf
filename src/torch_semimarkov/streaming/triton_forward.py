@@ -407,10 +407,10 @@ if HAS_TRITON:
 
             # DEBUG: Print forward pass statistics at final position (T=100k diagnostic)
             # Uncomment these lines to diagnose numerical stability at extreme scale
-            if batch_idx == 0 and is_final:
-                tl.device_print("FWD seq_len=", seq_len)
-                tl.device_print("FWD final_alpha_max=", tl.max(alpha_t))
-                tl.device_print("FWD final_alpha_min=", tl.min(alpha_t))
+            # if batch_idx == 0 and is_final:
+            #     tl.device_print("FWD seq_len=", seq_len)
+            #     tl.device_print("FWD final_alpha_max=", tl.max(alpha_t))
+            #     tl.device_print("FWD final_alpha_min=", tl.min(alpha_t))
 
         # Final reduction: logsumexp over labels
         # Guard against all-NEG_INF case to prevent undefined arithmetic
@@ -430,9 +430,9 @@ if HAS_TRITON:
 
         # DEBUG: Print partition (log_Z) for T=100k diagnostic
         # Uncomment these lines to diagnose numerical stability at extreme scale
-        if batch_idx == 0:
-            tl.device_print("FWD log_Z=", partition)
-            tl.device_print("FWD max_final_alpha=", max_val)
+        # if batch_idx == 0:
+        #     tl.device_print("FWD log_Z=", partition)
+        #     tl.device_print("FWD max_final_alpha=", max_val)
 
         # Store result
         tl.store(out_ptr + batch_idx, partition)

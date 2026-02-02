@@ -589,8 +589,50 @@ Use the PyTorch reference for debugging:
 from torch_semimarkov.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
 
 # Compare results
-partition_triton, _, _ = launch_streaming_triton_kernel(...)
+partition_triton, _, _, _ = launch_streaming_triton_kernel(...)
 partition_ref, _, _ = semi_crf_streaming_forward_pytorch(...)
 
 assert torch.allclose(partition_triton, partition_ref, atol=1e-4)
 ```
+
+### Gradient Agreement Testing
+
+A dedicated test script at `benchmarks/practical_demonstration/synthetic_genomics/gradient_check.py` compares Triton kernel gradients vs PyTorch reference at the low-level API.
+
+**Key insight**: Comparing normalized (Triton) vs un-normalized (PyTorch) implementations requires **different metrics for different gradients**:
+
+| Gradient | Metric | Threshold | Why |
+| -------- | ------ | --------- | --- |
+| Forward partition | Max relative error | < 1e-4 | Core correctness |
+| grad_transition | Max relative error | < 1e-2 | Parameter gradient |
+| grad_duration_bias | Max relative error | < 1e-2 | Parameter gradient |
+| grad_cum_scores | **Mean absolute error** | < 1e-3 | See below |
+
+**Why grad_cum_scores uses mean absolute error:**
+
+The max relative error on grad_cum_scores can be large (~70x at T=10k) even when the implementation is correct. This occurs at positions where:
+
+- Reference gradient is near-zero (~1e-3)
+- Absolute difference is small (~7e-3)
+- Division by near-zero inflates relative error to ~70
+
+The mean absolute error (2.6e-4 at T=10k) correctly captures that most positions agree closely.
+
+**Error scaling with T:**
+
+| Sequence Length | Forward Rel Error | grad_transition Rel Error |
+| --------------- | ----------------- | ------------------------- |
+| T=1,000 | 1.1e-6 | 7.9e-4 |
+| T=10,000 | 6.2e-7 | 6.7e-3 |
+
+Error grows roughly linearly with T due to accumulated floating-point rounding differences between:
+
+1. Triton parallel reduction vs Python sequential reduction
+2. Floating-point non-associativity: `(a+b)+c ≠ a+(b+c)`
+
+**Limitations of reference comparison:**
+
+- PyTorch reference lacks per-checkpoint normalization
+- At T > ~10k, reference alpha values may overflow
+- Use gradient_check.py only for T ≤ 10k validation
+- For T=100k, verify training completes without NaN/Inf instead

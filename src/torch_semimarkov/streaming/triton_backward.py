@@ -310,8 +310,8 @@ if HAS_TRITON:
             )
 
             # Debug: show checkpoint loading (remove after validation)
-            if batch_idx == 0:
-                tl.device_print("BWD loading ckpt_idx, log_norm:", ckpt_idx, log_norm_at_ckpt)
+            # if batch_idx == 0:
+            #     tl.device_print("BWD loading ckpt_idx, log_norm:", ckpt_idx, log_norm_at_ckpt)
 
             # Only process segments within sequence length
             if seg_start < seq_len:
@@ -662,31 +662,31 @@ if HAS_TRITON:
                                     log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
 
                                     # Temporary debug (remove after validation):
-                                    if batch_idx == 0 and t % 10000 == 0:
-                                        # Check forward-backward identity:
-                                        # true_alpha + beta = log_Z
-                                        # (normalized_alpha + log_norm) + beta = log_Z
-                                        max_alpha = tl.max(
-                                            tl.where(
-                                                c_mask[None, :], alpha_t_clamped[None, :], NEG_INF
-                                            )
-                                        )
-                                        max_beta = tl.max(
-                                            tl.where(
-                                                c_dst_mask_tile[:, None],
-                                                beta_tile_clamped[:, None],
-                                                NEG_INF,
-                                            )
-                                        )
-                                        tl.device_print(
-                                            "BWD t, max_alpha, max_beta:", t, max_alpha, max_beta
-                                        )
-                                        tl.device_print(
-                                            "BWD true_alpha+beta vs log_Z:",
-                                            max_alpha + log_norm_at_ckpt + max_beta,
-                                            log_Z,
-                                        )
-                                        tl.device_print("BWD log_scale:", log_scale)
+                                    # if batch_idx == 0 and t % 10000 == 0:
+                                    #     # Check forward-backward identity:
+                                    #     # true_alpha + beta = log_Z
+                                    #     # (normalized_alpha + log_norm) + beta = log_Z
+                                    #     max_alpha = tl.max(
+                                    #         tl.where(
+                                    #             c_mask[None, :], alpha_t_clamped[None, :], NEG_INF
+                                    #         )
+                                    #     )
+                                    #     max_beta = tl.max(
+                                    #         tl.where(
+                                    #             c_dst_mask_tile[:, None],
+                                    #             beta_tile_clamped[:, None],
+                                    #             NEG_INF,
+                                    #         )
+                                    #     )
+                                    #     tl.device_print(
+                                    #         "BWD t, max_alpha, max_beta:", t, max_alpha, max_beta
+                                    #     )
+                                    #     tl.device_print(
+                                    #         "BWD true_alpha+beta vs log_Z:",
+                                    #         max_alpha + log_norm_at_ckpt + max_beta,
+                                    #         log_Z,
+                                    #     )
+                                    #     tl.device_print("BWD log_scale:", log_scale)
 
                                     # Step 6: Defensive clamping (scale should be ≤ 1 for valid marginals)
                                     log_scale_clamped = tl.minimum(
@@ -1201,11 +1201,12 @@ if HAS_TRITON:
         lengths: torch.Tensor,
         log_Z: torch.Tensor,
         ring_checkpoints: torch.Tensor,
+        log_norm_checkpoints: torch.Tensor,
         checkpoint_interval: int,
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
     ) -> torch.Tensor:
-        r"""launch_streaming_triton_marginals(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, checkpoint_interval, proj_start=None, proj_end=None) -> Tensor
+        r"""launch_streaming_triton_marginals(cum_scores, transition, duration_bias, lengths, log_Z, ring_checkpoints, log_norm_checkpoints, checkpoint_interval, proj_start=None, proj_end=None) -> Tensor
 
         Compute boundary marginals via Triton backward kernel.
 
@@ -1224,6 +1225,9 @@ if HAS_TRITON:
             log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
             ring_checkpoints (Tensor): Saved ring buffer states of shape
                 :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+            log_norm_checkpoints (Tensor): Cumulative log normalization factors of shape
+                :math:`(\text{batch}, \text{num\_ckpts})`. Required for numerical stability
+                at extreme sequence lengths.
             checkpoint_interval (int): Interval used during forward pass.
             proj_start (Tensor, optional): Start boundary scores of shape
                 :math:`(\text{batch}, T, C)`. Default: ``None``
@@ -1248,13 +1252,13 @@ if HAS_TRITON:
             >>> duration_bias = torch.randn(10, 4, device='cuda')  # K=10
             >>> lengths = torch.tensor([100, 80], device='cuda')
             >>> # Forward pass to get checkpoints
-            >>> log_Z, ring_ckpts, interval = launch_streaming_triton_kernel(
+            >>> log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             ...     cum_scores, transition, duration_bias, lengths, K=10
             ... )
             >>> # Compute boundary marginals
             >>> marginals = launch_streaming_triton_marginals(
             ...     cum_scores, transition, duration_bias, lengths,
-            ...     log_Z, ring_ckpts, interval
+            ...     log_Z, ring_ckpts, log_norm_ckpts, interval
             ... )
             >>> marginals.shape
             torch.Size([2, 100])
@@ -1275,6 +1279,7 @@ if HAS_TRITON:
             lengths,
             log_Z,
             ring_checkpoints,
+            log_norm_checkpoints,
             checkpoint_interval,
             grad_output,
             proj_start,
