@@ -383,6 +383,105 @@ This technique synthesizes established methods:
 - Save `log_norm_checkpoints` in forward: `save_for_backward`
 - Pass to backward kernel: backward launcher call
 
+### Variable-Length Batch Handling
+
+#### The Problem: Phantom Normalization for Ended Sequences
+
+When processing batches with variable-length sequences, sequences that end before `T_max` must not accumulate normalization shifts at later checkpoints. Without proper masking, phantom shifts would be added:
+
+```text
+Batch with lengths = [50, 75, 100], checkpoint_interval = 25:
+
+Without masking (BROKEN):
+  Sequence 0 (L=50):
+    ckpt 1 (t=25): shift = max(α) → valid
+    ckpt 2 (t=50): shift = max(α) → valid (final for this sequence)
+    ckpt 3 (t=75): shift = max(NEG_INF) = NEG_INF → WRONG! Adds phantom shift
+    ckpt 4 (t=100): shift = max(NEG_INF) = NEG_INF → WRONG!
+
+  Result: partition[0] = logsumexp(α_50) + accum_log_norm (includes phantom shifts)
+          partition[0] ≈ expected + 2×NEG_INF ≈ -2e9 → COMPLETELY WRONG
+```
+
+The test failure manifests as ~1e9 difference in partition values for variable-length batches.
+
+#### The Solution: Active Sequence Masking
+
+Both PyTorch and Triton implementations mask the `active` flag when computing normalization shifts:
+
+```text
+At checkpoint boundary (t % interval == 0):
+  1. active = (t <= seq_len[b])
+  2. alpha_for_norm = where(active, α_t, NEG_INF)
+  3. shift = max(alpha_for_norm)
+  4. Guard: if shift == NEG_INF → shift = 0  # Inactive sequence
+  5. accum_log_norm += shift  # Only non-zero for active sequences
+```
+
+**Key insight**: For inactive sequences, `alpha_for_norm` is all `NEG_INF`, so `shift = 0` and `accum_log_norm` freezes at the correct value.
+
+**Triton Implementation** ([triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py)):
+
+```python
+# 1. Find max alpha value for normalization (over valid C only)
+#    For inactive sequences, use NEG_INF to produce shift=0
+alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
+max_val = tl.max(alpha_for_norm)
+
+# Guard against all-NEG_INF case (inactive sequence or numerical issue)
+is_all_neginf = max_val < (NEG_INF + 1.0)
+shift = tl.where(is_all_neginf, 0.0, max_val)
+
+# 2. Update cumulative normalization factor
+#    shift is 0 for inactive sequences, so no phantom updates
+accum_log_norm = accum_log_norm + shift
+
+# 3. Normalize alpha and ring buffer
+alpha_t = alpha_t - shift
+# ... normalize all K ring buffer slots ...
+
+# 4. Save checkpoint with active masking
+save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
+tl.store(ring_ckpt_ptr + ..., alpha_t, mask=save_mask)
+tl.store(log_norm_ckpt_ptr + ..., accum_log_norm, mask=(ckpt_idx < NUM_CKPTS) & active)
+```
+
+**PyTorch Implementation** ([pytorch_reference.py](../src/torch_semimarkov/streaming/pytorch_reference.py)):
+
+```python
+# Normalize at checkpoint boundary
+active_mask = (t <= lengths)  # (batch,)
+
+# Compute shift only for active sequences
+alpha_for_norm = torch.where(
+    active_mask[:, None],
+    alpha_t,
+    torch.full_like(alpha_t, NEG_INF)
+)
+shift = alpha_for_norm.max(dim=-1).values  # (batch,)
+
+# Guard against all-NEG_INF (inactive sequences)
+is_all_neginf = shift < (NEG_INF + 1.0)
+shift = torch.where(is_all_neginf, torch.zeros_like(shift), shift)
+
+# Update accum_log_norm (frozen for inactive sequences)
+accum_log_norm = accum_log_norm + shift
+
+# Apply normalization
+alpha_t = alpha_t - shift[:, None]
+ring_buffer = ring_buffer - shift[:, None, None]
+```
+
+#### Comparison with Flash Attention
+
+Flash Attention explicitly states: "Triton version doesn't support different sequence lengths in a batch (i.e., RaggedTensor/NestedTensor)." Our approach extends the Flash Attention normalization pattern to handle variable-length batches by:
+
+1. **Masking active sequences** in the shift computation
+2. **Zeroing shifts for ended sequences** via the `is_all_neginf` guard
+3. **Freezing `accum_log_norm`** once a sequence ends
+
+This is a novel extension of the Flash Attention technique to the batched variable-length Semi-CRF setting.
+
 ---
 
 ## Backward Pass Walkthrough

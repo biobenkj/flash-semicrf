@@ -652,9 +652,7 @@ def semi_crf_streaming_forward_pytorch(
 
     # Log normalization checkpoints for numerical stability at extreme T
     # Stores cumulative log normalization factor at each checkpoint boundary
-    log_norm_checkpoints = torch.zeros(
-        (batch, num_checkpoints), device=device, dtype=dtype
-    )
+    log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
 
     # Track cumulative normalization factor per batch element
     accum_log_norm = torch.zeros(batch, device=device, dtype=dtype)
@@ -727,9 +725,7 @@ def semi_crf_streaming_forward_pytorch(
                 shift = alpha_for_norm.max(dim=-1, keepdim=True)[0]  # (batch, 1)
 
                 # Guard against all-NEG_INF case (shouldn't happen, but be safe)
-                shift = torch.where(
-                    shift < NEG_INF + 1.0, torch.zeros_like(shift), shift
-                )
+                shift = torch.where(shift < NEG_INF + 1.0, torch.zeros_like(shift), shift)
 
                 # 2. Update cumulative normalization factor (only for active sequences)
                 accum_log_norm = torch.where(
@@ -739,9 +735,7 @@ def semi_crf_streaming_forward_pytorch(
                 # 3. Normalize alpha_t register
                 #    CRITICAL: Must update alpha_t before final_alpha capture
                 #    This ensures consistency if seq_len falls on checkpoint boundary
-                alpha_t = torch.where(
-                    active_mask.view(batch, 1), alpha_t - shift, alpha_t
-                )
+                alpha_t = torch.where(active_mask.view(batch, 1), alpha_t - shift, alpha_t)
 
                 # 4. Normalize ALL K slots in ring buffer
                 #    The ring buffer is used for K more iterations after checkpoint,

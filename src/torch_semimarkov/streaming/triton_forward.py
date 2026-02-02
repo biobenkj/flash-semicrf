@@ -341,25 +341,33 @@ if HAS_TRITON:
                 # ===== NORMALIZATION STEP (for numerical stability at extreme T) =====
                 # Following Flash Attention pattern: normalize at checkpoints to prevent
                 # alpha values from growing unbounded (e.g., to ±250,000 at T=100k)
+                #
+                # CRITICAL: Only normalize for ACTIVE sequences (t <= seq_len)
+                # For ended sequences, we must NOT update accum_log_norm or the
+                # partition function will be wrong (phantom shifts would be added)
 
                 # 1. Find max alpha value for normalization (over valid C only)
-                alpha_for_norm = tl.where(c_mask, alpha_t, NEG_INF)
+                #    For inactive sequences, use NEG_INF to produce shift=0
+                alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
                 max_val = tl.max(alpha_for_norm)
 
-                # Guard against all-NEG_INF case (shouldn't happen, but be safe)
+                # Guard against all-NEG_INF case (inactive sequence or numerical issue)
                 is_all_neginf = max_val < (NEG_INF + 1.0)
                 shift = tl.where(is_all_neginf, 0.0, max_val)
 
                 # 2. Update cumulative normalization factor
+                #    shift is 0 for inactive sequences, so no phantom updates
                 accum_log_norm = accum_log_norm + shift
 
                 # 3. CRITICAL: Update alpha_t register BEFORE final_alpha capture
                 #    This ensures consistency if seq_len falls on a checkpoint boundary
+                #    For inactive sequences, shift=0 so no change
                 alpha_t = alpha_t - shift
 
                 # 4. Normalize ALL K slots in ring buffer
                 #    The ring buffer is used for K more iterations after checkpoint,
                 #    so all slots must be shifted to maintain consistency
+                #    Only update for active sequences
                 for k_norm in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
@@ -370,18 +378,19 @@ if HAS_TRITON:
                     tl.store(
                         ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
                         ring_val_shifted,
-                        mask=c_mask,
+                        mask=active & c_mask,  # Only update for active sequences
                     )
 
                 # 5. Save normalized ring buffer to checkpoint
+                #    Only save for active sequences with valid checkpoint index
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
                     )
-                    # Only save if checkpoint index is valid
-                    save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
                         ring_ckpt_base
                         + ckpt_idx * stride_ckpt_n
@@ -392,8 +401,8 @@ if HAS_TRITON:
                     )
 
                 # 6. Save cumulative log normalization factor
-                #    All threads compute the same value; store once per checkpoint
-                if ckpt_idx < NUM_CKPTS:
+                #    Only save for active sequences
+                if (ckpt_idx < NUM_CKPTS) & active:
                     tl.store(
                         log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n,
                         accum_log_norm,
@@ -624,6 +633,7 @@ if HAS_TRITON:
             )
 
             # Save checkpoint at interval boundaries
+            # Only save for active sequences to avoid stale data
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
@@ -633,7 +643,8 @@ if HAS_TRITON:
                         mask=c_mask,
                         other=NEG_INF,
                     )
-                    save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
                         ring_ckpt_base
                         + ckpt_idx * stride_ckpt_n
@@ -856,6 +867,7 @@ if HAS_TRITON:
             )
 
             # Save checkpoint at interval boundaries
+            # Only save for active sequences to avoid stale data
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
@@ -865,7 +877,8 @@ if HAS_TRITON:
                         mask=c_mask,
                         other=NEG_INF,
                     )
-                    save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
                         ring_ckpt_base
                         + ckpt_idx * stride_ckpt_n
