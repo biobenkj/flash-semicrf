@@ -1,6 +1,6 @@
 # Sentinel: K=1 Linear CRF Fast Path
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `09e86ed`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `f865fed`
 **Linked tests:** `tests/test_streaming.py::TestStreamingK1::test_streaming_k1_gradient_flow`
 
 ## Summary
@@ -17,15 +17,15 @@ The K=1 fast path handles linear CRF (segment length = 1 only). No ring buffer n
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `LinearCRFStreaming.apply()` | autograd.py:590 | K=1, needs_grad, no boundaries |
+| `LinearCRFStreaming.apply()` | autograd.py:600 | K=1, needs_grad, no boundaries |
 | `linear_crf_forward_pytorch()` | pytorch_reference.py:26 | Forward pass |
 | `linear_crf_backward_pytorch()` | pytorch_reference.py:86 | Backward pass |
-| `linear_crf_viterbi_pytorch()` | pytorch_reference.py:166 | Max semiring (Viterbi) |
+| `linear_crf_viterbi_pytorch()` | pytorch_reference.py:195 | Max semiring (Viterbi) |
 
 ## Dispatch Conditions
 
 ```python
-# autograd.py:584-605
+# autograd.py:594-616
 if K == 1:
     if proj_start is not None or proj_end is not None:
         # Fall through to K>=3 path (boundaries not supported)
@@ -58,23 +58,69 @@ def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
 
     for t in range(1, T + 1):
         # Content score from cumsum difference
-        content = cum_scores[:, t, :] - cum_scores[:, t-1, :]  # (B, C)
-        segment_score = content + duration_bias[0, :]  # k=1 uses index 0
+        emission = cum_scores[:, t, :] - cum_scores[:, t-1, :] + dur_bias  # (B, C)
 
-        # edge[c_dst, c_src] = segment_score[c_dst] + transition[c_src, c_dst]
-        edge = segment_score.unsqueeze(-1) + transition.T  # (B, C_dst, C_src)
+        # Linear CRF recurrence:
+        # alpha[t, c_dst] = logsumexp_{c_src}(alpha[t-1, c_src] + trans[c_src, c_dst]) + emission[c_dst]
+        alpha_new = torch.logsumexp(alpha.unsqueeze(-1) + transition, dim=-2) + emission
 
-        # scores = alpha[c_src] + edge[c_dst, c_src]
-        scores = alpha.unsqueeze(-2) + edge  # (B, C_dst, C_src)
+        # Update alpha only for active sequences
+        active_mask = (t <= lengths).view(batch, 1)
+        alpha = torch.where(active_mask, alpha_new, alpha)
 
-        # logsumexp over c_src
-        alpha = torch.logsumexp(scores, dim=-1)  # (B, C)
-
-        # Capture at sequence end
-        if t == lengths[b]:
-            final_alpha[b] = alpha[b]
+        # Capture final alpha at sequence endpoints
+        final_mask = (t == lengths).view(batch, 1)
+        final_alpha = torch.where(final_mask, alpha_new, final_alpha)
 
     return torch.logsumexp(final_alpha, dim=-1)  # (B,)
+```
+
+## Algorithm (Backward)
+
+```python
+def linear_crf_backward_pytorch(cum_scores, transition, lengths, log_Z, duration_bias):
+    # pytorch_reference.py:86-192
+
+    # Forward pass: store all alpha values
+    alpha_all = torch.full((batch, T + 1, C), NEG_INF)
+    alpha_all[:, 0, :] = 0.0
+    for t in range(1, T + 1):
+        # ... standard forward recurrence
+
+    # Backward pass: compute all beta values
+    beta_all = torch.full((batch, T + 1, C), NEG_INF)
+    # Initialize beta at final positions
+    for b in range(batch):
+        beta_all[b, lengths[b].item(), :] = 0.0
+
+    for t in range(T - 1, -1, -1):
+        # beta[t, c_src] = logsumexp_{c_dst}(trans[c_src, c_dst] + emission[c_dst] + beta[t+1, c_dst])
+        beta_new = torch.logsumexp(
+            transition.unsqueeze(0) + (emission_next + beta_all[:, t + 1, :]).unsqueeze(-2),
+            dim=-1,
+        )
+
+    # Compute gradients via marginals
+    # Edge marginal: P(c_src -> c_dst at time t)
+    log_marginal = alpha[t-1, c_src] + trans[c_src, c_dst] + emission[c_dst] + beta[t, c_dst] - log_Z
+    marginal = exp(clamp(log_marginal, -80, 80))
+
+    # Accumulate gradients (per-batch for reduction in autograd)
+    grad_cum_scores[:, t, :] += marginal.sum(dim=-2)
+    grad_cum_scores[:, t - 1, :] -= marginal.sum(dim=-2)
+    grad_transition += marginal
+    grad_duration_bias += marginal.sum(dim=-2)
+```
+
+## Autograd Gradient Reduction
+
+The backward function returns per-batch gradients. Autograd reduces them:
+
+```python
+# autograd.py:380-384
+grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
+if grad_duration_bias is not None:
+    grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
 ```
 
 ## Memory Comparison
@@ -91,6 +137,7 @@ def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
 | K must be 1 | Dispatch enforces |
 | No boundaries | If boundaries, falls to K>=3 |
 | duration_bias[0] used | Index 0 for k=1 |
+| Per-batch gradients | transition/duration_bias returned as (B, ...) |
 
 ## Known Issues
 
@@ -101,4 +148,5 @@ def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
 
 ## Version History
 
+- **2026-02-02**: Updated line numbers (Viterbi at 195, dispatch at 594-616); documented per-batch gradient convention
 - **2026-01-27**: Initial trace @ commit `09e86ed`

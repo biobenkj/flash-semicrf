@@ -136,7 +136,7 @@ def benchmark_triton_forward(
 
     # Warmup
     for _ in range(warmup):
-        partition, ring_ckpts, interval = launch_streaming_triton_kernel(
+        partition, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -156,7 +156,7 @@ def benchmark_triton_forward(
         torch.cuda.synchronize()
         start = time.perf_counter()
 
-        partition, ring_ckpts, interval = launch_streaming_triton_kernel(
+        partition, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -206,7 +206,7 @@ def benchmark_triton_backward(
     device = cum_scores.device
 
     # Run forward to get checkpoints
-    partition, ring_ckpts, interval = launch_streaming_triton_kernel(
+    partition, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
         cum_scores,
         transition,
         duration_bias,
@@ -228,6 +228,7 @@ def benchmark_triton_backward(
             lengths,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             grad_output,
             validate_cache=False,
@@ -250,6 +251,7 @@ def benchmark_triton_backward(
             lengths,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             grad_output,
             validate_cache=False,
@@ -286,7 +288,7 @@ def benchmark_pytorch_forward(
 
     # Warmup
     for _ in range(warmup):
-        partition, ring_ckpts, interval = semi_crf_streaming_forward_pytorch(
+        partition, ring_ckpts, interval, log_norm_ckpts = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -304,7 +306,7 @@ def benchmark_pytorch_forward(
         torch.cuda.synchronize()
         start = time.perf_counter()
 
-        partition, ring_ckpts, interval = semi_crf_streaming_forward_pytorch(
+        partition, ring_ckpts, interval, log_norm_ckpts = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -343,7 +345,7 @@ def benchmark_pytorch_backward(
     )
 
     # Run forward to get checkpoints
-    partition, ring_ckpts, interval = semi_crf_streaming_forward_pytorch(
+    partition, ring_ckpts, interval, log_norm_ckpts = semi_crf_streaming_forward_pytorch(
         cum_scores,
         transition,
         duration_bias,
@@ -364,6 +366,7 @@ def benchmark_pytorch_backward(
             K,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             semiring="log",
         )
@@ -386,6 +389,7 @@ def benchmark_pytorch_backward(
             K,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             semiring="log",
         )
@@ -495,7 +499,7 @@ def run_profiled_benchmark(config: BenchmarkConfig):
     # Warmup
     print("  Warming up...")
     for _ in range(5):
-        partition, ring_ckpts, interval = launch_streaming_triton_kernel(
+        partition, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores,
             transition,
             duration_bias,
@@ -511,6 +515,7 @@ def run_profiled_benchmark(config: BenchmarkConfig):
             lengths,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             grad_output,
             validate_cache=False,
@@ -527,7 +532,7 @@ def run_profiled_benchmark(config: BenchmarkConfig):
     ) as prof:
         for _ in range(10):
             with record_function("triton_forward"):
-                partition, ring_ckpts, interval = launch_streaming_triton_kernel(
+                partition, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
                     cum_scores,
                     transition,
                     duration_bias,
@@ -546,6 +551,7 @@ def run_profiled_benchmark(config: BenchmarkConfig):
                     lengths,
                     partition,
                     ring_ckpts,
+                    log_norm_ckpts,
                     interval,
                     grad_output,
                     validate_cache=False,

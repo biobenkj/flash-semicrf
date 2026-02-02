@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `b00a066`
+**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `f865fed`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -17,7 +17,7 @@ Documents the contract between autograd functions (`SemiCRFStreamingTriton`, `Se
 
 ## ctx.save_for_backward() Semantics
 
-### SemiCRFStreamingTriton (lines 196-210)
+### SemiCRFStreamingTriton (lines 199-213)
 
 ```python
 ctx.save_for_backward(
@@ -37,7 +37,7 @@ ctx.checkpoint_interval = interval  # int constant
 ctx.num_warps = num_warps           # int constant (passed to backward kernel)
 ```
 
-### SemiCRFStreaming (PyTorch, lines 57-69)
+### SemiCRFStreaming (PyTorch, lines 59-72)
 
 Same tensors saved, minus `num_warps`.
 
@@ -62,7 +62,7 @@ Same tensors saved, minus `num_warps`.
 ### Input Requirements
 
 All input tensors must be:
-1. **Contiguous** - Kernel calls `.contiguous()` on all inputs (lines 890-893)
+1. **Contiguous** - Kernel calls `.contiguous()` on all inputs
 2. **Same device** - All on CPU or all on CUDA
 3. **Same dtype** - Typically float32 (float16 causes overflow)
 
@@ -80,10 +80,10 @@ Backward kernels produce:
 
 ### Shared Parameter Gradient Reduction
 
-Triton backward returns **per-batch** gradients for shared parameters. Autograd function reduces them:
+Both PyTorch and Triton backward return **per-batch** gradients for shared parameters. Autograd function reduces them:
 
 ```python
-# autograd.py lines 138-143 (PyTorch path)
+# autograd.py lines 143-148 (PyTorch path)
 # Shared parameters: weighted sum via einsum (memory-efficient)
 if grad_transition.ndim == 3:  # (batch, C, C) - static transitions
     grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
@@ -93,6 +93,8 @@ else:  # (batch, K, C, C) - duration-dependent
 grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
 ```
 
+Triton backward (lines 245-260) scales internally via `grad_output` parameter.
+
 ## Error Handling at Boundary
 
 ### Partition Validation (Before Backward)
@@ -100,7 +102,7 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 Both autograd functions validate partition before backward:
 
 ```python
-# autograd.py lines 88-95 (PyTorch) and 224-231 (Triton)
+# autograd.py lines 92-99 (PyTorch) and 233-240 (Triton)
 if not torch.isfinite(partition).all():
     nan_count = torch.isnan(partition).sum().item()
     inf_count = torch.isinf(partition).sum().item()
@@ -116,7 +118,7 @@ if not torch.isfinite(partition).all():
 ### Gradient Validation (After Backward)
 
 ```python
-# autograd.py lines 115-121 (PyTorch) and 254-265 (Triton)
+# autograd.py lines 120-126 (PyTorch) and 264-275 (Triton)
 if not torch.isfinite(grad_cum_scores).all():
     nan_count = torch.isnan(grad_cum_scores).sum().item()
     inf_count = torch.isinf(grad_cum_scores).sum().item()
@@ -179,9 +181,9 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 
 ## Critical Invariants
 
-- [ ] All inputs detached in forward kernel call (line 179-188)
-- [ ] Partition validated before backward (lines 88, 224)
-- [ ] All backward outputs validated (lines 115, 254)
+- [ ] All inputs detached in forward kernel call (lines 184-195)
+- [ ] Partition validated before backward (lines 92, 233)
+- [ ] All backward outputs validated (lines 120, 264)
 - [ ] Shared params reduced via einsum, not expanded then summed (memory)
 - [ ] `checkpoint_interval >= K` (required for correct recomputation)
 - [ ] `num_warps` passed from forward to backward (consistency)
@@ -200,7 +202,7 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 When gradients are wrong but partition is correct, check:
 
 ```python
-# Insert in SemiCRFStreamingTriton.backward(), line 236
+# Insert in SemiCRFStreamingTriton.backward(), line 242
 print(f"checkpoint_interval: forward={ctx.checkpoint_interval}")
 print(f"ring_checkpoints shape: {ring_checkpoints.shape}")
 print(f"expected checkpoints: {(T + ctx.checkpoint_interval - 1) // ctx.checkpoint_interval}")
@@ -213,6 +215,6 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
-- **2026-02-02**: Anchored to commit `b00a066`
+- **2026-02-02**: Updated line numbers throughout; clarified per-batch gradient convention
 - **2026-02-01**: Added log_norm_checkpoints to save_for_backward and kernel interfaces for T=100k+ numerical stability
 - **2026-01-27**: Initial trace @ commit `40fe66b`

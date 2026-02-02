@@ -237,12 +237,12 @@ python gradient_check.py --seq-length 50000 --batch-size 1
 ### What It Tests
 
 1. **Forward partition agreement**: Triton vs PyTorch reference log-partition function
-2. **Checkpoint reconstruction**: Triton normalized checkpoints + log_norm ≈ PyTorch raw checkpoints
+2. **Checkpoint consistency**: Both implementations save normalized checkpoints with log_norm factors
 3. **Backward gradient agreement**: grad_cum_scores, grad_transition, grad_duration_bias
 
 ### Acceptance Criteria
 
-The test uses **different metrics for different gradients** because comparing normalized (Triton) vs un-normalized (PyTorch) implementations has inherent numerical differences:
+The test uses **different metrics for different gradients** to account for floating-point precision differences between parallel (Triton) and sequential (PyTorch) implementations:
 
 | Metric | Threshold | Rationale |
 | ------ | --------- | --------- |
@@ -287,11 +287,11 @@ Backward gradient comparison:
 PASS: All criteria met
 ```
 
-### Limitations
+### Notes
 
-- **PyTorch reference lacks normalization**: At T > ~10k, the reference may overflow. Use gradient_check.py only for T ≤ 10k.
-- **Error scales with T**: Accumulated floating-point rounding differences grow linearly with sequence length.
-- **The real test**: For T=100k validation, use the full training benchmark and verify no NaN/Inf occurs.
+- **Both implementations use normalization**: Partitions and gradients should agree at all sequence lengths.
+- **Error scales with T**: Accumulated floating-point rounding differences grow with sequence length.
+- **The real test**: For T=100k validation, use the full training benchmark to verify end-to-end correctness.
 
 ## Files
 

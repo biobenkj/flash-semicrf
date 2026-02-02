@@ -47,7 +47,7 @@ def test_config(batch, T, C, K, num_runs=10, device="cuda"):
     results = []
     with torch.no_grad():
         for _ in range(num_runs):
-            p, _, _ = launch_streaming_triton_kernel(
+            p, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores, transition, duration_bias, lengths, K, "log"
             )
             results.append(p.clone())
@@ -76,7 +76,7 @@ def test_batch_pattern(batch, T, C, K, num_runs=20, device="cuda"):
     results = []
     with torch.no_grad():
         for _ in range(num_runs):
-            p, _, _ = launch_streaming_triton_kernel(
+            p, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores, transition, duration_bias, lengths, K, "log"
             )
             results.append(p.clone())
@@ -110,7 +110,7 @@ def test_backward_config(batch, T, C, K, num_runs=10, device="cuda"):
     with torch.no_grad():
         for _ in range(num_runs):
             # Forward pass to get checkpoints
-            partition, ring_ckpts, ckpt_interval = launch_streaming_triton_kernel(
+            partition, ring_ckpts, ckpt_interval, log_norm_ckpts = launch_streaming_triton_kernel(
                 cum_scores, transition, duration_bias, lengths, K, "log"
             )
 
@@ -122,6 +122,7 @@ def test_backward_config(batch, T, C, K, num_runs=10, device="cuda"):
                 lengths,
                 partition,
                 ring_ckpts,
+                log_norm_ckpts,
                 ckpt_interval,
                 grad_output,
             )

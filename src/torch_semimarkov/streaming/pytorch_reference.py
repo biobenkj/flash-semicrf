@@ -608,8 +608,16 @@ def semi_crf_streaming_forward_pytorch(
     proj_start: Optional[torch.Tensor] = None,
     proj_end: Optional[torch.Tensor] = None,
     checkpoint_interval: Optional[int] = None,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Forward pass with O(KC) ring buffer. Returns (partition, ring_checkpoints, interval)."""
+) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+    """Forward pass with O(KC) ring buffer.
+
+    Returns (partition, ring_checkpoints, interval, log_norm_checkpoints).
+
+    Uses Flash Attention-style checkpoint normalization for numerical stability
+    at extreme sequence lengths (T>100K). At each checkpoint boundary, alpha
+    values are normalized by subtracting max(alpha), and the cumulative shift
+    is tracked in log_norm_checkpoints for use in the backward pass.
+    """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
 
@@ -641,6 +649,15 @@ def semi_crf_streaming_forward_pytorch(
     ring_checkpoints = torch.full(
         (batch, num_checkpoints, K, C), NEG_INF, device=device, dtype=dtype
     )
+
+    # Log normalization checkpoints for numerical stability at extreme T
+    # Stores cumulative log normalization factor at each checkpoint boundary
+    log_norm_checkpoints = torch.zeros(
+        (batch, num_checkpoints), device=device, dtype=dtype
+    )
+
+    # Track cumulative normalization factor per batch element
+    accum_log_norm = torch.zeros(batch, device=device, dtype=dtype)
 
     # Ring buffer for alpha values: (batch, K, C)
     alpha_ring = torch.full((batch, K, C), NEG_INF, device=device, dtype=dtype)
@@ -694,16 +711,66 @@ def semi_crf_streaming_forward_pytorch(
             active_mask.view(batch, 1), alpha_t, alpha_ring[:, ring_idx_t, :]
         )
 
-        # Save ring buffer state at checkpoint positions
+        # Save checkpoint and apply normalization at interval boundaries
+        # Flash Attention-style: normalize to prevent unbounded growth at extreme T
         if t % checkpoint_interval == 0:
             ckpt_idx = t // checkpoint_interval
             if ckpt_idx < num_checkpoints:
+                # ===== NORMALIZATION STEP (Flash Attention pattern) =====
+                # 1. Find max alpha value for normalization (over all classes)
+                #    Use alpha_t (just computed) since it represents current state
+                alpha_for_norm = torch.where(
+                    active_mask.view(batch, 1),
+                    alpha_t,
+                    torch.full_like(alpha_t, NEG_INF),
+                )
+                shift = alpha_for_norm.max(dim=-1, keepdim=True)[0]  # (batch, 1)
+
+                # Guard against all-NEG_INF case (shouldn't happen, but be safe)
+                shift = torch.where(
+                    shift < NEG_INF + 1.0, torch.zeros_like(shift), shift
+                )
+
+                # 2. Update cumulative normalization factor (only for active sequences)
+                accum_log_norm = torch.where(
+                    active_mask, accum_log_norm + shift.squeeze(-1), accum_log_norm
+                )
+
+                # 3. Normalize alpha_t register
+                #    CRITICAL: Must update alpha_t before final_alpha capture
+                #    This ensures consistency if seq_len falls on checkpoint boundary
+                alpha_t = torch.where(
+                    active_mask.view(batch, 1), alpha_t - shift, alpha_t
+                )
+
+                # 4. Normalize ALL K slots in ring buffer
+                #    The ring buffer is used for K more iterations after checkpoint,
+                #    so all slots must be shifted to maintain consistency
+                for k_slot in range(K):
+                    alpha_ring[:, k_slot, :] = torch.where(
+                        active_mask.view(batch, 1),
+                        alpha_ring[:, k_slot, :] - shift,
+                        alpha_ring[:, k_slot, :],
+                    )
+
+                # 5. Re-update alpha_ring at current slot with normalized alpha_t
+                #    (since we normalized alpha_t after storing it to ring buffer)
+                alpha_ring[:, ring_idx_t, :] = torch.where(
+                    active_mask.view(batch, 1), alpha_t, alpha_ring[:, ring_idx_t, :]
+                )
+
+                # 6. Save normalized ring buffer to checkpoint
                 for k_slot in range(K):
                     ring_checkpoints[:, ckpt_idx, k_slot, :] = torch.where(
                         active_mask.view(batch, 1),
                         alpha_ring[:, k_slot, :],
                         ring_checkpoints[:, ckpt_idx, k_slot, :],
                     )
+
+                # 7. Save cumulative log normalization factor
+                log_norm_checkpoints[:, ckpt_idx] = torch.where(
+                    active_mask, accum_log_norm, log_norm_checkpoints[:, ckpt_idx]
+                )
 
         # Track final alpha for sequences at their final position (t == lengths)
         # At iteration t, alpha_t represents segments ending at position t-1
@@ -713,12 +780,16 @@ def semi_crf_streaming_forward_pytorch(
             final_alpha = torch.where(is_final.view(batch, 1), alpha_t, final_alpha)
 
     # Compute partition function
+    # Add back cumulative normalization to get true partition function
     if semiring == "log":
-        partition = torch.logsumexp(final_alpha, dim=-1)
-    else:
-        partition = torch.max(final_alpha, dim=-1)[0]
+        raw_partition = torch.logsumexp(final_alpha, dim=-1)
+        partition = raw_partition + accum_log_norm
+    else:  # max
+        # For max semiring, normalization doesn't affect the argmax result
+        # but we still need to add back the shift for correct score magnitude
+        partition = torch.max(final_alpha, dim=-1)[0] + accum_log_norm
 
-    return partition, ring_checkpoints, checkpoint_interval
+    return partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints
 
 
 def semi_crf_streaming_viterbi_with_backpointers(
@@ -849,6 +920,7 @@ def semi_crf_streaming_backward_pytorch(
     K: int,
     log_Z: torch.Tensor,
     ring_checkpoints: torch.Tensor,
+    log_norm_checkpoints: torch.Tensor,
     checkpoint_interval: int,
     semiring: str = "log",
     proj_start: Optional[torch.Tensor] = None,
@@ -857,6 +929,10 @@ def semi_crf_streaming_backward_pytorch(
     torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
 ]:
     """Backward pass via forward-backward algorithm with checkpointing.
+
+    Uses log_norm_checkpoints from forward pass for numerical stability at
+    extreme sequence lengths. The marginal computation uses relative log-marginals
+    with proper scaling to prevent overflow when alpha + beta >> log_Z.
 
     Returns: (grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end)
     """
@@ -900,6 +976,10 @@ def semi_crf_streaming_backward_pytorch(
     for ckpt_idx in range(num_checkpoints - 1, -1, -1):
         seg_start = ckpt_idx * checkpoint_interval
         seg_end = min((ckpt_idx + 1) * checkpoint_interval, T)
+
+        # Load cumulative log normalization factor for this checkpoint
+        # This is used to restore proper scale when computing marginals
+        log_norm_at_ckpt = log_norm_checkpoints[:, ckpt_idx]  # (batch,)
 
         alpha_segment.fill_(NEG_INF)
         alpha_ring = ring_checkpoints[:, ckpt_idx, :, :].clone()
@@ -980,25 +1060,69 @@ def semi_crf_streaming_backward_pytorch(
                 )
 
                 # === Gradient computation ===
-                # log_marginal[c_dest, c_src] = alpha[t, c_src] + edge[c_dest, c_src] + beta[end, c_dest] - log_Z
+                # Use relative log-marginal computation for numerical stability at
+                # extreme sequence lengths. Following Flash Attention pattern:
+                #   1. Compute log_joint without normalizing by log_Z
+                #   2. Subtract local_ref (max over tile) to keep exp bounded
+                #   3. Apply scale factor exp(local_ref + log_norm_at_ckpt - log_Z) separately
+                # This prevents overflow when alpha + beta >> log_Z at scale.
                 #
-                # Clamp inputs to prevent extreme values that could cause numerical issues.
-                # This is defensive - normally values should be bounded, but during training
-                # with stochastic batches, edge cases can occur.
+                # At checkpoint boundaries, alpha values were normalized (max ~10-50),
+                # but log_Z is the true partition (~250k at T=100k). log_norm_at_ckpt
+                # contains the cumulative shift that bridges this gap.
+
+                # Step 1: Clamp inputs for safety (values should be bounded due to normalization)
                 alpha_t_safe = torch.clamp(alpha_t, min=-1e6, max=1e6)
                 beta_next_safe = torch.clamp(beta_next, min=-1e6, max=1e6)
                 edge_block_safe = torch.clamp(edge_block, min=-1e6, max=1e6)
 
-                log_marginal = (
+                # Step 2: Compute log_joint (without log_Z subtraction)
+                log_joint = (
                     alpha_t_safe.unsqueeze(-2)  # (batch, 1, C_src)
                     + edge_block_safe  # (batch, C_dest, C_src)
                     + beta_next_safe.unsqueeze(-1)  # (batch, C_dest, 1)
-                    - log_Z.view(batch, 1, 1)
                 )
-                # Clamp log_marginal to prevent exp overflow/underflow
-                # float32 exp() overflows at ~88.7, underflows at ~-87.3
-                log_marginal = torch.clamp(log_marginal, min=-80.0, max=80.0)
-                marginal = torch.exp(log_marginal)
+
+                # Step 3: Find local reference (max over valid entries)
+                log_joint_masked = torch.where(
+                    valid_mask.view(batch, 1, 1),
+                    log_joint,
+                    torch.full_like(log_joint, NEG_INF),
+                )
+                # Max over (C_dest, C_src) dimensions -> (batch,)
+                local_ref = log_joint_masked.amax(dim=(-2, -1))
+
+                # Guard against all-NEG_INF case (shouldn't happen, but be safe)
+                is_local_ref_neginf = local_ref < NEG_INF + 1.0
+                local_ref_safe = torch.where(
+                    is_local_ref_neginf, torch.zeros_like(local_ref), local_ref
+                )
+
+                # Step 4: Compute relative log-marginal (bounded in (-inf, 0])
+                log_marginal_rel = log_joint - local_ref_safe.view(batch, 1, 1)
+
+                # Step 5: Compute unnormalized marginal (bounded in (0, 1])
+                marginal_unnorm = torch.exp(log_marginal_rel)
+
+                # Step 6: CRITICAL - Compute scale factor using log_norm_at_ckpt
+                # This bridges the gap between normalized alpha and full log_Z
+                #
+                # Example at t=50,000 (midpoint of T=100k):
+                #   normalized_alpha ≈ 0 to 50    (after shift)
+                #   log_norm_at_ckpt ≈ 125,000    (accumulated shift from positions 0-50k)
+                #   beta ≈ 125,000                (backward mass from future positions)
+                #   log_Z ≈ 250,000               (true partition)
+                #
+                #   local_ref ≈ 0 + 0 + 125k = 125k
+                #   log_scale = 125k + 125k - 250k ≈ 0  ✓ (scale ≈ 1)
+                log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
+
+                # Step 7: Defensive clamping (scale should be <= 1 for valid marginals)
+                log_scale_clamped = torch.clamp(log_scale, min=-700.0, max=0.0)
+                scale = torch.exp(log_scale_clamped).view(batch, 1, 1)
+
+                # Step 8: Final marginal = unnorm * scale
+                marginal = marginal_unnorm * scale
                 marginal = torch.where(
                     valid_mask.view(batch, 1, 1), marginal, torch.zeros_like(marginal)
                 )
@@ -1080,16 +1204,18 @@ def semi_crf_streaming_marginals_pytorch(
     dtype = cum_scores.dtype
 
     # Forward pass
-    log_Z, ring_checkpoints, effective_interval = semi_crf_streaming_forward_pytorch(
-        cum_scores,
-        transition,
-        duration_bias,
-        lengths,
-        K,
-        semiring="log",
-        proj_start=proj_start,
-        proj_end=proj_end,
-        checkpoint_interval=checkpoint_interval,
+    log_Z, ring_checkpoints, effective_interval, log_norm_checkpoints = (
+        semi_crf_streaming_forward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            semiring="log",
+            proj_start=proj_start,
+            proj_end=proj_end,
+            checkpoint_interval=checkpoint_interval,
+        )
     )
 
     # Backward pass to compute marginals
@@ -1116,6 +1242,9 @@ def semi_crf_streaming_marginals_pytorch(
     for ckpt_idx in range(num_checkpoints - 1, -1, -1):
         seg_start = ckpt_idx * effective_interval
         seg_end = min((ckpt_idx + 1) * effective_interval, T)
+
+        # Load cumulative log normalization factor for this checkpoint
+        log_norm_at_ckpt = log_norm_checkpoints[:, ckpt_idx]  # (batch,)
 
         # Clear segment buffer
         alpha_segment.fill_(NEG_INF)
@@ -1188,20 +1317,50 @@ def semi_crf_streaming_marginals_pytorch(
                 )
 
                 # Compute marginal probability for this segment
-                # Clamp inputs to prevent extreme values
+                # Use relative log-marginal computation for numerical stability
+                # (same pattern as backward pass - see detailed comments there)
+
+                # Step 1: Clamp inputs for safety
                 alpha_t_safe = torch.clamp(alpha_t, min=-1e6, max=1e6)
                 beta_next_safe = torch.clamp(beta_next, min=-1e6, max=1e6)
                 edge_block_safe = torch.clamp(edge_block, min=-1e6, max=1e6)
 
-                log_marginal = (
+                # Step 2: Compute log_joint (without log_Z subtraction)
+                log_joint = (
                     alpha_t_safe.unsqueeze(-2)  # (batch, 1, C_src)
                     + edge_block_safe  # (batch, C_dest, C_src)
                     + beta_next_safe.unsqueeze(-1)  # (batch, C_dest, 1)
-                    - log_Z.view(batch, 1, 1)
                 )
-                # Clamp log_marginal to prevent exp overflow/underflow
-                log_marginal = torch.clamp(log_marginal, min=-80.0, max=80.0)
-                marginal = torch.exp(log_marginal)
+
+                # Step 3: Find local reference (max over valid entries)
+                log_joint_masked = torch.where(
+                    valid_mask.view(batch, 1, 1),
+                    log_joint,
+                    torch.full_like(log_joint, NEG_INF),
+                )
+                local_ref = log_joint_masked.amax(dim=(-2, -1))
+
+                # Guard against all-NEG_INF case
+                is_local_ref_neginf = local_ref < NEG_INF + 1.0
+                local_ref_safe = torch.where(
+                    is_local_ref_neginf, torch.zeros_like(local_ref), local_ref
+                )
+
+                # Step 4: Compute relative log-marginal
+                log_marginal_rel = log_joint - local_ref_safe.view(batch, 1, 1)
+
+                # Step 5: Compute unnormalized marginal
+                marginal_unnorm = torch.exp(log_marginal_rel)
+
+                # Step 6: Compute scale factor using log_norm_at_ckpt
+                log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
+
+                # Step 7: Defensive clamping
+                log_scale_clamped = torch.clamp(log_scale, min=-700.0, max=0.0)
+                scale = torch.exp(log_scale_clamped).view(batch, 1, 1)
+
+                # Step 8: Final marginal
+                marginal = marginal_unnorm * scale
                 marginal = torch.where(
                     valid_mask.view(batch, 1, 1), marginal, torch.zeros_like(marginal)
                 )

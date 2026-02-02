@@ -485,7 +485,7 @@ class TestBackwardCompatibility:
         grad_output = torch.ones(batch, device=cuda_device)
 
         # Forward
-        log_Z, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -504,6 +504,7 @@ class TestBackwardCompatibility:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             grad_output,
             return_boundary_marginals=False,
@@ -545,7 +546,7 @@ class TestBackwardCompatibility:
         grad_output = torch.ones(batch, device=cuda_device)
 
         # Forward
-        log_Z, ring_ckpts, interval, _ = launch_streaming_triton_kernel(
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -564,6 +565,7 @@ class TestBackwardCompatibility:
             lengths,
             log_Z,
             ring_ckpts,
+            log_norm_ckpts,
             interval,
             grad_output,
             return_boundary_marginals=True,

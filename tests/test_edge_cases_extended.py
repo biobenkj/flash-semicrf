@@ -220,13 +220,13 @@ class TestBoundaryProjections:
         lengths = torch.full((batch,), T)
 
         # Without boundaries
-        part1, _, _ = semi_crf_streaming_forward_pytorch(
+        part1, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
         # With proj_start
         proj_start = torch.randn(batch, T, C)
-        part2, _, _ = semi_crf_streaming_forward_pytorch(
+        part2, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, proj_start=proj_start
         )
 
@@ -241,13 +241,13 @@ class TestBoundaryProjections:
         lengths = torch.full((batch,), T)
 
         # Without boundaries
-        part1, _, _ = semi_crf_streaming_forward_pytorch(
+        part1, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
         # With proj_end
         proj_end = torch.randn(batch, T, C)
-        part2, _, _ = semi_crf_streaming_forward_pytorch(
+        part2, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, proj_end=proj_end
         )
 
@@ -263,7 +263,7 @@ class TestBoundaryProjections:
         proj_start = torch.randn(batch, T, C)
         proj_end = torch.randn(batch, T, C)
 
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -285,7 +285,7 @@ class TestBoundaryProjections:
         proj_start = torch.randn(batch, T, C)
         proj_end = torch.randn(batch, T, C)
 
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -309,7 +309,7 @@ class TestDurationDependentTransitions:
         duration_bias = torch.randn(K, C)
         lengths = torch.full((batch,), T)
 
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -326,7 +326,7 @@ class TestDurationDependentTransitions:
         duration_bias = torch.randn(K, C)
         lengths = torch.full((batch,), T)
 
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -342,7 +342,7 @@ class TestDurationDependentTransitions:
         proj_start = torch.randn(batch, T, C)
         proj_end = torch.randn(batch, T, C)
 
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -542,7 +542,7 @@ class TestCheckpointInterval:
         lengths = torch.full((batch,), T)
 
         # Request interval < K, should be clamped to K
-        partition, _, actual_interval = semi_crf_streaming_forward_pytorch(
+        partition, _, actual_interval, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, checkpoint_interval=5
         )
 
@@ -558,7 +558,7 @@ class TestCheckpointInterval:
         lengths = torch.full((batch,), T)
 
         # Request interval larger than T
-        partition, ring_checkpoints, _ = semi_crf_streaming_forward_pytorch(
+        partition, ring_checkpoints, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, checkpoint_interval=1000
         )
 

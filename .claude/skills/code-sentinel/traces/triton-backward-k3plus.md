@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `94652ad`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `f865fed`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary

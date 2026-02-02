@@ -42,15 +42,17 @@ class SemiCRFStreaming(torch.autograd.Function):
         proj_end: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Detach inputs for forward computation
-        partition, ring_checkpoints, checkpoint_interval = semi_crf_streaming_forward_pytorch(
-            cum_scores.detach(),
-            transition.detach(),
-            duration_bias.detach(),
-            lengths,
-            K,
-            semiring,
-            proj_start.detach() if proj_start is not None else None,
-            proj_end.detach() if proj_end is not None else None,
+        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+            semi_crf_streaming_forward_pytorch(
+                cum_scores.detach(),
+                transition.detach(),
+                duration_bias.detach(),
+                lengths,
+                K,
+                semiring,
+                proj_start.detach() if proj_start is not None else None,
+                proj_end.detach() if proj_end is not None else None,
+            )
         )
 
         # Save for backward
@@ -60,6 +62,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -78,6 +81,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -102,6 +106,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             ctx.K,
             partition,
             ring_checkpoints,
+            log_norm_checkpoints,
             ctx.checkpoint_interval,
             ctx.semiring,
             proj_start,
@@ -671,7 +676,7 @@ def semi_crf_streaming_forward(
         # Inference path (no gradients)
         if can_use_triton:
             # Use fast custom Triton kernel
-            partition, _, _ = launch_streaming_triton_kernel(
+            partition, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores,
                 transition,
                 duration_bias,
@@ -685,7 +690,7 @@ def semi_crf_streaming_forward(
             return partition
         else:
             # CPU fallback
-            partition, _, _ = semi_crf_streaming_forward_pytorch(
+            partition, _, _, _ = semi_crf_streaming_forward_pytorch(
                 cum_scores,
                 transition,
                 duration_bias,

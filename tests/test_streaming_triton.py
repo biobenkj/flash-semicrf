@@ -58,7 +58,7 @@ class TestTritonStreamingKernel:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -76,7 +76,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -93,7 +93,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -111,7 +111,7 @@ class TestTritonStreamingKernel:
                 batch, T, K, C, device="cuda"
             )
 
-            partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+            partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
                 cum_scores, transition, duration_bias, lengths, K
             )
 
@@ -131,7 +131,7 @@ class TestTritonStreamingKernel:
         )
         lengths = torch.tensor([T, T - 10, T - 20, T - 30], dtype=torch.long, device="cuda")
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -150,7 +150,7 @@ class TestTritonStreamingKernel:
                 batch, T, K, C, device="cuda"
             )
 
-            partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+            partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
                 cum_scores, transition, duration_bias, lengths, K
             )
 
@@ -169,7 +169,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -223,7 +223,7 @@ class TestTritonStreamingKernel:
             batch, T, K, C, device="cuda"
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -242,7 +242,7 @@ class TestTritonStreamingKernel:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -265,7 +265,7 @@ class TestTritonStreamingKernel:
         )
 
         # Forward through Triton
-        partition, ring_ckpts, ckpt_interval, _ = launch_streaming_triton_kernel(
+        partition, ring_ckpts, ckpt_interval, log_norm_ckpts = launch_streaming_triton_kernel(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -278,6 +278,7 @@ class TestTritonStreamingKernel:
             lengths,
             partition,
             ring_ckpts,
+            log_norm_ckpts,
             ckpt_interval,
             grad_output,
         )
@@ -469,8 +470,8 @@ class TestTritonStreamingTraining:
         )
 
         # Run forward
-        partition, ring_checkpoints, checkpoint_interval, _ = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+        partition, ring_checkpoints, checkpoint_interval, log_norm_ckpts = (
+            launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K)
         )
 
         # Run backward
@@ -483,6 +484,7 @@ class TestTritonStreamingTraining:
                 lengths,
                 partition,
                 ring_checkpoints,
+                log_norm_ckpts,
                 checkpoint_interval,
                 grad_output,
             )
@@ -565,7 +567,7 @@ class TestTritonStreamingBoundaries:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -596,7 +598,7 @@ class TestTritonStreamingBoundaries:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -673,14 +675,16 @@ class TestTritonStreamingBoundaries:
         )
 
         # Run forward
-        partition, ring_checkpoints, checkpoint_interval, _ = launch_streaming_triton_kernel(
-            cum_scores,
-            transition,
-            duration_bias,
-            lengths,
-            K,
-            proj_start=proj_start,
-            proj_end=proj_end,
+        partition, ring_checkpoints, checkpoint_interval, log_norm_ckpts = (
+            launch_streaming_triton_kernel(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=proj_end,
+            )
         )
 
         # Run backward
@@ -693,6 +697,7 @@ class TestTritonStreamingBoundaries:
                 lengths,
                 partition,
                 ring_checkpoints,
+                log_norm_ckpts,
                 checkpoint_interval,
                 grad_output,
                 proj_start=proj_start,
@@ -721,7 +726,7 @@ class TestTritonStreamingBoundaries:
             self.create_boundary_inputs(batch, T, K, C)
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores,
             transition,
             duration_bias,
@@ -808,7 +813,7 @@ class TestTritonStreamingBenchmark:
             batch, T, K, C, device="cuda"
         )
 
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -854,7 +859,7 @@ class TestDurationDependentTransitions:
         )
 
         # Run forward pass
-        partition, _, _ = semi_crf_streaming_forward_pytorch(
+        partition, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -870,7 +875,7 @@ class TestDurationDependentTransitions:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -889,7 +894,7 @@ class TestDurationDependentTransitions:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -1029,7 +1034,7 @@ class TestDurationDependentTransitions:
         lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
 
         # Forward pass with static transitions should still work
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition_static, duration_bias, lengths, K
         )
         partition_triton, _, _, _ = launch_streaming_triton_kernel(
@@ -1639,7 +1644,7 @@ class TestKBasedDispatch:
         )
 
         # Also test against generic PyTorch reference
-        partition_generic, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_generic, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -1762,7 +1767,7 @@ class TestKBasedDispatch:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores.cpu(), transition.cpu(), duration_bias.cpu(), lengths.cpu(), K
         )
 
@@ -1882,7 +1887,7 @@ if __name__ == "__main__":
         print(f"  lengths: {lengths}")
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
         print(f"\nPyTorch partition: {partition_pytorch}")

@@ -268,7 +268,7 @@ class TestK2SpecializedBoundary:
         partition_k2 = semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths)
 
         # Generic streaming path (for reference)
-        partition_generic, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_generic, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -369,7 +369,7 @@ class TestK3TritonBoundary:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -452,7 +452,7 @@ class TestK3TritonBoundary:
         lengths = torch.tensor([T, T - 10, T - 20, T - 30], dtype=torch.long, device="cuda")
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 
@@ -477,7 +477,7 @@ class TestK3TritonBoundary:
         )
 
         # PyTorch reference
-        partition_pytorch, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
@@ -652,7 +652,7 @@ class TestKBoundaryTransitions:
             cum_scores, transition, duration_bias, lengths, K, use_triton=False
         )
 
-        partition_reference, _, _ = semi_crf_streaming_forward_pytorch(
+        partition_reference, _, _, _ = semi_crf_streaming_forward_pytorch(
             cum_scores, transition, duration_bias, lengths, K
         )
 

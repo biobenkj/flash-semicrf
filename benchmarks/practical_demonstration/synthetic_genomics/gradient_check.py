@@ -20,9 +20,9 @@ Usage:
     python gradient_check.py --seq-length 50000 --batch-size 1
 
 Notes:
-    - PyTorch reference lacks per-checkpoint log normalization
-    - At T > ~10k, partitions will diverge (expected)
-    - Gradients should agree at T < 10k where overflow doesn't occur
+    - Both implementations now have per-checkpoint log normalization
+    - Partitions and gradients should agree at all sequence lengths
+    - If mismatch occurs, check for implementation bugs or precision issues
 """
 
 from __future__ import annotations
@@ -97,9 +97,10 @@ def check_forward_agreement(
         partition_triton: Triton partition function
         ring_ckpts_triton: Triton ring checkpoints (normalized)
         ckpt_interval: Checkpoint interval used
-        log_norm_ckpts: Log normalization checkpoints (Triton only)
+        log_norm_ckpts: Triton log normalization checkpoints
         partition_ref: PyTorch reference partition function
-        ring_ckpts_ref: PyTorch reference ring checkpoints (un-normalized)
+        ring_ckpts_ref: PyTorch reference ring checkpoints (normalized)
+        log_norm_ckpts_ref: PyTorch reference log normalization checkpoints
     """
     # Triton forward
     partition_triton, ring_ckpts_triton, ckpt_interval, log_norm_ckpts = (
@@ -113,8 +114,8 @@ def check_forward_agreement(
         )
     )
 
-    # PyTorch reference forward (doesn't have log_norm)
-    partition_ref, ring_ckpts_ref, _ = semi_crf_streaming_forward_pytorch(
+    # PyTorch reference forward (now also has log_norm checkpoints)
+    partition_ref, ring_ckpts_ref, _, log_norm_ckpts_ref = semi_crf_streaming_forward_pytorch(
         cum_scores,
         transition,
         duration_bias,
@@ -140,20 +141,31 @@ def check_forward_agreement(
         if max_log_norm > 1e-6:
             print("  (Note: Normalization active, partitions may differ slightly)")
 
-    # Verify checkpoint consistency: Triton normalized + log_norm should ≈ PyTorch raw
+    # Verify checkpoint consistency between implementations
+    # Both implementations now save NORMALIZED checkpoints with separate log_norm
     # Only compare the actual C classes (Triton may have C_PAD)
     C_actual = cum_scores.shape[2]
     triton_ckpt_slice = ring_ckpts_triton[:, :, :, :C_actual]
 
-    # Reconstruct "un-normalized" Triton checkpoints by adding back log_norm
-    # log_norm_ckpts shape: (batch, num_ckpts)
-    # ring_ckpts shape: (batch, num_ckpts, K, C)
-    triton_unnorm = triton_ckpt_slice + log_norm_ckpts[:, :, None, None]
+    # Compare normalized checkpoints directly (both should be normalized now)
+    ckpt_diff_norm = (triton_ckpt_slice - ring_ckpts_ref).abs()
+    print("  Normalized checkpoint comparison (Triton vs PyTorch):")
+    print(f"    Max abs diff: {ckpt_diff_norm.max().item():.2e}")
+    print(f"    Mean abs diff: {ckpt_diff_norm.mean().item():.2e}")
 
-    ckpt_diff = (triton_unnorm - ring_ckpts_ref).abs()
-    print("  Checkpoint reconstruction check (Triton+log_norm vs PyTorch):")
-    print(f"    Max abs diff: {ckpt_diff.max().item():.2e}")
-    print(f"    Mean abs diff: {ckpt_diff.mean().item():.2e}")
+    # Compare log_norm checkpoints
+    log_norm_diff = (log_norm_ckpts - log_norm_ckpts_ref).abs()
+    print("  Log-norm checkpoint comparison:")
+    print(f"    Max abs diff: {log_norm_diff.max().item():.2e}")
+    print(f"    Mean abs diff: {log_norm_diff.mean().item():.2e}")
+
+    # Reconstruct un-normalized checkpoints and compare (additional sanity check)
+    triton_unnorm = triton_ckpt_slice + log_norm_ckpts[:, :, None, None]
+    pytorch_unnorm = ring_ckpts_ref + log_norm_ckpts_ref[:, :, None, None]
+    ckpt_diff_unnorm = (triton_unnorm - pytorch_unnorm).abs()
+    print("  Un-normalized checkpoint reconstruction comparison:")
+    print(f"    Max abs diff: {ckpt_diff_unnorm.max().item():.2e}")
+    print(f"    Mean abs diff: {ckpt_diff_unnorm.mean().item():.2e}")
 
     return (
         partition_triton,
@@ -162,6 +174,7 @@ def check_forward_agreement(
         log_norm_ckpts,
         partition_ref,
         ring_ckpts_ref,
+        log_norm_ckpts_ref,
     )
 
 
@@ -176,15 +189,18 @@ def check_backward_agreement(
     ring_ckpts_triton: torch.Tensor,
     ring_ckpts_ref: torch.Tensor,
     log_norm_ckpts: torch.Tensor,
+    log_norm_ckpts_ref: torch.Tensor,
     checkpoint_interval: int,
-    tolerance: float = 1e-2,  # Relaxed for normalized vs un-normalized comparison
+    tolerance: float = 1e-2,  # Allow for floating-point rounding differences
 ) -> bool:
     """
     Compare backward pass gradients between Triton and PyTorch reference.
 
-    IMPORTANT: Each implementation must use its own checkpoints:
-    - Triton checkpoints are NORMALIZED (alpha shifted by log_norm)
-    - PyTorch checkpoints are UN-NORMALIZED (raw alpha values)
+    Both implementations now use NORMALIZED checkpoints with separate log_norm:
+    - Triton: ring_ckpts_triton (normalized) + log_norm_ckpts
+    - PyTorch: ring_ckpts_ref (normalized) + log_norm_ckpts_ref
+
+    Each implementation must use its own checkpoints for gradient computation.
 
     Returns:
         True if gradients agree within tolerance, False otherwise.
@@ -208,8 +224,8 @@ def check_backward_agreement(
         grad_output,
     )
 
-    # PyTorch reference backward (uses un-normalized checkpoints)
-    # CRITICAL: Use ring_ckpts_ref from PyTorch forward, NOT Triton's normalized checkpoints
+    # PyTorch reference backward (now uses normalized checkpoints + log_norm)
+    # CRITICAL: Use ring_ckpts_ref and log_norm_ckpts_ref from PyTorch forward
     grad_cum_ref, grad_trans_ref_batch, grad_dur_ref_batch, _, _ = (
         semi_crf_streaming_backward_pytorch(
             cum_scores,
@@ -218,7 +234,8 @@ def check_backward_agreement(
             lengths,
             K,
             partition_ref,  # Use ref partition for ref backward
-            ring_ckpts_ref,  # Use ref checkpoints (un-normalized)
+            ring_ckpts_ref,  # Use ref checkpoints (now normalized)
+            log_norm_ckpts_ref,  # Use ref log_norm checkpoints
             checkpoint_interval,
         )
     )
@@ -265,14 +282,12 @@ def check_backward_agreement(
     _, rel_trans, _ = compare_grads("grad_transition", grad_trans_triton, grad_trans_ref)
     _, rel_dur, _ = compare_grads("grad_duration_bias", grad_dur_triton, grad_dur_ref)
 
-    # Updated acceptance criteria for normalized vs un-normalized comparison:
+    # Acceptance criteria for gradient comparison:
     # - grad_cum_scores: Mean absolute error (large relative errors at near-zero positions expected)
     # - grad_transition/duration_bias: Max relative error (actual parameter gradients)
     #
-    # These thresholds account for:
-    # 1. PyTorch reference lacks normalization (alpha values grow with T)
-    # 2. Parallel reduction (Triton) vs sequential (Python) causes FP rounding differences
-    # 3. Error accumulation scales roughly linearly with T
+    # Note: Both implementations now use log normalization, so errors should be
+    # primarily from parallel reduction (Triton) vs sequential (Python) FP rounding.
     cum_tol = 1e-3  # Mean absolute error tolerance for cum_scores
     param_tol = tolerance  # Relative error tolerance for parameter gradients
 
@@ -281,7 +296,7 @@ def check_backward_agreement(
     dur_pass = rel_dur < param_tol
     passed = cum_pass and trans_pass and dur_pass
 
-    print("\nAcceptance criteria (normalized vs un-normalized):")
+    print("\nAcceptance criteria:")
     print(
         f"  grad_cum_scores mean abs: {mean_abs_cum:.2e} < {cum_tol:.0e} {'✓' if cum_pass else '✗'}"
     )
@@ -375,6 +390,7 @@ def main():
         log_norm_ckpts,
         partition_ref,
         ring_ckpts_ref,
+        log_norm_ckpts_ref,
     ) = check_forward_agreement(
         cum_scores,
         transition,
@@ -387,9 +403,9 @@ def main():
     print(f"\n(Using checkpoint_interval={ckpt_interval})")
 
     # Backward pass comparison
-    # IMPORTANT: Each implementation uses its OWN checkpoints
-    # - Triton: ring_ckpts_triton (normalized) + log_norm_ckpts
-    # - PyTorch: ring_ckpts_ref (un-normalized)
+    # Each implementation uses its OWN checkpoints (both normalized with log_norm)
+    # - Triton: ring_ckpts_triton + log_norm_ckpts
+    # - PyTorch: ring_ckpts_ref + log_norm_ckpts_ref
     passed = check_backward_agreement(
         cum_scores,
         transition,
@@ -401,6 +417,7 @@ def main():
         ring_ckpts_triton,
         ring_ckpts_ref,
         log_norm_ckpts,
+        log_norm_ckpts_ref,
         ckpt_interval,
         tolerance=args.tolerance,
     )
@@ -413,9 +430,9 @@ def main():
         print("TEST FAILED: Gradient mismatch detected")
         print()
         print("Possible causes:")
-        print("  1. At large T, PyTorch reference may overflow (lacks normalization)")
-        print("  2. Implementation bug in Triton kernel")
-        print("  3. Floating point precision issues")
+        print("  1. Implementation bug in Triton or PyTorch kernel")
+        print("  2. Floating point precision issues")
+        print("  3. Normalization checkpoint mismatch between implementations")
         print()
         print("Try running with smaller --seq-length or --checkpoint-interval")
     print("=" * 60)

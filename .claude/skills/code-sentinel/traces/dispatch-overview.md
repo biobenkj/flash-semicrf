@@ -1,8 +1,8 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `UNCOMMITTED`
-- `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `f865fed`
+- `src/torch_semimarkov/semimarkov.py` @ commit `f865fed`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 

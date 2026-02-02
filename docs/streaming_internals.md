@@ -588,9 +588,9 @@ Use the PyTorch reference for debugging:
 ```python
 from torch_semimarkov.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
 
-# Compare results
+# Compare results (both return 4 values: partition, ring_ckpts, interval, log_norm_ckpts)
 partition_triton, _, _, _ = launch_streaming_triton_kernel(...)
-partition_ref, _, _ = semi_crf_streaming_forward_pytorch(...)
+partition_ref, _, _, _ = semi_crf_streaming_forward_pytorch(...)
 
 assert torch.allclose(partition_triton, partition_ref, atol=1e-4)
 ```
@@ -599,7 +599,7 @@ assert torch.allclose(partition_triton, partition_ref, atol=1e-4)
 
 A dedicated test script at `benchmarks/practical_demonstration/synthetic_genomics/gradient_check.py` compares Triton kernel gradients vs PyTorch reference at the low-level API.
 
-**Key insight**: Comparing normalized (Triton) vs un-normalized (PyTorch) implementations requires **different metrics for different gradients**:
+**Key insight**: Both implementations now use log normalization checkpointing for numerical stability at extreme sequence lengths (T>100K). The PyTorch reference was updated to match the Triton kernel's Flash Attention-style checkpoint normalization pattern.
 
 | Gradient | Metric | Threshold | Why |
 | -------- | ------ | --------- | --- |
@@ -630,9 +630,9 @@ Error grows roughly linearly with T due to accumulated floating-point rounding d
 1. Triton parallel reduction vs Python sequential reduction
 2. Floating-point non-associativity: `(a+b)+c ≠ a+(b+c)`
 
-**Limitations of reference comparison:**
+**Reference comparison notes:**
 
-- PyTorch reference lacks per-checkpoint normalization
-- At T > ~10k, reference alpha values may overflow
-- Use gradient_check.py only for T ≤ 10k validation
-- For T=100k, verify training completes without NaN/Inf instead
+- Both Triton and PyTorch reference now use per-checkpoint log normalization
+- Partitions and gradients should agree at all sequence lengths
+- Small differences arise from parallel vs sequential floating-point reduction
+- Use gradient_check.py to validate agreement at any T
