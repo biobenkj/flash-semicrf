@@ -11,7 +11,7 @@ last_global_verification: 2026-02-02T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: d7b802c
+    verified_commit: d9aff99
     source_files:
       - src/torch_semimarkov/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -35,7 +35,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: f865fed
+    verified_commit: 26119fa
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
       - src/torch_semimarkov/semimarkov.py
@@ -54,7 +54,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: f865fed
+    verified_commit: 871c352
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
     assumptions_mechanical: []
@@ -83,7 +83,7 @@ sentinels:
       - triton-forward-k3plus
 
   pytorch-forward-k3plus:
-    verified_commit: f865fed
+    verified_commit: d9aff99
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -94,7 +94,7 @@ sentinels:
     depends_on: []
 
   pytorch-backward-k3plus:
-    verified_commit: f865fed
+    verified_commit: d9aff99
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -106,7 +106,7 @@ sentinels:
       - pytorch-forward-k3plus
 
   k1-linear-crf:
-    verified_commit: f865fed
+    verified_commit: d9aff99
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -117,7 +117,7 @@ sentinels:
     depends_on: []
 
   k2-fast-path:
-    verified_commit: f865fed
+    verified_commit: d9aff99
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []

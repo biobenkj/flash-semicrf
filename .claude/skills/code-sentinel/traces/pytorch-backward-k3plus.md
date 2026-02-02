@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Backward (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `f865fed`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `d9aff99`
 **Linked tests:** `tests/test_streaming.py::TestStreamingBackward::test_backward_produces_finite_gradients`
 
 ## Summary
