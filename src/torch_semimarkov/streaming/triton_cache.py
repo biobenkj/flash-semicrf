@@ -15,10 +15,14 @@ from typing import NamedTuple
 
 
 class TritonConfig(NamedTuple):
-    """Configuration values that affect Triton kernel compilation."""
+    """Configuration values that affect Triton kernel compilation.
+
+    Note: We only track num_warps here. TILE_C is handled automatically by
+    Triton's cache via tl.constexpr, and different kernels use different
+    TILE_C values, so we don't need to validate it ourselves.
+    """
 
     num_warps: int
-    tile_c: int = 16  # For backward kernel
 
 
 def get_triton_cache_dir() -> Path:
