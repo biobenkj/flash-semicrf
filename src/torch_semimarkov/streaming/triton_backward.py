@@ -1079,7 +1079,9 @@ if HAS_TRITON:
             )
         else:
             stride_gtw_k = 0  # Not used for static transitions
-            stride_gtw_b, stride_gtw_seg, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+            stride_gtw_b, stride_gtw_seg, stride_gtw_src, stride_gtw_dst = (
+                grad_tr_workspace.stride()
+            )
 
         # Workspace: (batch, num_segments, K, C_PAD)
         stride_gdbw_b, stride_gdbw_seg, stride_gdbw_k, stride_gdbw_c = grad_db_workspace.stride()
