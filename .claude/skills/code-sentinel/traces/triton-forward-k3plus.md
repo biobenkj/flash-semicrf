@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `d9aff99`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `49d9d61`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -100,12 +100,13 @@ log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtyp
 
 Grid: `(batch,)` - one program per batch element
 
-### 3. Main Forward Loop (triton_forward.py:206-416)
+### 3. Main Forward Loop (triton_forward.py:208-420)
 
 ```
 for t in range(1, T + 1):  # t = 1, 2, ..., T
     # ACTIVE MASKING: Include t == seq_len to compute alpha at final position
-    active = t <= seq_len
+    # NOTE: Both t and seq_len are cast to int32 for consistent Triton comparison
+    active = t.to(tl.int32) <= seq_len  # seq_len loaded as int32
 
     alpha_t = full([C_PAD], NEG_INF)
 
@@ -141,14 +142,16 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
     ring_t_idx = t % K
     store(ring_buffer[ring_t_idx], alpha_t, mask=active & c_mask)
 
-    # 3g. Checkpoint with normalization (lines 336-409)
+    # 3g. Checkpoint with normalization (lines 340-413)
     if t % CHECKPOINT_INTERVAL == 0:
         ckpt_idx = t // CHECKPOINT_INTERVAL
 
         # 3g-i. Find max for normalization (MASKED for active only)
         alpha_for_norm = where(active & c_mask, alpha_t, NEG_INF)
         max_val = max(alpha_for_norm)
-        shift = where(is_all_neginf, 0.0, max_val)
+        # WORKAROUND: Use `active` directly instead of NEG_INF comparison
+        # The comparison `max_val < (NEG_INF + 1.0)` failed silently in Triton
+        shift = where(active, max_val, 0.0)
 
         # 3g-ii. Update cumulative normalization
         # shift is 0 for inactive, so no phantom updates
@@ -170,12 +173,13 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
         if (ckpt_idx < NUM_CKPTS) & active:
             store(log_norm_checkpoints[ckpt_idx], accum_log_norm)
 
-    # 3h. Capture final alpha at sequence end (lines 411-415)
-    is_final = t == seq_len
+    # 3h. Capture final alpha at sequence end (lines 418-422)
+    # NOTE: Cast t to int32 for consistent comparison with seq_len
+    is_final = t.to(tl.int32) == seq_len
     final_alpha = where(is_final & c_mask, alpha_t, final_alpha)
 ```
 
-### 4. Final Reduction (triton_forward.py:424-447)
+### 4. Final Reduction (triton_forward.py:428-451)
 
 ```python
 # Compute raw partition from normalized final_alpha
@@ -193,11 +197,11 @@ store(out_ptr + batch_idx, partition)
 
 The key change in this version is consistent active masking throughout variable-length batch handling:
 
-1. **active = t <= seq_len**: Includes the final position (`t == seq_len`)
+1. **active = t.to(tl.int32) <= seq_len**: Includes the final position (`t == seq_len`); both operands cast to int32
 2. **Load masks**: All `tl.load` calls use `mask=active & k_valid & c_mask`
 3. **Store masks**: All `tl.store` calls use `mask=active & c_mask`
-4. **Checkpoint normalization**: All 6 steps check `active` to prevent phantom updates
-5. **Final capture**: Uses `t == seq_len` (not `t == seq_len - 1`)
+4. **Checkpoint normalization**: All 6 steps check `active` to prevent phantom updates; uses `active` directly for shift (not NEG_INF comparison)
+5. **Final capture**: Uses `t.to(tl.int32) == seq_len` (not `t == seq_len - 1`)
 
 This ensures:
 - Sequences that have ended don't receive spurious normalization shifts
@@ -261,16 +265,16 @@ Backward recomputes forward between checkpoints using saved ring states.
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| triton_forward.py:305-309 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
-| triton_forward.py:317-323 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
-| triton_forward.py:341-409 | Checkpoint normalization with `active` mask | Prevent alpha overflow and phantom shifts |
-| triton_forward.py:428-434 | Final logsumexp guard | Prevent NaN in partition output |
+| triton_forward.py:309-313 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
+| triton_forward.py:321-327 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
+| triton_forward.py:355-360 | `shift = where(active, max_val, 0.0)` | Checkpoint normalization uses `active` directly (NEG_INF comparison workaround) |
+| triton_forward.py:432-438 | Final logsumexp guard | Prevent NaN in partition output |
 | autograd.py:228 | `torch.isfinite(partition)` | Validate before backward |
 
 ## NEG_INF Handling Pattern (Flash Attention Style)
 
 ```python
-# The critical guard pattern used throughout (triton_forward.py:305-309):
+# The critical guard pattern used throughout (triton_forward.py:309-313):
 # Flash Attention pattern: no epsilon needed inside log
 # The NEG_INF guard handles the zero case
 max_val = tl.max(scores, axis=...)
@@ -281,6 +285,8 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 ```
 
 **Why**: Without this guard, `scores - max_val` yields 0 when all inputs are NEG_INF, causing `exp(0) = 1` instead of preserving NEG_INF. The `+ 1e-10` epsilon was removed following Flash Attention's pattern - the NEG_INF guard already handles the degenerate case.
+
+**WORKAROUND (checkpoint normalization)**: The NEG_INF comparison `max_val < (NEG_INF + 1.0)` failed silently in Triton for variable-length sequences due to unclear type/comparison issues. For checkpoint normalization shift computation, the kernel now uses `shift = tl.where(active, max_val, 0.0)` instead of checking `is_all_neginf`. This is semantically equivalent since inactive sequences have all-NEG_INF alpha values.
 
 ## Recomputation Logic (For Backward Pass)
 
@@ -305,6 +311,8 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
 | Float16 overflow | High | Long sequences | Force float32 inputs | - |
 | Non-power-of-2 C | Medium | Always | Pad to C_PAD | triton_forward.py:975 |
+| int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len and t to int32 | `49d9d61` |
+| NEG_INF comparison failure | Critical | Variable-length + checkpointing | Use `active` directly for shift | `49d9d61` |
 
 ## Debugging: Log-partition bounds violation
 
@@ -325,6 +333,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-02**: Fixed int32/int64 type mismatch in Triton comparisons; `seq_len` loaded as int32, `t` cast to int32 for `active` and `is_final` comparisons; checkpoint normalization now uses `active` directly instead of NEG_INF comparison (workaround for silent comparison failure); updated to commit `49d9d61`
 - **2026-02-02**: Updated for active masking changes; all kernel operations now properly masked for variable-length sequences; checkpoint normalization uses `active` to prevent phantom shifts; line numbers updated for commit `d9aff99`
 - **2026-02-02**: Anchored to commit `d7b802c`; corrected line references for A4 verification, dispatch conditions, buffer init, kernel launch, main loop, final reduction, numerical guards
 - **2026-02-01**: Added Flash Attention-style checkpoint normalization for T=100k+ stability; removed epsilon from logsumexp; return type now includes `log_norm_checkpoints`

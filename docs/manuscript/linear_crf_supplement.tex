@@ -1,0 +1,334 @@
+% Linear and Near-Linear CRF Supplement
+% Specialized implementations for K=1 and K=2
+%
+% Required packages:
+% \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+% \usepackage{amsmath,amssymb}
+
+\documentclass{article}
+\usepackage[margin=1.25in]{geometry}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\begin{document}
+
+\begin{center}
+{\Large\bfseries Supplemental Material: Linear and Near-Linear CRF Implementations}
+\end{center}
+
+\medskip
+
+This supplement documents the specialized $K=1$ (linear CRF) and $K=2$ (near-linear CRF) implementations in \texttt{torch-semimarkov}. These optimized paths eliminate ring buffer overhead for common sequence labeling tasks while maintaining compatibility with the streaming Semi-CRF interface.
+
+%==============================================================================
+\section{Overview}
+%==============================================================================
+
+The streaming Semi-CRF module automatically dispatches to specialized implementations based on the maximum segment duration $K$:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+$K$ & Implementation & Rationale \\
+\midrule
+$K=1$ & \texttt{LinearCRFStreaming} & Standard linear-chain CRF; no duration loop \\
+$K=2$ & \texttt{SemiCRFK2Streaming} & Explicit 2-step history; avoids ring buffer edge cases \\
+$K \geq 3$ & \texttt{SemiCRFStreamingTriton} & Full ring buffer architecture \\
+\bottomrule
+\end{tabular}
+\caption{Automatic dispatch by maximum segment duration.}
+\end{table}
+
+\paragraph{Triton Kernel Scope.} The specialized $K=1$ and $K=2$ paths are implemented \textbf{only in PyTorch}. The Triton streaming kernel requires $K \geq 3$ for correct ring buffer operation. This is intentional: the PyTorch implementations are already efficient for small $K$, and the Triton kernel's complexity is justified only when ring buffers and checkpointing provide substantial memory savings.
+
+%==============================================================================
+\section{Notation}
+%==============================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{c l l}
+\toprule
+\textbf{Symbol} & \textbf{Description} & \textbf{Shape} \\
+\midrule
+$T$ & Sequence length & scalar \\
+$C$ & Number of labels (states) & scalar \\
+$B$ & Batch size & scalar \\
+$\mathcal{S}_{t,c}$ & Cumulative projected scores & $(B, T+1, C)$ \\
+$\mathcal{T}_{c',c}$ & Transition scores (source $c'$ to dest $c$) & $(C, C)$ \\
+$\mathcal{B}_{k,c}$ & Duration bias for duration $k$, label $c$ & $(K, C)$ \\
+$\tilde{\alpha}_t(c)$ & Log-forward message at position $t$, label $c$ & $(B, C)$ \\
+$\tilde{\beta}_t(c)$ & Log-backward message & $(B, C)$ \\
+\bottomrule
+\end{tabular}
+\caption{Notation. Tilde ($\tilde{\cdot}$) denotes log-domain quantities.}
+\end{table}
+
+%==============================================================================
+\section{K=1: Linear CRF}
+\label{sec:linear-crf}
+%==============================================================================
+
+When $K=1$, every segment has duration 1, reducing the Semi-CRF to a standard linear-chain CRF. The forward recurrence simplifies to:
+
+\begin{equation}
+\tilde{\alpha}_t(c) = \text{emit}_t(c) + \log \sum_{c'=1}^{C} \exp\bigl(\tilde{\alpha}_{t-1}(c') + \mathcal{T}_{c',c}\bigr)
+\end{equation}
+
+where the emission score is computed via prefix-sum difference:
+\begin{equation}
+\text{emit}_t(c) = \mathcal{S}_{t,c} - \mathcal{S}_{t-1,c} + \mathcal{B}_{0,c}
+\end{equation}
+
+\subsection{Initialization Convention}
+
+Following the \texttt{pytorch-crf} convention, we use \textbf{uniform initialization}:
+\begin{equation}
+\tilde{\alpha}_0(c) = 0 \quad \forall c \in \{1, \ldots, C\}
+\end{equation}
+
+This is equivalent to assuming a uniform distribution over initial states. At $t=1$:
+\begin{equation}
+\tilde{\alpha}_1(c) = \text{emit}_1(c) + \log \sum_{c'=1}^{C} \exp(\mathcal{T}_{c',c})
+\end{equation}
+
+\paragraph{Comparison with Explicit Start Transitions.} Some implementations (e.g., \texttt{pytorch-crf}) use explicit start transition parameters $\pi_c^{\text{start}}$:
+\begin{equation}
+\tilde{\alpha}_1(c) = \pi_c^{\text{start}} + \text{emit}_1(c)
+\end{equation}
+
+The two approaches are \textbf{functionally equivalent} when:
+\begin{equation}
+\pi_c^{\text{start}} = \log \sum_{c'=1}^{C} \exp(\mathcal{T}_{c',c})
+\end{equation}
+
+Both define valid probability distributions; the choice affects only the parameterization, not predictive accuracy.
+
+\subsection{Algorithm}
+
+Algorithm~\ref{alg:linear-crf-forward} presents the optimized $K=1$ forward pass.
+
+\begin{algorithm}[H]
+\caption{Linear CRF Forward ($K=1$)}\label{alg:linear-crf-forward}
+\KwIn{Cumulative scores $\mathcal{S} \in \mathbb{R}^{B \times (T+1) \times C}$,
+      Transitions $\mathcal{T} \in \mathbb{R}^{C \times C}$,
+      Duration bias $\mathcal{B} \in \mathbb{R}^{1 \times C}$ (optional),
+      Lengths $\ell \in \mathbb{Z}^B$}
+\KwOut{Log partition $\log Z \in \mathbb{R}^B$}
+\BlankLine
+$\tilde{\boldsymbol{\alpha}} \gets \mathbf{0} \in \mathbb{R}^{B \times C}$ \tcp*{Uniform initialization}
+\BlankLine
+\For{$t \gets 1$ \KwTo $T$}{
+    $\mathbf{e}_t \gets \mathcal{S}[:, t, :] - \mathcal{S}[:, t-1, :] + \mathcal{B}_{0}$ \tcp*{Emission}
+    \BlankLine
+    \tcp{Standard linear CRF recurrence}
+    $\tilde{\boldsymbol{\alpha}}_{\text{new}} \gets \text{LogSumExp}_{c'}(\tilde{\boldsymbol{\alpha}}[:, c'] + \mathcal{T}_{c', :}) + \mathbf{e}_t$\;
+    \BlankLine
+    \tcp{Update only active sequences}
+    $\tilde{\boldsymbol{\alpha}} \gets \texttt{where}(t \leq \ell, \tilde{\boldsymbol{\alpha}}_{\text{new}}, \tilde{\boldsymbol{\alpha}})$\;
+}
+\BlankLine
+$\log Z \gets \text{LogSumExp}_c(\tilde{\boldsymbol{\alpha}}[\ell])$ \tcp*{Final reduction}
+\Return{$\log Z$}\;
+\end{algorithm}
+
+\subsection{Complexity}
+
+\begin{itemize}
+    \item \textbf{Time}: $O(TC^2)$ --- matrix-vector products at each timestep
+    \item \textbf{Space}: $O(BC)$ --- single $\alpha$ vector per batch element
+    \item \textbf{No checkpointing}: Full $\alpha$ history stored for backward pass ($O(BTC)$)
+\end{itemize}
+
+The space overhead for storing full $\alpha$ history is acceptable because $K=1$ implies short-to-moderate sequences where the $O(BTC)$ cost is manageable.
+
+%==============================================================================
+\section{K=2: Near-Linear CRF}
+\label{sec:k2-crf}
+%==============================================================================
+
+When $K=2$, segments can have duration 1 or 2. Rather than using the general ring buffer (which has edge cases at $K=2$ due to modular arithmetic with small indices), we use explicit 2-step history variables.
+
+\subsection{Forward Recurrence}
+
+At each position $t$, we combine contributions from both durations:
+
+\begin{equation}
+\tilde{\alpha}_t(c) = \text{LogSumExp}\Bigl(
+    \underbrace{\text{score}_{k=1}(t, c)}_{\text{duration 1}},\;
+    \underbrace{\text{score}_{k=2}(t, c)}_{\text{duration 2}}
+\Bigr)
+\end{equation}
+
+where:
+\begin{align}
+\text{score}_{k=1}(t, c) &= \text{emit}_{t-1:t}(c) + \log \sum_{c'} \exp(\tilde{\alpha}_{t-1}(c') + \mathcal{T}_{c',c}) \\
+\text{score}_{k=2}(t, c) &= \text{emit}_{t-2:t}(c) + \log \sum_{c'} \exp(\tilde{\alpha}_{t-2}(c') + \mathcal{T}_{c',c})
+\end{align}
+
+The emission scores are:
+\begin{align}
+\text{emit}_{t-1:t}(c) &= \mathcal{S}_{t,c} - \mathcal{S}_{t-1,c} + \mathcal{B}_{0,c} \\
+\text{emit}_{t-2:t}(c) &= \mathcal{S}_{t,c} - \mathcal{S}_{t-2,c} + \mathcal{B}_{1,c}
+\end{align}
+
+\subsection{Algorithm}
+
+Algorithm~\ref{alg:k2-forward} presents the optimized $K=2$ forward pass using explicit history variables.
+
+\begin{algorithm}[H]
+\caption{Semi-CRF Forward ($K=2$)}\label{alg:k2-forward}
+\KwIn{Cumulative scores $\mathcal{S}$, Transitions $\mathcal{T}$, Duration bias $\mathcal{B} \in \mathbb{R}^{2 \times C}$, Lengths $\ell$}
+\KwOut{Log partition $\log Z \in \mathbb{R}^B$}
+\BlankLine
+$\tilde{\boldsymbol{\alpha}}^{(1)} \gets \mathbf{0} \in \mathbb{R}^{B \times C}$ \tcp*{$\alpha[t-1]$}
+$\tilde{\boldsymbol{\alpha}}^{(2)} \gets -\infty \in \mathbb{R}^{B \times C}$ \tcp*{$\alpha[t-2]$ (invalid at $t=1$)}
+\BlankLine
+\For{$t \gets 1$ \KwTo $T$}{
+    \tcp{Duration $k=1$: segment from $t-1$ to $t$}
+    $\mathbf{e}_{k=1} \gets \mathcal{S}[:, t, :] - \mathcal{S}[:, t-1, :] + \mathcal{B}_{0}$\;
+    $\mathbf{s}_{k=1} \gets \text{LogSumExp}_{c'}(\tilde{\boldsymbol{\alpha}}^{(1)}[:, c'] + \mathcal{T}_{c', :}) + \mathbf{e}_{k=1}$\;
+    \BlankLine
+    \If{$t \geq 2$}{
+        \tcp{Duration $k=2$: segment from $t-2$ to $t$}
+        $\mathbf{e}_{k=2} \gets \mathcal{S}[:, t, :] - \mathcal{S}[:, t-2, :] + \mathcal{B}_{1}$\;
+        $\mathbf{s}_{k=2} \gets \text{LogSumExp}_{c'}(\tilde{\boldsymbol{\alpha}}^{(2)}[:, c'] + \mathcal{T}_{c', :}) + \mathbf{e}_{k=2}$\;
+        $\tilde{\boldsymbol{\alpha}}_{\text{new}} \gets \text{LogSumExp}(\mathbf{s}_{k=1}, \mathbf{s}_{k=2})$\;
+    }
+    \Else{
+        $\tilde{\boldsymbol{\alpha}}_{\text{new}} \gets \mathbf{s}_{k=1}$\;
+    }
+    \BlankLine
+    \tcp{Shift history}
+    $\tilde{\boldsymbol{\alpha}}^{(2)} \gets \tilde{\boldsymbol{\alpha}}^{(1)}$\;
+    $\tilde{\boldsymbol{\alpha}}^{(1)} \gets \texttt{where}(t \leq \ell, \tilde{\boldsymbol{\alpha}}_{\text{new}}, \tilde{\boldsymbol{\alpha}}^{(1)})$\;
+}
+\BlankLine
+$\log Z \gets \text{LogSumExp}_c(\tilde{\boldsymbol{\alpha}}^{(1)}[\ell])$\;
+\Return{$\log Z$}\;
+\end{algorithm}
+
+\subsection{Complexity}
+
+\begin{itemize}
+    \item \textbf{Time}: $O(TC^2)$ --- two matrix-vector products per timestep
+    \item \textbf{Space}: $O(BC)$ --- two $\alpha$ vectors per batch element
+    \item \textbf{No ring buffer}: Explicit variables avoid modular arithmetic overhead
+\end{itemize}
+
+%==============================================================================
+\section{Backward Pass and Gradients}
+%==============================================================================
+
+Both $K=1$ and $K=2$ implementations use the standard forward-backward algorithm for gradient computation. Because these paths do not use checkpointing, the full $\alpha$ history is stored during the forward pass.
+
+\subsection{Marginal Computation}
+
+The marginal probability for a segment spanning $[t-k, t-1]$ with transition $c' \to c$ is:
+\begin{equation}
+\mu(t, k, c, c') = \frac{\exp\bigl(\tilde{\alpha}_{t-k}(c') + \tilde{\psi}(t, k, c, c') + \tilde{\beta}_t(c)\bigr)}{\exp(\log Z)}
+\end{equation}
+
+where the edge potential is:
+\begin{equation}
+\tilde{\psi}(t, k, c, c') = (\mathcal{S}_{t,c} - \mathcal{S}_{t-k,c}) + \mathcal{B}_{k-1,c} + \mathcal{T}_{c',c}
+\end{equation}
+
+\subsection{Gradient Formulas}
+
+\paragraph{Cumulative Scores.} The gradient for $\mathcal{S}_{t,c}$ accumulates contributions from segments ending at $t$ (positive) and starting after $t$ (negative):
+\begin{equation}
+\nabla \mathcal{S}_{t,c} = \sum_{k, c'} \mu(t, k, c, c') - \sum_{k, c'} \mu(t+k, k, c, c')
+\end{equation}
+
+\paragraph{Transitions.} The gradient sums marginals over all positions and durations:
+\begin{equation}
+\nabla \mathcal{T}_{c',c} = \sum_b \frac{\partial \mathcal{L}}{\partial Z_b} \cdot \sum_{t,k} \mu_b(t, k, c, c')
+\end{equation}
+
+\paragraph{Duration Bias.} The gradient for duration $k$ sums over all segments of that duration:
+\begin{equation}
+\nabla \mathcal{B}_{k,c} = \sum_b \frac{\partial \mathcal{L}}{\partial Z_b} \cdot \sum_{t, c'} \mu_b(t, k, c, c')
+\end{equation}
+
+%==============================================================================
+\section{Viterbi Decoding}
+%==============================================================================
+
+Both $K=1$ and $K=2$ implementations support Viterbi decoding for MAP inference. The algorithms follow the same structure as the forward pass, replacing LogSumExp with max and maintaining backpointers.
+
+\subsection{K=1 Viterbi}
+
+Standard linear CRF Viterbi with backpointers for the best previous label at each position.
+
+\subsection{K=2 Viterbi}
+
+Extended backpointers track both the best previous label \textbf{and} the best duration (1 or 2) at each position. The traceback reconstructs the segmentation by stepping back by the recorded duration.
+
+%==============================================================================
+\section{Why Triton Kernels Require $K \geq 3$}
+%==============================================================================
+
+The Triton streaming kernel is designed for the general Semi-CRF case where ring buffers and checkpointing provide substantial memory savings. For small $K$, ring buffer indexing creates edge cases:
+
+\begin{itemize}
+    \item \textbf{$K=1$}: All positions map to ring index 0. The ring buffer degenerates to a single slot, providing no benefit over a simple variable.
+    
+    \item \textbf{$K=2$}: Indices alternate between 0 and 1. Wraparound logic is fragile and provides minimal memory savings over explicit variables.
+    
+    \item \textbf{$K \geq 3$}: Ring buffer provides meaningful history separation. Checkpointing amortizes over multiple segments, justifying the implementation complexity.
+\end{itemize}
+
+The PyTorch implementations for $K=1$ and $K=2$ are already efficient (no kernel launch overhead, simple control flow), making Triton acceleration unnecessary.
+
+%==============================================================================
+\section{Implementation Summary}
+%==============================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+$K$ & Time & Space & Checkpointing & Ring Buffer & Backend \\
+\midrule
+1 & $O(TC^2)$ & $O(BC)$ & No & No & PyTorch \\
+2 & $O(TC^2)$ & $O(BC)$ & No & No & PyTorch \\
+$\geq 3$ & $O(TKC^2)$ & $O(BKC)$ & Yes & Yes & Triton (GPU) / PyTorch (CPU) \\
+\bottomrule
+\end{tabular}
+\caption{Implementation characteristics by maximum segment duration.}
+\end{table}
+
+\paragraph{Automatic Dispatch.} The \texttt{semi\_crf\_streaming\_forward} function automatically routes to the appropriate implementation based on $K$. Users need not manage dispatch manually.
+
+%==============================================================================
+\section{Functional Equivalence}
+%==============================================================================
+
+All three implementations ($K=1$, $K=2$, $K \geq 3$) compute the same partition function and gradients for their respective segment duration constraints. Specifically:
+
+\begin{itemize}
+    \item The $K=1$ path produces identical results to the general streaming kernel with $K=1$ (verified numerically).
+    \item The $K=2$ path produces identical results to the general streaming kernel with $K=2$ (verified numerically).
+    \item All paths support variable-length batches with proper masking.
+\end{itemize}
+
+The specialized paths exist purely for performance optimization, not behavioral differences.
+
+%==============================================================================
+\section{References}
+%==============================================================================
+
+\begin{enumerate}
+    \item Lafferty, J., McCallum, A., \& Pereira, F. (2001). \textit{Conditional Random Fields: Probabilistic Models for Segmenting and Labeling Sequence Data.} ICML.
+    
+    \item Sarawagi, S., \& Cohen, W. W. (2004). \textit{Semi-Markov Conditional Random Fields for Information Extraction.} NeurIPS.
+    
+    \item \texttt{pytorch-crf}: \url{https://github.com/kmkurn/pytorch-crf}
+\end{enumerate}
+
+\end{document}

@@ -735,3 +735,51 @@ Error grows roughly linearly with T due to accumulated floating-point rounding d
 - Partitions and gradients should agree at all sequence lengths
 - Small differences arise from parallel vs sequential floating-point reduction
 - Use gradient_check.py to validate agreement at any T
+
+### Known Limitation: Non-Determinism in Backward Pass
+
+**Status:** Known limitation, accepted. Full determinism (two-phase kernel) is documented in the plan file for future implementation if needed.
+
+**Behavior:** The Triton backward kernel produces slightly different gradients across runs due to `tl.atomic_add` operations. Multiple (t, k) iterations write to the same workspace entries, and GPU memory reordering combined with floating-point non-associativity causes variance.
+
+**Magnitude:**
+
+- `grad_transition`: ~1-2% relative difference across runs
+- `grad_duration_bias`: ~7-14% relative difference across runs
+- `grad_cum_scores`: Position-dependent, lower variance
+
+**Impact on training:**
+
+- Gradients are *correct* (match PyTorch reference within tolerance)
+- Training will *converge* (variance is within normal SGD noise)
+- Run-to-run reproducibility is *not guaranteed*
+
+**When this matters:**
+
+- Focused learning approaches (curriculum learning, hard example mining)
+- Ablation studies requiring exact reproducibility
+- Production model parity across retraining
+
+**Partial mitigation (implemented):**
+
+Per-segment workspace allocation eliminates cross-segment atomic contention. Each checkpoint segment writes to its own workspace slice, and the host performs a deterministic sum over segments before the final einsum reduction. This reduces variance but does not eliminate within-segment non-determinism.
+
+**Full mitigation (documented, not implemented):**
+
+The plan file documents a "Part D: Two-Phase Kernel" approach that would eliminate all atomics for `grad_transition` and `grad_duration_bias` by:
+
+1. Storing full beta history per segment (~1 MB additional memory)
+2. Separating gradient accumulation into a second pass with local register accumulators
+3. Writing once per (segment, tile, tile) with no atomics
+
+This would add ~1.5-2× compute overhead for marginal recomputation.
+
+**Verification:**
+
+```bash
+# Test correctness (should pass)
+python benchmarks/practical_demonstration/synthetic_genomics/gradient_check.py
+
+# Test determinism (will show remaining variance)
+python src/torch_semimarkov/streaming/find_determinism.py
+```

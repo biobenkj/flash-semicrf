@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `f865fed`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `49d9d61`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -187,6 +187,7 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace[:, :, :C], g
 | Float32 accumulator overflow | Resolved | Long sequences, large C | log_norm_checkpoints keeps values bounded; kernel uses tl.float64 internally | d7b802c |
 | Wrong checkpoint_interval | Critical | Mismatched forward/backward | Pass same interval to both | autograd.py:244 |
 | grad_output not scaled | Medium | Wrong gradient magnitude | Triton kernel scales internally | - |
+| int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len to int32 | `49d9d61` |
 
 ## Debugging: Gradient Mismatch
 
@@ -227,6 +228,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-02**: Fixed int32/int64 type mismatch for seq_len comparison; seq_len now loaded as int32 to match loop variable type from tl.range; updated to commit `49d9d61`
 - **2026-02-02**: Reverted workspace accumulators from float64 to float32 @ `94652ad`; log_norm_checkpoints keeps values bounded within checkpoint blocks, so float32 is sufficient; kernel-internal accumulators still use tl.float64 for log-sum-exp safety
 - **2026-02-01**: Added log_norm_checkpoints support for T=100k+ stability; relative log-marginal computation (Flash Attention pattern); removed epsilon from logsumexp
 - **2026-01-28**: Fixed duration-dependent transition indexing (k -> dur_idx = k-1), added K boundary tests

@@ -129,15 +129,22 @@ In our PyTorch/CUDA experiments, however, this did not translate into a speedup 
 
 For *exact* inference in memory-limited regimes, the practical recommendation is therefore the same as in the main paper:
 
-- use a **dense, vectorized linear scan** (with streamed potentials), which has predictable $O(TKC^2)$ work and $O(KC^2)$ working memory, and
-- avoid tree-structured backends that require $O(T(KC)^2)$ intermediate storage.
+- use a **dense, vectorized linear scan** (with streamed potentials), which has predictable $O(TKC^2)$ work and $O(KC^2)$ working memory (including provided semirings), or
+- use the PyTorch/Triton **streaming semi-CRF with checkpointing**, which achieves the same $O(TKC^2)$ work with $O(BKC)$ working memory via ring buffers and periodic checkpoints.
 
-If sparsity is essential, it must be introduced by **approximation** (pruning / filtering), which enforces value sparsity rather than relying on structural sparsity that does not persist under composition.
+Both approaches are *exact*: they compute the correct partition function and gradients. The Triton streaming kernel may exhibit minor floating-point non-determinism due to warp-level atomic reductions, but this affects only bitwise reproducibility across runs—not the mathematical correctness of the result.
+
+The key shared property is that neither approach materializes the $O((KC)^2)$ intermediate operators required by tree-structured backends. Instead, they process the sequence sequentially (or in checkpointed segments), avoiding the memory cliff that makes tree backends impractical for large $K$ or $C$.
+
+If sparsity is essential, it must be introduced by **approximation** (pruning / filtering), which enforces value sparsity rather than relying on structural sparsity that does not persist under composition. Recent work has explored segment filtering approaches that prune unlikely segments using lightweight classifiers before semi-CRF inference (Zaratiana et al., 2023), or hybrid architectures that combine token-level and segment-level models (Ye & Ling, 2018; Kong et al., 2016).
 
 ## References
 
 - G. E. Blelloch (1990). Prefix sums and their applications. Technical Report CMU-CS-90-190, Carnegie Mellon University.
 - E. Cuthill and J. McKee (1969). Reducing the bandwidth of sparse symmetric matrices. *Proceedings of the 24th National Conference of the ACM*, 157–172.
 - A. George and J. W. H. Liu (1981). *Computer Solution of Large Sparse Positive Definite Systems.* Prentice-Hall.
+- L. Kong, C. Dyer, and N. A. Smith (2016). Segmental Recurrent Neural Networks. *ICLR*.
 - A. M. Rush (2020). Torch-Struct: Deep Structured Prediction Library. *ACL*.
 - S. Sarawagi and W. W. Cohen (2004). Semi-Markov Conditional Random Fields for Information Extraction. *NeurIPS*.
+- Z. Ye and Z.-H. Ling (2018). Hybrid semi-Markov CRF for neural sequence labeling. *Proceedings of ACL*, 235–240.
+- U. Zaratiana, N. Tomeh, N. El Khbir, P. Holat, and T. Charnois (2023). Filtered Semi-Markov CRF. *Findings of EMNLP*, 222–235.

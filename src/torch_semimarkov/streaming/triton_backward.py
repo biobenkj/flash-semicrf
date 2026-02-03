@@ -117,13 +117,15 @@ if HAS_TRITON:
         stride_gcs_b,
         stride_gcs_t,
         stride_gcs_c,
-        # Strides for grad_tr_workspace (batch, C, C) or (batch, K, C, C)
+        # Strides for grad_tr_workspace (batch, num_segments, C, C) or (batch, num_segments, K, C, C)
         stride_gtw_b,
+        stride_gtw_seg,  # Segment stride for deterministic accumulation
         stride_gtw_k,  # Only used if HAS_DURATION_TRANSITIONS
         stride_gtw_src,
         stride_gtw_dst,
-        # Strides for grad_db_workspace (batch, K, C)
+        # Strides for grad_db_workspace (batch, num_segments, K, C)
         stride_gdbw_b,
+        stride_gdbw_seg,  # Segment stride for deterministic accumulation
         stride_gdbw_k,
         stride_gdbw_c,
         # Strides for boundary_marginals (batch, T) - only used if RETURN_BOUNDARY_MARGINALS
@@ -309,6 +311,11 @@ if HAS_TRITON:
             log_norm_at_ckpt = tl.load(
                 log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n
             )
+
+            # Compute segment-specific workspace base pointers for deterministic accumulation.
+            # Each segment writes to its own workspace slice, eliminating cross-segment atomics.
+            grad_tr_ws_seg = grad_tr_ws_base + ckpt_idx * stride_gtw_seg
+            grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
 
             # Debug: show checkpoint loading (remove after validation)
             # if batch_idx == 0:
@@ -753,16 +760,18 @@ if HAS_TRITON:
                                             + c_dst_idx_tile[None, :] * stride_gtw_dst
                                         )
                                     tile_mask_T = c_mask[:, None] & c_dst_mask_tile[None, :]
+                                    # Use segment-specific workspace for deterministic accumulation
                                     tl.atomic_add(
-                                        grad_tr_ws_base + tr_offsets_tile,
+                                        grad_tr_ws_seg + tr_offsets_tile,
                                         marginal_T_tile,
                                         mask=tile_mask_T,
                                     )
 
                                     # grad_duration_bias: (unscaled)
                                     # Use dur_idx (not k) to handle K=1: k=1 maps to index 0
+                                    # Use segment-specific workspace for deterministic accumulation
                                     tl.atomic_add(
-                                        grad_db_ws_base
+                                        grad_db_ws_seg
                                         + dur_idx * stride_gdbw_k
                                         + c_dst_idx_tile * stride_gdbw_c,
                                         marginal_sum_src_tile,
@@ -961,7 +970,7 @@ if HAS_TRITON:
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
 
-        # Determine if duration-dependent transitions (Phase 4A)
+        # Determine if duration-dependent transitions
         has_duration_transitions = transition.ndim == 3
 
         # Ensure contiguous
@@ -1017,19 +1026,26 @@ if HAS_TRITON:
         # grad_duration_bias accumulates across all T positions → needs float64
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=torch.float64)
 
-        # Allocate per-batch workspace buffers
-        # These accumulate across T, so need float64 for numerical stability at large T
-        # IMPORTANT: Allocate with C_PAD to prevent OOB memory access from masked-out
-        # threads (indices C to C_PAD-1).
+        # Allocate per-batch-per-segment workspace buffers for deterministic gradients.
+        # Each segment writes to its own workspace slice, eliminating atomic contention
+        # across segments. Host-side sum over segments is deterministic.
+        #
+        # NUMERICAL STABILITY: Use float64 for accumulation across T.
+        # PADDING: Use C_PAD to prevent OOB memory access from masked-out threads.
+        num_segments = num_checkpoints  # One segment per checkpoint
         if has_duration_transitions:
-            # Duration-dependent: (batch, K, C_PAD, C_PAD)
+            # Duration-dependent: (batch, num_segments, K, C_PAD, C_PAD)
             grad_tr_workspace = torch.zeros(
-                batch, K, C_PAD, C_PAD, device=device, dtype=torch.float64
+                batch, num_segments, K, C_PAD, C_PAD, device=device, dtype=torch.float64
             )
         else:
-            # Static: (batch, C_PAD, C_PAD)
-            grad_tr_workspace = torch.zeros(batch, C_PAD, C_PAD, device=device, dtype=torch.float64)
-        grad_db_workspace = torch.zeros(batch, K, C_PAD, device=device, dtype=torch.float64)
+            # Static: (batch, num_segments, C_PAD, C_PAD)
+            grad_tr_workspace = torch.zeros(
+                batch, num_segments, C_PAD, C_PAD, device=device, dtype=torch.float64
+            )
+        grad_db_workspace = torch.zeros(
+            batch, num_segments, K, C_PAD, device=device, dtype=torch.float64
+        )
 
         # Allocate boundary marginals output if requested
         if return_boundary_marginals:
@@ -1056,13 +1072,17 @@ if HAS_TRITON:
         stride_gcs_b, stride_gcs_t, stride_gcs_c = grad_cum_scores.stride()
 
         # Handle grad_tr_workspace strides for both shapes
+        # Workspace now has segment dimension: (batch, num_segments, [K,] C_PAD, C_PAD)
         if has_duration_transitions:
-            stride_gtw_b, stride_gtw_k, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+            stride_gtw_b, stride_gtw_seg, stride_gtw_k, stride_gtw_src, stride_gtw_dst = (
+                grad_tr_workspace.stride()
+            )
         else:
             stride_gtw_k = 0  # Not used for static transitions
-            stride_gtw_b, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
+            stride_gtw_b, stride_gtw_seg, stride_gtw_src, stride_gtw_dst = grad_tr_workspace.stride()
 
-        stride_gdbw_b, stride_gdbw_k, stride_gdbw_c = grad_db_workspace.stride()
+        # Workspace: (batch, num_segments, K, C_PAD)
+        stride_gdbw_b, stride_gdbw_seg, stride_gdbw_k, stride_gdbw_c = grad_db_workspace.stride()
         stride_lnc_b, stride_lnc_n = log_norm_checkpoints.stride()
 
         # Use actual gradients or dummies for kernel call
@@ -1126,10 +1146,12 @@ if HAS_TRITON:
                 stride_gcs_t,
                 stride_gcs_c,
                 stride_gtw_b,
+                stride_gtw_seg,
                 stride_gtw_k,
                 stride_gtw_src,
                 stride_gtw_dst,
                 stride_gdbw_b,
+                stride_gdbw_seg,
                 stride_gdbw_k,
                 stride_gdbw_c,
                 stride_bm_b,
@@ -1158,19 +1180,27 @@ if HAS_TRITON:
         # without creating a large intermediate tensor. For K=1024, C=64, batch=16,
         # the naive broadcast approach would allocate ~268MB just to sum immediately.
         #
-        # Notation: b=batch, k=duration, i=src_state, j=dst_state, c=state
-        # Slice workspaces back to actual class count C before einsum reduction
+        # Notation: b=batch, s=segment, k=duration, i=src_state, j=dst_state, c=state
+        #
+        # DETERMINISTIC REDUCTION: Sum over segments first (deterministic order),
+        # then einsum over batch. This eliminates non-determinism from cross-segment
+        # atomic contention while preserving correct gradient semantics.
+        #
+        # Slice workspaces back to actual class count C before reduction
         # (they were allocated with C_PAD to prevent OOB memory access)
         # Convert grad_output to float64 to match workspace dtype for accumulated gradients
         grad_output_f64 = grad_output.to(torch.float64)
         if has_duration_transitions:
-            grad_tr_workspace = grad_tr_workspace[:, :, :C, :C]
+            # (batch, num_segments, K, C_PAD, C_PAD) -> sum over segments -> (batch, K, C, C)
+            grad_tr_workspace = grad_tr_workspace[:, :, :, :C, :C].sum(dim=1)
             grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output_f64)
         else:
-            grad_tr_workspace = grad_tr_workspace[:, :C, :C]
+            # (batch, num_segments, C_PAD, C_PAD) -> sum over segments -> (batch, C, C)
+            grad_tr_workspace = grad_tr_workspace[:, :, :C, :C].sum(dim=1)
             grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output_f64)
 
-        grad_db_workspace = grad_db_workspace[:, :, :C]
+        # (batch, num_segments, K, C_PAD) -> sum over segments -> (batch, K, C)
+        grad_db_workspace = grad_db_workspace[:, :, :, :C].sum(dim=1)
         grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 
         # Slice padded gradients back to actual class count C and convert to original dtype

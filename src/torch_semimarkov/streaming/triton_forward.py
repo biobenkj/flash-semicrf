@@ -982,7 +982,7 @@ if HAS_TRITON:
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
 
-        # Determine if duration-dependent transitions (Phase 4A)
+        # Determine if duration-dependent transitions
         has_duration_transitions = transition.ndim == 3
 
         # Ensure inputs are contiguous
