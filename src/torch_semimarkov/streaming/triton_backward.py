@@ -285,9 +285,9 @@ if HAS_TRITON:
 
         # Initialize beta ring buffer at final positions
         final_pos = seq_len
-        final_ring_idx = final_pos % K
+        final_ring_idx = final_pos % (2 * K)
         # Note: Use tl.range (not static_range) to avoid compile-time explosion for large K
-        for k_init in tl.range(0, K):
+        for k_init in tl.range(0, 2 * K):
             is_final = k_init == final_ring_idx
             init_val = tl.where(is_final & c_mask, 0.0, NEG_INF)
             tl.store(
@@ -517,7 +517,7 @@ if HAS_TRITON:
                             end_pos = t + k
                             # Only process valid end positions
                             if end_pos <= seq_len and end_pos <= T:
-                                end_ring_idx = end_pos % K
+                                end_ring_idx = end_pos % (2 * K)
                                 # Duration k uses index k-1
                                 dur_idx = k - 1
 
@@ -879,7 +879,7 @@ if HAS_TRITON:
                                 )
 
                         # Store beta[t] to ring buffer
-                        t_ring_idx = t % K
+                        t_ring_idx = t % (2 * K)
                         tl.store(
                             beta_ring_base + t_ring_idx * stride_br_k + c_idx * stride_br_c,
                             new_beta,
@@ -1013,7 +1013,7 @@ if HAS_TRITON:
 
         # Allocate working memory
         alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
-        beta_ring = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
+        beta_ring = torch.full((batch, 2 * K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # NUMERICAL STABILITY: Selective precision for gradient tensors.
         # - grad_cum_scores: O(B×T×C) but per-position (no cross-T accumulation) → float32 OK
