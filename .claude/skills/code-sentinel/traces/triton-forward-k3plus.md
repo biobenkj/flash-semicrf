@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `49d9d61`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `0c9b73e`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -333,6 +333,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-02**: Updated to commit `0c9b73e` (minor comment cleanup)
 - **2026-02-02**: Fixed int32/int64 type mismatch in Triton comparisons; `seq_len` loaded as int32, `t` cast to int32 for `active` and `is_final` comparisons; checkpoint normalization now uses `active` directly instead of NEG_INF comparison (workaround for silent comparison failure); updated to commit `49d9d61`
 - **2026-02-02**: Updated for active masking changes; all kernel operations now properly masked for variable-length sequences; checkpoint normalization uses `active` to prevent phantom shifts; line numbers updated for commit `d9aff99`
 - **2026-02-02**: Anchored to commit `d7b802c`; corrected line references for A4 verification, dispatch conditions, buffer init, kernel launch, main loop, final reduction, numerical guards

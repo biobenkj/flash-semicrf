@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `49d9d61`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `b05260f`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -8,6 +8,8 @@
 The Triton backward kernel computes gradients for the Semi-CRF partition function using the forward-backward algorithm with memory-efficient streaming checkpoints. For each checkpoint segment (processed in reverse), it recomputes alpha values forward, then computes beta backward while accumulating gradients.
 
 **Numerical Stability (T > 100K)**: Uses relative log-marginal computation (Flash Attention pattern) to prevent overflow when alpha + beta >> log_Z at extreme scale. The log_norm_checkpoints from forward pass are used to bridge the gap between normalized alpha values and the full-scale partition function.
+
+**Deterministic Gradients**: Uses per-segment workspace allocation to eliminate cross-segment atomic contention. Each checkpoint segment writes to its own workspace slice; host-side reduction over segments is deterministic.
 
 ## Shape Legend
 
@@ -39,12 +41,14 @@ Inputs (from forward):
   log_norm_checkpoints: (B, num_ckpts)   <- Cumulative normalization factors
   grad_output: (B,)                      <- Upstream gradient
 
-Launcher allocates (triton_backward.py:1005-1030):
+Launcher allocates (triton_backward.py:1026-1052):
   alpha_buffer: (B, SEGMENT_SIZE, C_PAD) <- Recomputed alpha within segment
   beta_ring: (B, K, C_PAD)               <- Beta ring buffer
   grad_cum_scores: (B, T+1, C_PAD) float32 <- Output gradient (float32 sufficient with log_norm)
-  grad_tr_workspace: (B, C, C) or (B, K, C, C) float32 <- Per-batch accumulator
-  grad_db_workspace: (B, K, C) float32   <- Per-batch accumulator
+
+  # DETERMINISTIC: Per-segment workspaces eliminate cross-segment atomic contention
+  grad_tr_workspace: (B, num_segments, C_PAD, C_PAD) or (B, num_segments, K, C_PAD, C_PAD) float64
+  grad_db_workspace: (B, num_segments, K, C_PAD) float64
   NOTE: Kernel-internal accumulators use tl.float64 for log-sum-exp operations
 
 Outputs:
@@ -106,10 +110,11 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
         # Step 4: Final marginal
         marginal = marginal_unnorm * scale * grad_output
 
-        # Accumulate gradients
+        # Accumulate gradients into SEGMENT-SPECIFIC workspace (deterministic)
+        # Each segment writes to grad_tr_ws_seg, grad_db_ws_seg (not shared base)
         grad_cum_scores[t:t+k] += marginal
-        grad_transition += marginal
-        grad_duration_bias[k] += marginal
+        grad_tr_workspace[ckpt_idx] += marginal  # Segment-isolated atomic
+        grad_db_workspace[ckpt_idx] += marginal  # Segment-isolated atomic
 ```
 
 ## Critical Invariants
@@ -130,7 +135,7 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 | **grad_cum_scores dtype** | float32 (reverted from float64; log_norm keeps values bounded) |
 | **Alpha buffer** | `(B, SEGMENT_SIZE, C_PAD) * 4` bytes |
 | **Beta ring** | `(B, K, C_PAD) * 4` bytes |
-| **Grad workspace** | `(B, C, C) * 8` or `(B, K, C, C) * 8` bytes (float64) |
+| **Grad workspace** | `(B, num_segments, C, C) * 8` or `(B, num_segments, K, C, C) * 8` bytes (float64) |
 | **Grid Dim** | `(batch,)` - one program per batch element |
 | **num_warps** | Default 4; range 2-8 |
 | **TILE_C** | 16 (constexpr for tiling) |
@@ -156,27 +161,39 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 | triton_backward.py (kernel) | Clamp log_scale | Prevent exp() overflow: `clamp(log_scale, min=-700, max=0)` |
 | autograd.py:264-277 | `torch.isfinite(grad_*)` | Validate all backward outputs |
 
-## Gradient Reduction
+## Gradient Reduction (Deterministic)
 
-The Triton kernel produces **per-batch** gradients for shared parameters. Autograd reduces them:
+The Triton kernel produces **per-batch-per-segment** gradients. The launcher reduces them in two phases:
+
+### Phase 1: Segment Reduction (Deterministic)
 
 ```python
-# autograd.py lines 236-250 (Triton path)
-# Triton backward already scales by grad_output internally
+# triton_backward.py:1180-1207
+# Sum over segments FIRST - this is deterministic (fixed order)
+# Notation: b=batch, s=segment, k=duration, i=src_state, j=dst_state
 
-# Per-batch workspaces are reduced via einsum after kernel returns
-# (This happens in the launcher, not autograd)
+if has_duration_transitions:
+    # (B, num_segments, K, C_PAD, C_PAD) -> sum over segments -> (B, K, C, C)
+    grad_tr_workspace = grad_tr_workspace[:, :, :, :C, :C].sum(dim=1)
+else:
+    # (B, num_segments, C_PAD, C_PAD) -> sum over segments -> (B, C, C)
+    grad_tr_workspace = grad_tr_workspace[:, :, :C, :C].sum(dim=1)
+
+# (B, num_segments, K, C_PAD) -> sum over segments -> (B, K, C)
+grad_db_workspace = grad_db_workspace[:, :, :, :C].sum(dim=1)
 ```
 
-In the launcher (triton_backward.py:1159-1180):
+### Phase 2: Batch Reduction (einsum)
+
 ```python
-# Slice workspaces back to actual class count C
-# Convert accum_dtype (float32) → original dtype if different
-grad_cum_scores = grad_cum_scores[:, :, :C].to(dtype)
-grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace[:, :, :C, :C], grad_output)
+# triton_backward.py:1180-1207
+grad_output_f64 = grad_output.to(torch.float64)
+grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output_f64)
 # or for non-duration-dependent: "bij, b -> ij"
-grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace[:, :, :C], grad_output)
+grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 ```
+
+**Why deterministic**: Cross-segment atomic contention was the source of non-determinism. By giving each segment its own workspace slice, atomics within a segment only contend with threads in the same segment (deterministic). The host-side `.sum(dim=1)` over segments executes in fixed order.
 
 ## Known Issues
 
@@ -188,6 +205,7 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace[:, :, :C], g
 | Wrong checkpoint_interval | Critical | Mismatched forward/backward | Pass same interval to both | autograd.py:244 |
 | grad_output not scaled | Medium | Wrong gradient magnitude | Triton kernel scales internally | - |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len to int32 | `49d9d61` |
+| Non-deterministic gradients | Critical | Multi-segment backward | Per-segment workspaces eliminate cross-segment atomic contention | `0c9b73e` |
 
 ## Debugging: Gradient Mismatch
 
@@ -228,6 +246,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-02**: Deterministic gradient accumulation via per-segment workspaces; workspace shapes now `(B, num_segments, ...)` instead of `(B, ...)`; each segment writes to its own slice eliminating cross-segment atomic contention; host-side `.sum(dim=1)` is deterministic; updated to commit `b05260f`
 - **2026-02-02**: Fixed int32/int64 type mismatch for seq_len comparison; seq_len now loaded as int32 to match loop variable type from tl.range; updated to commit `49d9d61`
 - **2026-02-02**: Reverted workspace accumulators from float64 to float32 @ `94652ad`; log_norm_checkpoints keeps values bounded within checkpoint blocks, so float32 is sufficient; kernel-internal accumulators still use tl.float64 for log-sum-exp safety
 - **2026-02-01**: Added log_norm_checkpoints support for T=100k+ stability; relative log-marginal computation (Flash Attention pattern); removed epsilon from logsumexp
