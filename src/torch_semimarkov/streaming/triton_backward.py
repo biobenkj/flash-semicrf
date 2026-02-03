@@ -886,6 +886,46 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
+    def _compute_tile_c(C: int) -> int:
+        """Compute optimal TILE_C based on number of classes.
+
+        Uses runtime heuristics to select TILE_C that forces multiple tiles
+        at small C, reducing atomic contention. This follows the Flash Attention
+        pattern of runtime block size selection (BLOCK_HEADDIM).
+
+        Args:
+            C: Actual number of classes (before padding).
+
+        Returns:
+            TILE_C value to use for kernel launch.
+
+        Strategy:
+            - C_PAD <= 8:  Use TILE_C=4  (forces 2 tiles, reduces hot-spot contention)
+            - C_PAD <= 16: Use TILE_C=8  (forces 2 tiles for C in [9, 16])
+            - C_PAD > 16:  Use TILE_C=16 (default, matches current behavior)
+
+        Rationale:
+            At small C with fixed TILE_C=16, only one tile executes, creating
+            maximum atomic contention. By forcing multiple tiles, we achieve
+            spatial separation of atomic operations across the C dimension.
+
+        Example:
+            >>> _compute_tile_c(4)   # C_PAD=4  -> TILE_C=4  (2 tiles)
+            4
+            >>> _compute_tile_c(12)  # C_PAD=16 -> TILE_C=8  (2 tiles)
+            8
+            >>> _compute_tile_c(32)  # C_PAD=32 -> TILE_C=16 (2 tiles)
+            16
+        """
+        C_PAD = _next_power_of_2(C)
+
+        if C_PAD <= 8:
+            return 4
+        elif C_PAD <= 16:
+            return 8
+        else:
+            return 16
+
     def launch_streaming_triton_backward(
         cum_scores: torch.Tensor,
         transition: torch.Tensor,
@@ -1091,6 +1131,11 @@ if HAS_TRITON:
         grad_ps_for_kernel = grad_proj_start if has_boundaries else grad_cum_scores
         grad_pe_for_kernel = grad_proj_end if has_boundaries else grad_cum_scores
 
+        # Compute adaptive TILE_C based on number of classes
+        # Forces multiple tiles at small C to reduce atomic contention
+        # (follows Flash Attention's BLOCK_HEADDIM pattern)
+        tile_c = _compute_tile_c(C)
+
         # Launch kernel with device context for multi-GPU support
         grid = (batch,)
         with torch.cuda.device(device):
@@ -1161,7 +1206,7 @@ if HAS_TRITON:
                 log_norm_checkpoints,
                 stride_lnc_b,
                 stride_lnc_n,
-                TILE_C=16,  # DO NOT INCREASE - TILE_C=32 causes register spills (14x slowdown)
+                TILE_C=tile_c,
                 num_warps=num_warps,
             )
 
