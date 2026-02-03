@@ -23,6 +23,8 @@ if HAS_TRITON:
 def create_streaming_inputs(batch, T, K, C, device="cpu", dtype=torch.float32, seed=42):
     """Create test inputs for the streaming API."""
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     # Simulate projected encoder features
     projected = torch.randn(batch, T, C, device=device, dtype=dtype)
@@ -545,6 +547,8 @@ class TestTritonStreamingBoundaries:
     def create_boundary_inputs(self, batch, T, K, C, device="cuda", dtype=torch.float32, seed=42):
         """Create test inputs including boundary projections."""
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         # Standard inputs
         projected = torch.randn(batch, T, C, device=device, dtype=dtype)
@@ -837,6 +841,8 @@ class TestDurationDependentTransitions:
     ):
         """Create test inputs with duration-dependent transitions (K, C, C)."""
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         # Standard inputs
         projected = torch.randn(batch, T, C, device=device, dtype=dtype)
@@ -1022,6 +1028,8 @@ class TestDurationDependentTransitions:
         """Verify static (C, C) transitions still work after Phase 4A changes."""
         batch, T, K, C = 2, 30, 5, 4
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
 
         # Create inputs
         projected = torch.randn(batch, T, C, device="cuda")
@@ -1149,10 +1157,14 @@ class TestGradientScalingBugFix:
 
         # Create different inputs for each batch element
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         cum_scores_0, transition, duration_bias, _ = create_streaming_inputs(
             1, T, K, C, device="cuda"
         )
         torch.manual_seed(123)  # Different seed for different data
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(123)
         cum_scores_1, _, _, _ = create_streaming_inputs(1, T, K, C, device="cuda")
 
         # Combine into batch of 2
@@ -1191,6 +1203,8 @@ class TestGradientScalingBugFix:
 
         batch, T, K, C = 2, 30, 5, 4
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
 
         # Create duration-dependent transitions
         projected = torch.randn(batch, T, C, device="cuda")
@@ -1247,6 +1261,8 @@ class TestTritonBackwardDebug:
         # Tiny config for easy debugging
         batch, T, K, C = 1, 5, 2, 2
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
 
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
             batch, T, K, C, device="cuda"
@@ -1552,6 +1568,8 @@ class TestTritonBackwardDebug:
         # Same config as test_triton_gradients_match_pytorch
         batch, T, K, C = 2, 30, 5, 4
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
 
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
             batch, T, K, C, device="cuda"

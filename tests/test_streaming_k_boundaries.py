@@ -29,6 +29,8 @@ if HAS_TRITON:
 def create_streaming_inputs(batch, T, K, C, device="cpu", dtype=torch.float32, seed=42):
     """Create test inputs for the streaming API."""
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     # Simulate projected encoder features
     projected = torch.randn(batch, T, C, device=device, dtype=dtype)
@@ -102,6 +104,8 @@ class TestK1LinearCRFBoundary:
         """
         batch, T, K, C = 1, 3, 1, 2
         torch.manual_seed(123)  # Fixed seed for reproducible test
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(123)
 
         # Create simple inputs for manual computation
         cum_scores = torch.zeros(batch, T + 1, C)
@@ -223,6 +227,8 @@ class TestK2SpecializedBoundary:
         """
         batch, T, K, C = 1, 3, 2, 2
         torch.manual_seed(456)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(456)
 
         # Create simple inputs
         cum_scores = torch.zeros(batch, T + 1, C)
@@ -290,6 +296,8 @@ class TestK2SpecializedBoundary:
         """
         batch, T, K, C = 1, 4, 2, 2
         torch.manual_seed(789)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(789)
 
         # Create inputs where optimal path is clear
         cum_scores = torch.zeros(batch, T + 1, C)
@@ -498,6 +506,8 @@ class TestK3TritonBoundary:
         """K=3 partition >= K=2 partition (more paths to sum)."""
         batch, T, C = 2, 30, 4
         torch.manual_seed(999)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(999)
 
         # Create inputs on CUDA
         projected = torch.randn(batch, T, C, device="cuda")
@@ -543,6 +553,8 @@ class TestKBoundaryTransitions:
         """K=2 partition >= K=1 partition (more paths to sum)."""
         batch, T, C = 2, 30, 4
         torch.manual_seed(111)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(111)
 
         cum_scores, transition, _, lengths = create_streaming_inputs(
             batch, T, 2, C  # K doesn't matter for cum_scores/transition
@@ -573,6 +585,8 @@ class TestKBoundaryTransitions:
         """K=3 partition >= K=2 partition (more paths to sum)."""
         batch, T, C = 2, 30, 4
         torch.manual_seed(222)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(222)
 
         cum_scores, transition, _, lengths = create_streaming_inputs(batch, T, 3, C, device="cuda")
 
@@ -603,6 +617,8 @@ class TestKBoundaryTransitions:
         """Verify K=2 uses specialized path, K=3 uses Triton (on CUDA)."""
         batch, T, C = 2, 30, 4
         torch.manual_seed(333)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(333)
 
         cum_scores, transition, _, lengths = create_streaming_inputs(batch, T, 3, C, device="cuda")
 

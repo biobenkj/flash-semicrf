@@ -38,6 +38,8 @@ class TestTritonMarginalsBasic:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 4, 100, 8, 16
 
         # Setup - create cumulative scores
@@ -105,6 +107,8 @@ class TestTritonMarginalsBasic:
             pytest.skip("Triton not available")
 
         torch.manual_seed(123)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(123)
         batch, T_max, C, K = 4, 100, 6, 12
         lengths_list = [100, 80, 60, 40]
 
@@ -168,6 +172,8 @@ class TestTritonMarginalsEdgeCases:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 50, 4, 1
 
         scores = torch.randn(batch, T, C, device=cuda_device)
@@ -224,6 +230,8 @@ class TestTritonMarginalsEdgeCases:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 16, 4, 16
 
         scores = torch.randn(batch, T, C, device=cuda_device)
@@ -280,6 +288,8 @@ class TestTritonMarginalsEdgeCases:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 1, 100, 8, 16
 
         scores = torch.randn(batch, T, C, device=cuda_device)
@@ -336,6 +346,8 @@ class TestTritonMarginalsEdgeCases:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 200, 4, 64
 
         scores = torch.randn(batch, T, C, device=cuda_device)
@@ -393,6 +405,8 @@ class TestTritonMarginalsIntegration:
         from torch_semimarkov import UncertaintySemiMarkovCRFHead
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K, hidden_dim = 2, 100, 8, 16, 64
 
         model = UncertaintySemiMarkovCRFHead(
@@ -428,6 +442,8 @@ class TestTritonMarginalsIntegration:
         from torch_semimarkov import UncertaintySemiMarkovCRFHead
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K, hidden_dim = 2, 50, 6, 12, 32
 
         model = UncertaintySemiMarkovCRFHead(
@@ -472,6 +488,8 @@ class TestBackwardCompatibility:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 4, 50, 6, 12
 
         scores = torch.randn(batch, T, C, device=cuda_device)
@@ -533,6 +551,8 @@ class TestBackwardCompatibility:
             pytest.skip("Triton not available")
 
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
         batch, T, C, K = 4, 50, 6, 12
 
         scores = torch.randn(batch, T, C, device=cuda_device)

@@ -357,6 +357,8 @@ def main():
 
     # Set seed
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     print("=" * 60)
     print("Gradient Agreement Test for Streaming Semi-CRF")
