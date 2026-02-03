@@ -990,12 +990,18 @@ if HAS_TRITON:
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
+        # Extract dimensions to compute adaptive TILE_C early
+        batch, T_plus_1, C = cum_scores.shape
+
+        # Compute adaptive TILE_C based on number of classes
+        # Forces multiple tiles at small C to reduce atomic contention
+        tile_c = _compute_tile_c(C)
+
         # Validate cache if requested (include TILE_C for backward kernel)
         if validate_cache:
-            config = TritonConfig(num_warps=num_warps, tile_c=16)
+            config = TritonConfig(num_warps=num_warps, tile_c=tile_c)
             validate_triton_cache(config)
             update_cache_sentinel(config)
-        batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         K = duration_bias.shape[0]
         device = cum_scores.device
@@ -1131,12 +1137,8 @@ if HAS_TRITON:
         grad_ps_for_kernel = grad_proj_start if has_boundaries else grad_cum_scores
         grad_pe_for_kernel = grad_proj_end if has_boundaries else grad_cum_scores
 
-        # Compute adaptive TILE_C based on number of classes
-        # Forces multiple tiles at small C to reduce atomic contention
-        # (follows Flash Attention's BLOCK_HEADDIM pattern)
-        tile_c = _compute_tile_c(C)
-
         # Launch kernel with device context for multi-GPU support
+        # Note: tile_c was computed earlier for cache validation
         grid = (batch,)
         with torch.cuda.device(device):
             semi_crf_streaming_backward_kernel[grid](
