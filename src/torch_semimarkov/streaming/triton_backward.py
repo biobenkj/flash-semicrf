@@ -997,9 +997,12 @@ if HAS_TRITON:
         # Forces multiple tiles at small C to reduce atomic contention
         tile_c = _compute_tile_c(C)
 
-        # Validate cache if requested (include TILE_C for backward kernel)
+        # Validate cache if requested
+        # Note: We don't track tile_c in the sentinel because Triton's own cache
+        # handles it correctly via tl.constexpr. Using tile_c=0 as a sentinel value
+        # to indicate "adaptive mode - multiple TILE_C values expected"
         if validate_cache:
-            config = TritonConfig(num_warps=num_warps, tile_c=tile_c)
+            config = TritonConfig(num_warps=num_warps, tile_c=0)
             validate_triton_cache(config)
             update_cache_sentinel(config)
         T = T_plus_1 - 1
