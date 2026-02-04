@@ -491,22 +491,3 @@ class EntropySemiring(Semiring):
     @classmethod
     def prod(cls, xs, dim=-1):
         return xs.sum(dim)
-
-
-def TempMax(alpha):
-    class _TempMax(_BaseLog):
-        """
-        Implements a max forward, hot softmax backward.
-        """
-
-        @staticmethod
-        def sum(xs, dim=-1):
-            return torch.max(xs, dim=dim)[0]
-
-        @staticmethod
-        def sparse_sum(xs, dim=-1):
-            m, _ = torch.max(xs, dim=dim)
-            a = torch.softmax(alpha * xs, dim)
-            return m, (torch.zeros(a.shape[:-1]).long(), a)
-
-    return _TempMax

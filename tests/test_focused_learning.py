@@ -205,7 +205,7 @@ class TestCurriculumLearning:
         )
 
     def test_entropy_sorting(self, uncertainty_model):
-        """Test that samples can be sorted by entropy (easy → hard)."""
+        """Test that samples can be sorted by entropy (easy -> hard)."""
         batch, T = 5, 50
         hidden = torch.randn(batch, T, 32)
         lengths = torch.full((batch,), T)
@@ -234,7 +234,7 @@ class TestCurriculumLearning:
         # Compute entropy
         entropy = uncertainty_model.compute_entropy_streaming(hidden, lengths)
 
-        # Create curriculum schedule: easy → hard
+        # Create curriculum schedule: easy -> hard
         sorted_indices = torch.argsort(entropy)
 
         # Split into mini-batches of size 3

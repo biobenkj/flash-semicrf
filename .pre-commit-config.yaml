@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: sentinel-pipeline
+        name: Code Sentinel Pipeline
+        entry: .claude/skills/code-sentinel/hooks/pre-commit-anchors.sh
+        language: script
+        # Cover all traced source files:
+        # - streaming/ (triton, pytorch reference, autograd)
+        # - semimarkov.py (non-streaming backends, dispatch)
+        # - nn.py (CRF heads - future)
+        files: ^src/torch_semimarkov/
+        pass_filenames: false
+        verbose: true

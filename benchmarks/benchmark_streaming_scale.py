@@ -235,12 +235,12 @@ def print_scale_results(results: list[ScaleResult]):
     print("=" * 110)
 
     print(
-        f"\n{'Config':<18} | {'B×T×K':<18} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Throughput':>15} | {'Status':<8}"
+        f"\n{'Config':<18} | {'BxTxK':<18} | {'Forward':>10} | {'Backward':>10} | {'Total':>10} | {'Memory':>8} | {'Throughput':>15} | {'Status':<8}"
     )
     print("-" * 110)
 
     for r in results:
-        btk = f"{r.config.batch}×{r.config.T//1000}K×{r.config.K}"
+        btk = f"{r.config.batch}x{r.config.T//1000}Kx{r.config.K}"
         if r.status == "success":
             throughput_str = f"{r.throughput_positions_per_sec/1e6:.2f}M pos/s"
             print(

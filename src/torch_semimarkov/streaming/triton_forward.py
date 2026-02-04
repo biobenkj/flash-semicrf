@@ -12,6 +12,17 @@ computed on-the-fly from cumulative scores via prefix-sum decomposition:
     + \text{duration\_bias}[k, c_{\text{dst}}]
     + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
 
+.. warning::
+    **Minimum K Requirement**: These kernels require K >= 3 for correct operation.
+    The ring buffer architecture assumes meaningful separation between timesteps:
+
+    - **K=1**: Ring buffer aliasing (all t % 1 = 0). Use ``LinearCRFStreaming`` instead.
+    - **K=2**: Ring buffer fragility (alternating slots). Use ``SemiCRFK2Streaming`` instead.
+    - **K>=3**: Sufficient ring rotation for stable operation.
+
+    The dispatch logic in ``autograd.py`` automatically routes K<3 to specialized
+    PyTorch implementations. Do not call these kernels directly with K<3.
+
 Functions:
     launch_streaming_triton_kernel: Main entry point for launching Triton forward kernels.
 """
@@ -36,16 +47,16 @@ except ImportError:
 def _next_power_of_2(n: int) -> int:
     r"""_next_power_of_2(n) -> int
 
-    Return the smallest power of 2 greater than or equal to n.
+    Compute the smallest power of 2 greater than or equal to n.
 
-    This is used for padding tensor dimensions to powers of 2, which is
-    required for efficient Triton kernel execution.
+    Used for padding tensor dimensions to powers of 2, which is required
+    for efficient Triton kernel execution with vectorized loads.
 
     Args:
-        n (int): Input value.
+        n (int): Input value (must be positive for meaningful result).
 
     Returns:
-        int: Smallest power of 2 >= n.
+        int: Smallest power of 2 :math:`\geq n`. Returns 1 for :math:`n \leq 0`.
 
     Examples::
 
@@ -67,7 +78,8 @@ def _next_power_of_2(n: int) -> int:
 
 
 if HAS_TRITON:
-
+    # NOTE: @triton.autotune removed - corrupts ring buffer during multi-config benchmarking.
+    # See docs/debugging/DEBUGGING_NAN.md "Autotuning Limitations" for details.
     @triton.jit
     def semi_crf_streaming_scan_kernel(
         # Inputs
@@ -116,6 +128,10 @@ if HAS_TRITON:
         stride_ckpt_n,
         stride_ckpt_k,
         stride_ckpt_c,
+        # Log normalization checkpoints for numerical stability at extreme T
+        log_norm_ckpt_ptr,  # (batch, num_ckpts) - cumulative log normalization factors
+        stride_lnc_b,
+        stride_lnc_n,
     ):
         r"""Streaming Semi-CRF forward scan with on-the-fly edge computation (log semiring).
 
@@ -150,7 +166,9 @@ if HAS_TRITON:
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
         # Load sequence length
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast to int32 to match loop variable type from tl.range (int32)
+        # Avoids silent comparison failures between int32 and int64
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
         # Base pointers
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
@@ -182,18 +200,23 @@ if HAS_TRITON:
         # Track final alpha for each batch element
         final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
+        # Cumulative log normalization factor for numerical stability at extreme T
+        # This tracks the total shift applied to alpha values at checkpoint boundaries
+        accum_log_norm = 0.0
+
         # Main forward loop: t = 1, 2, ..., T
         for t in tl.range(1, T + 1):
             # Include t == seq_len to compute alpha at final position
-            active = t <= seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
 
             # Accumulate alpha[t] = logsumexp over (k, c_src)
             alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-            # Loop over valid segment durations k = 1, 2, ..., min(K-1, t)
-            # tl.maximum ensures K=1 processes at least one duration
-            for k in tl.range(1, tl.maximum(K, 2)):
-                k_valid = (k <= t) & (k <= K - 1)
+            # Loop over valid segment durations k = 1, 2, ..., min(K, t)
+            for k in tl.range(1, K + 1):
+                # Duration k uses index k-1 in duration_bias
+                k_valid = (k <= t) & (k <= K)
                 start_pos = t - k
 
                 # Ring index for alpha[start_pos]
@@ -224,9 +247,10 @@ if HAS_TRITON:
                 # Content score = cum_scores[t, c_dst] - cum_scores[start, c_dst]
                 content_score = cum_end - cum_start  # (C_PAD,)
 
-                # Load duration bias
+                # Load duration bias: duration k uses index k-1
+                dur_idx = k - 1
                 dur_bias = tl.load(
-                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )  # (C_PAD,)
@@ -256,16 +280,17 @@ if HAS_TRITON:
                 # segment_score is (C_PAD,), expand to (C_PAD, 1) for c_dst
                 # transition_block is (C_PAD, C_PAD) as transition.T
 
-                # For duration-dependent transitions, load transition[k] inside the loop
+                # For duration-dependent transitions, load transition[dur_idx] inside the loop
+                # Duration k uses index k-1 (same convention as PyTorch reference)
                 if HAS_DURATION_TRANSITIONS:
                     transition_block = tl.load(
                         transition_ptr
-                        + k * stride_tr_k
+                        + dur_idx * stride_tr_k
                         + c_dst_idx * stride_tr_dst
                         + c_src_idx * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
-                    )  # (C_PAD, C_PAD) - transition[k].T
+                    )  # (C_PAD, C_PAD) - transition[dur_idx].T
 
                 edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
 
@@ -277,19 +302,28 @@ if HAS_TRITON:
                 scores = tl.where(c_mask_2d, scores, NEG_INF)
 
                 # Logsumexp over c_src (axis=1) -> (C_PAD,)
+                # Guard against all-NEG_INF case to prevent undefined arithmetic
+                # Flash Attention pattern: no epsilon needed inside log
+                # The NEG_INF guard handles the zero case
                 max_scores = tl.max(scores, axis=1)
-                score_for_k = max_scores + tl.log(
-                    tl.sum(tl.exp(scores - max_scores[:, None]), axis=1)
-                )
+                is_all_neginf = max_scores < (NEG_INF + 1.0)
+                max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
+                log_sum_exp = tl.log(tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1))
+                score_for_k = tl.where(is_all_neginf, NEG_INF, max_scores + log_sum_exp)
 
                 # Mask invalid durations and labels
                 score_for_k = tl.where(k_valid & c_mask, score_for_k, NEG_INF)
 
                 # Accumulate into alpha_t via logsumexp
+                # Guard against both inputs being NEG_INF to prevent undefined arithmetic
+                # Flash Attention pattern: no epsilon needed
                 max_alpha = tl.maximum(alpha_t, score_for_k)
-                alpha_t = max_alpha + tl.log(
-                    tl.exp(alpha_t - max_alpha) + tl.exp(score_for_k - max_alpha)
+                is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (score_for_k < (NEG_INF + 1.0))
+                max_alpha_safe = tl.where(is_both_neginf, 0.0, max_alpha)
+                log_sum_exp_acc = tl.log(
+                    tl.exp(alpha_t - max_alpha_safe) + tl.exp(score_for_k - max_alpha_safe)
                 )
+                alpha_t = tl.where(is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc)
 
             # Mask inactive sequences
             alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
@@ -307,15 +341,61 @@ if HAS_TRITON:
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
-                # Save entire ring buffer to checkpoint
+                # ===== NORMALIZATION STEP (for numerical stability at extreme T) =====
+                # Following Flash Attention pattern: normalize at checkpoints to prevent
+                # alpha values from growing unbounded (e.g., to ±250,000 at T=100k)
+                #
+                # CRITICAL: Only normalize for ACTIVE sequences (t <= seq_len)
+                # For ended sequences, we must NOT update accum_log_norm or the
+                # partition function will be wrong (phantom shifts would be added)
+
+                # 1. Find max alpha value for normalization (over valid C only)
+                #    For inactive sequences, use NEG_INF to produce shift=0
+                alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
+                max_val = tl.max(alpha_for_norm)
+
+                # Guard against all-NEG_INF case (inactive sequence or numerical issue)
+                # WORKAROUND: The comparison `max_val < (NEG_INF + 1.0)` fails silently in Triton
+                # for variable-length sequences due to unclear type/comparison issues.
+                # Instead, use `active` directly to determine if we should apply shift.
+                shift = tl.where(active, max_val, 0.0)
+
+                # 2. Update cumulative normalization factor
+                #    shift is 0 for inactive sequences, so no phantom updates
+                accum_log_norm = accum_log_norm + shift
+
+                # 3. CRITICAL: Update alpha_t register BEFORE final_alpha capture
+                #    This ensures consistency if seq_len falls on a checkpoint boundary
+                #    For inactive sequences, shift=0 so no change
+                alpha_t = alpha_t - shift
+
+                # 4. Normalize ALL K slots in ring buffer
+                #    The ring buffer is used for K more iterations after checkpoint,
+                #    so all slots must be shifted to maintain consistency
+                #    Only update for active sequences
+                for k_norm in tl.range(0, K):
+                    ring_val = tl.load(
+                        ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
+                        mask=c_mask,
+                        other=NEG_INF,
+                    )
+                    ring_val_shifted = ring_val - shift
+                    tl.store(
+                        ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
+                        ring_val_shifted,
+                        mask=active & c_mask,  # Only update for active sequences
+                    )
+
+                # 5. Save normalized ring buffer to checkpoint
+                #    Only save for active sequences with valid checkpoint index
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
                     )
-                    # Only save if checkpoint index is valid
-                    save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
                         ring_ckpt_base
                         + ckpt_idx * stride_ckpt_n
@@ -325,18 +405,42 @@ if HAS_TRITON:
                         mask=save_mask,
                     )
 
+                # 6. Save cumulative log normalization factor
+                #    Only save for active sequences
+                if (ckpt_idx < NUM_CKPTS) & active:
+                    tl.store(
+                        log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n,
+                        accum_log_norm,
+                    )
+
             # Capture final alpha at sequence end (t == seq_len)
             # At iteration t, alpha_t represents segments ending at position t-1
             # For sequence of length L, we need alpha at t=L (segments ending at L-1)
-            is_final = t == seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
 
         # Final reduction: logsumexp over labels
+        # Guard against all-NEG_INF case to prevent undefined arithmetic
+        # Flash Attention pattern: no epsilon needed inside log
+        # The NEG_INF guard handles the zero case
         final_alpha_masked = tl.where(c_mask, final_alpha, NEG_INF)
         max_val = tl.max(final_alpha_masked, axis=0)
-        exp_fa = tl.where(c_mask, tl.exp(final_alpha - max_val), 0.0)
+        is_final_neginf = max_val < (NEG_INF + 1.0)
+        max_val_safe = tl.where(is_final_neginf, 0.0, max_val)
+        exp_fa = tl.where(c_mask, tl.exp(final_alpha - max_val_safe), 0.0)
         sum_exp = tl.sum(exp_fa, axis=0)
-        partition = max_val + tl.log(sum_exp)
+        raw_partition = tl.where(is_final_neginf, NEG_INF, max_val + tl.log(sum_exp))
+
+        # Add back cumulative normalization to get true partition function
+        # final_alpha contains normalized values; accum_log_norm contains the total shift
+        partition = raw_partition + accum_log_norm
+
+        # DEBUG: Print partition (log_Z) for T=100k diagnostic
+        # Uncomment these lines to diagnose numerical stability at extreme scale
+        # if batch_idx == 0:
+        #     tl.device_print("FWD log_Z=", partition)
+        #     tl.device_print("FWD max_final_alpha=", max_val)
 
         # Store result
         tl.store(out_ptr + batch_idx, partition)
@@ -381,6 +485,10 @@ if HAS_TRITON:
         stride_ckpt_n,
         stride_ckpt_k,
         stride_ckpt_c,
+        # Log normalization checkpoints (not used for max semiring, but kept for API consistency)
+        log_norm_ckpt_ptr,
+        stride_lnc_b,
+        stride_lnc_n,
     ):
         r"""Streaming Semi-CRF forward scan with max semiring (Viterbi decoding).
 
@@ -404,7 +512,8 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
-        seq_len = tl.load(lengths_ptr + batch_idx)
+        # Cast to int32 to match loop variable type from tl.range
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
         ring_base = ring_ptr + batch_idx * stride_ring_b
@@ -432,12 +541,14 @@ if HAS_TRITON:
 
         for t in tl.range(1, T + 1):
             # Include t == seq_len to compute alpha at final position
-            active = t <= seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
             alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-            # tl.maximum ensures K=1 processes at least one duration
-            for k in tl.range(1, tl.maximum(K, 2)):
-                k_valid = (k <= t) & (k <= K - 1)
+            # Loop over valid segment durations k = 1, 2, ..., min(K, t)
+            for k in tl.range(1, K + 1):
+                # Duration k uses index k-1 in duration_bias
+                k_valid = (k <= t) & (k <= K)
                 start_pos = t - k
                 ring_k_idx = start_pos % K
 
@@ -461,8 +572,10 @@ if HAS_TRITON:
                 )
 
                 content_score = cum_end - cum_start
+                # Duration k uses index k-1
+                dur_idx = k - 1
                 dur_bias = tl.load(
-                    duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
@@ -486,16 +599,17 @@ if HAS_TRITON:
                     )
                     segment_score = segment_score + start_score + end_score
 
-                # For duration-dependent transitions, load transition[k] inside the loop
+                # For duration-dependent transitions, load transition[dur_idx] inside the loop
+                # Duration k uses index k-1 (same convention as PyTorch reference)
                 if HAS_DURATION_TRANSITIONS:
                     transition_block = tl.load(
                         transition_ptr
-                        + k * stride_tr_k
+                        + dur_idx * stride_tr_k
                         + c_dst_idx * stride_tr_dst
                         + c_src_idx * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
-                    )  # (C_PAD, C_PAD) - transition[k].T
+                    )  # (C_PAD, C_PAD) - transition[dur_idx].T
 
                 edge_block = segment_score[:, None] + transition_block
 
@@ -520,6 +634,7 @@ if HAS_TRITON:
             )
 
             # Save checkpoint at interval boundaries
+            # Only save for active sequences to avoid stale data
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
@@ -529,7 +644,8 @@ if HAS_TRITON:
                         mask=c_mask,
                         other=NEG_INF,
                     )
-                    save_mask = (ckpt_idx < NUM_CKPTS) & c_mask
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
                         ring_ckpt_base
                         + ckpt_idx * stride_ckpt_n
@@ -542,7 +658,8 @@ if HAS_TRITON:
             # Capture final alpha at sequence end (t == seq_len)
             # At iteration t, alpha_t represents segments ending at position t-1
             # For sequence of length L, we need alpha at t=L (segments ending at L-1)
-            is_final = t == seq_len
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
             final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
 
         # Max semiring: max over labels
@@ -550,6 +667,242 @@ if HAS_TRITON:
         partition = tl.max(final_alpha_masked, axis=0)
 
         tl.store(out_ptr + batch_idx, partition)
+
+    @triton.jit
+    def semi_crf_streaming_scan_kernel_max_bp(
+        # Same signature as max kernel, plus backpointer outputs
+        cum_scores_ptr,
+        transition_ptr,  # (C, C) or (K, C, C)
+        duration_bias_ptr,
+        lengths_ptr,
+        # Boundary projections (optional)
+        proj_start_ptr,
+        proj_end_ptr,
+        out_ptr,
+        ring_ptr,  # (batch, K, C_PAD) - live ring buffer
+        ring_ckpt_ptr,
+        # Backpointer outputs
+        bp_k_ptr,  # (batch, T, C) - best duration for each (t, c_dest)
+        bp_c_ptr,  # (batch, T, C) - best source label for each (t, c_dest)
+        final_labels_ptr,  # (batch,) - best final label
+        batch_size,
+        T: tl.constexpr,
+        K: tl.constexpr,
+        C: tl.constexpr,
+        C_PAD: tl.constexpr,
+        CHECKPOINT_INTERVAL: tl.constexpr,
+        NUM_CKPTS: tl.constexpr,
+        HAS_BOUNDARIES: tl.constexpr,
+        HAS_DURATION_TRANSITIONS: tl.constexpr,
+        stride_cs_b,
+        stride_cs_t,
+        stride_cs_c,
+        stride_tr_k,
+        stride_tr_src,
+        stride_tr_dst,
+        stride_db_k,
+        stride_db_c,
+        stride_ps_b,
+        stride_ps_t,
+        stride_ps_c,
+        stride_ring_b,
+        stride_ring_k,
+        stride_ring_c,
+        stride_ckpt_b,
+        stride_ckpt_n,
+        stride_ckpt_k,
+        stride_ckpt_c,
+        stride_bp_b,
+        stride_bp_t,
+        stride_bp_c,
+    ):
+        r"""Streaming Semi-CRF forward scan with max semiring and backpointer tracking.
+
+        Same as :func:`semi_crf_streaming_scan_kernel_max` but also outputs
+        backpointers for O(T) traceback during Viterbi decoding.
+
+        Additional outputs:
+            bp_k: (batch, T, C) - best duration k for each (t, c_dest)
+            bp_c: (batch, T, C) - best source label c_src for each (t, c_dest)
+            final_labels: (batch,) - argmax of final alpha (best final label)
+        """
+        NEG_INF: tl.constexpr = -1e9
+
+        batch_idx = tl.program_id(0)
+        if batch_idx >= batch_size:
+            return
+
+        c_idx = tl.arange(0, C_PAD)
+        c_mask = c_idx < C
+
+        c_dst_idx = tl.arange(0, C_PAD)[:, None]
+        c_src_idx = tl.arange(0, C_PAD)[None, :]
+        c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
+
+        # Cast to int32 to match loop variable type from tl.range
+        seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
+
+        cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
+        ring_base = ring_ptr + batch_idx * stride_ring_b
+        ring_ckpt_base = ring_ckpt_ptr + batch_idx * stride_ckpt_b
+        bp_base = batch_idx * stride_bp_b
+
+        if HAS_BOUNDARIES:
+            proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
+            proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
+
+        if not HAS_DURATION_TRANSITIONS:
+            transition_block = tl.load(
+                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                mask=c_mask_2d,
+                other=0.0,
+            )
+
+        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+
+        for t in tl.range(1, T + 1):
+            # Cast t to int32 to match seq_len type for consistent comparison
+            active = t.to(tl.int32) <= seq_len
+            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+
+            # Initialize backpointer tracking for this timestep
+            best_k_t = tl.zeros([C_PAD], dtype=tl.int32)
+            best_c_src_t = tl.zeros([C_PAD], dtype=tl.int32)
+
+            # Loop over valid segment durations k = 1, 2, ..., min(K, t)
+            for k in tl.range(1, K + 1):
+                # Duration k uses index k-1 in duration_bias
+                k_valid = (k <= t) & (k <= K)
+                start_pos = t - k
+                ring_k_idx = start_pos % K
+
+                alpha_prev = tl.load(
+                    ring_base + ring_k_idx * stride_ring_k + c_idx * stride_ring_c,
+                    mask=active & k_valid & c_mask,
+                    other=NEG_INF,
+                )
+
+                cum_end = tl.load(
+                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                    mask=active & k_valid & c_mask,
+                    other=0.0,
+                )
+
+                cum_start = tl.load(
+                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                    mask=active & k_valid & c_mask,
+                    other=0.0,
+                )
+
+                content_score = cum_end - cum_start
+                dur_idx = k - 1
+                dur_bias = tl.load(
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                    mask=active & k_valid & c_mask,
+                    other=0.0,
+                )
+                segment_score = content_score + dur_bias
+
+                if HAS_BOUNDARIES:
+                    start_score = tl.load(
+                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    end_pos_boundary = t - 1
+                    end_score = tl.load(
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        mask=active & k_valid & c_mask,
+                        other=0.0,
+                    )
+                    segment_score = segment_score + start_score + end_score
+
+                # For duration-dependent transitions, load transition[dur_idx] inside the loop
+                # Duration k uses index k-1 (same convention as PyTorch reference)
+                if HAS_DURATION_TRANSITIONS:
+                    transition_block = tl.load(
+                        transition_ptr
+                        + dur_idx * stride_tr_k
+                        + c_dst_idx * stride_tr_dst
+                        + c_src_idx * stride_tr_src,
+                        mask=c_mask_2d,
+                        other=0.0,
+                    )
+
+                edge_block = segment_score[:, None] + transition_block
+
+                scores = alpha_prev[None, :] + edge_block
+                scores = tl.where(c_mask_2d, scores, NEG_INF)
+
+                # Max over c_src WITH argmax tracking
+                score_for_k = tl.max(scores, axis=1)
+                argmax_c_src = tl.argmax(scores, axis=1)
+                score_for_k = tl.where(k_valid & c_mask, score_for_k, NEG_INF)
+
+                # Track which k wins for each c_dest
+                better_mask = score_for_k > alpha_t
+                best_k_t = tl.where(better_mask, k, best_k_t)
+                best_c_src_t = tl.where(better_mask, argmax_c_src, best_c_src_t)
+
+                # Max over k
+                alpha_t = tl.maximum(alpha_t, score_for_k)
+
+            alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
+
+            # Store backpointers at position t-1 (0-indexed)
+            bp_pos = t - 1
+            tl.store(
+                bp_k_ptr + bp_base + bp_pos * stride_bp_t + c_idx * stride_bp_c,
+                best_k_t,
+                mask=active & c_mask,
+            )
+            tl.store(
+                bp_c_ptr + bp_base + bp_pos * stride_bp_t + c_idx * stride_bp_c,
+                best_c_src_t,
+                mask=active & c_mask,
+            )
+
+            # Store to live ring buffer
+            ring_t_idx = t % K
+            tl.store(
+                ring_base + ring_t_idx * stride_ring_k + c_idx * stride_ring_c,
+                alpha_t,
+                mask=active & c_mask,
+            )
+
+            # Save checkpoint at interval boundaries
+            # Only save for active sequences to avoid stale data
+            should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
+            ckpt_idx = t // CHECKPOINT_INTERVAL
+            if should_checkpoint:
+                for k_save in tl.range(0, K):
+                    ring_val = tl.load(
+                        ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
+                        mask=c_mask,
+                        other=NEG_INF,
+                    )
+                    # Only save if checkpoint index is valid AND sequence is active
+                    save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
+                    tl.store(
+                        ring_ckpt_base
+                        + ckpt_idx * stride_ckpt_n
+                        + k_save * stride_ckpt_k
+                        + c_idx * stride_ckpt_c,
+                        ring_val,
+                        mask=save_mask,
+                    )
+
+            # Cast t to int32 to match seq_len type for consistent comparison
+            is_final = t.to(tl.int32) == seq_len
+            final_alpha = tl.where(is_final & c_mask, alpha_t, final_alpha)
+
+        # Max over labels with argmax for final label
+        final_alpha_masked = tl.where(c_mask, final_alpha, NEG_INF)
+        partition = tl.max(final_alpha_masked, axis=0)
+        final_label = tl.argmax(final_alpha_masked, axis=0)
+
+        tl.store(out_ptr + batch_idx, partition)
+        tl.store(final_labels_ptr + batch_idx, final_label)
 
     def launch_streaming_triton_kernel(
         cum_scores: torch.Tensor,
@@ -561,8 +914,10 @@ if HAS_TRITON:
         checkpoint_interval: int = None,
         proj_start: torch.Tensor = None,
         proj_end: torch.Tensor = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None) -> tuple[Tensor, Tensor, int]
+        num_warps: int = 4,
+        validate_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+        r"""launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K, semiring="log", checkpoint_interval=None, proj_start=None, proj_end=None, num_warps=4, validate_cache=True) -> tuple[Tensor, Tensor, int, Tensor]
 
         Launch the streaming Triton kernel with proper buffer allocation.
 
@@ -584,15 +939,35 @@ if HAS_TRITON:
                 :math:`(\text{batch}, T, C)`. Default: ``None``
             proj_end (Tensor, optional): End boundary scores of shape
                 :math:`(\text{batch}, T, C)`. Default: ``None``
+            num_warps (int, optional): Number of warps per block for Triton kernel.
+                Higher values increase parallelism but also register pressure.
+                Recommended range: 2-8. Default: ``4``
+            validate_cache (bool, optional): If True, validate Triton cache
+                consistency and warn on config changes. Default: ``True``
 
         Returns:
-            tuple[Tensor, Tensor, int]: Tuple of:
-                - **partition** (Tensor): Partition function values of shape
-                  :math:`(\text{batch},)`.
-                - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
-                  :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
-                - **checkpoint_interval** (int): Actual interval used.
+            tuple[Tensor, Tensor, int, Tensor]: Tuple of:
+                - **partition** (Tensor): Partition function (log-space) or Viterbi scores
+                  (max-space) of shape :math:`(\text{batch},)`.
+                - **ring_checkpoints** (Tensor): Saved ring buffer states for backward pass
+                  of shape :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+                - **checkpoint_interval** (int): Actual checkpoint interval used.
+                - **log_norm_checkpoints** (Tensor): Cumulative log normalization factors
+                  at each checkpoint of shape :math:`(\text{batch}, \text{num\_ckpts})`.
+
+        See Also:
+            :func:`launch_streaming_triton_backward`: Backward pass that uses checkpoints
+                from this forward pass.
+            :func:`launch_streaming_triton_kernel_max_bp`: Max-semiring variant with
+                backpointer tracking for Viterbi decoding.
         """
+        from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
+
+        # Validate cache if requested
+        if validate_cache:
+            config = TritonConfig(num_warps=num_warps)
+            validate_triton_cache(config)
+            update_cache_sentinel(config)
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         device = cum_scores.device
@@ -604,7 +979,7 @@ if HAS_TRITON:
         else:
             checkpoint_interval = max(checkpoint_interval, K)
 
-        num_checkpoints = (T + checkpoint_interval - 1) // checkpoint_interval + 1
+        num_checkpoints = (T + checkpoint_interval - 1) // checkpoint_interval
 
         # Pad C to next power of 2
         C_PAD = _next_power_of_2(C)
@@ -612,7 +987,7 @@ if HAS_TRITON:
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
 
-        # Determine if duration-dependent transitions (Phase 4A)
+        # Determine if duration-dependent transitions
         has_duration_transitions = transition.ndim == 3
 
         # Ensure inputs are contiguous
@@ -647,6 +1022,11 @@ if HAS_TRITON:
         )
         ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 
+        # Log normalization checkpoint storage for numerical stability at extreme T
+        # Stores cumulative log normalization factor at each checkpoint boundary
+        # Memory cost: negligible (14 * batch * 4 bytes at T=100k)
+        log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
+
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
 
@@ -660,6 +1040,7 @@ if HAS_TRITON:
         stride_db_k, stride_db_c = duration_bias.stride()
         stride_ring_b, stride_ring_k, stride_ring_c = ring_buffer.stride()
         stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_checkpoints.stride()
+        stride_lnc_b, stride_lnc_n = log_norm_checkpoints.stride()
 
         # Launch kernel with device context for multi-GPU support
         grid = (batch,)
@@ -706,9 +1087,232 @@ if HAS_TRITON:
                 stride_ckpt_n,
                 stride_ckpt_k,
                 stride_ckpt_c,
+                log_norm_checkpoints,
+                stride_lnc_b,
+                stride_lnc_n,
+                num_warps=num_warps,
             )
 
         # Trim padding from checkpoints for return
         ring_checkpoints = ring_checkpoints[:, :, :, :C]
 
-        return partition, ring_checkpoints, checkpoint_interval
+        return partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints
+
+    def launch_streaming_triton_kernel_max_bp(
+        cum_scores: torch.Tensor,
+        transition: torch.Tensor,
+        duration_bias: torch.Tensor,
+        lengths: torch.Tensor,
+        K: int,
+        checkpoint_interval: int = None,
+        proj_start: torch.Tensor = None,
+        proj_end: torch.Tensor = None,
+        num_warps: int = 4,
+        validate_cache: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        r"""Launch Triton max kernel with backpointer tracking for Viterbi decoding.
+
+        This function launches the backpointer-enabled max kernel for O(T) traceback.
+
+        Args:
+            cum_scores (Tensor): Cumulative projected scores of shape
+                :math:`(\text{batch}, T+1, C)`.
+            transition (Tensor): Transition scores of shape :math:`(C, C)` for
+                static transitions, or :math:`(K, C, C)` for duration-dependent.
+            duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            K (int): Maximum segment duration.
+            checkpoint_interval (int, optional): Interval for saving ring buffer.
+                If ``None``, uses :math:`\sqrt{T \times K}`. Default: ``None``
+            proj_start (Tensor, optional): Start boundary scores. Default: ``None``
+            proj_end (Tensor, optional): End boundary scores. Default: ``None``
+            num_warps (int, optional): Number of warps per block for Triton kernel.
+                Higher values increase parallelism but also register pressure.
+                Recommended range: 2-8. Default: ``4``
+            validate_cache (bool, optional): If True, validate Triton cache
+                consistency and warn on config changes. Default: ``True``
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]: Tuple of:
+                - **viterbi_scores** (Tensor): Best path scores of shape
+                  :math:`(\text{batch},)`.
+                - **bp_k** (Tensor): Best duration backpointers for each
+                  :math:`(t, c_{\text{dest}})` of shape :math:`(\text{batch}, T, C)`.
+                - **bp_c** (Tensor): Best source label backpointers for each
+                  :math:`(t, c_{\text{dest}})` of shape :math:`(\text{batch}, T, C)`.
+                - **final_labels** (Tensor): Best final label (argmax of final alpha)
+                  of shape :math:`(\text{batch},)`.
+
+        See Also:
+            :func:`launch_streaming_triton_kernel`: Log-semiring variant for computing
+                partition function and gradients.
+        """
+        from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
+
+        # Validate cache if requested
+        if validate_cache:
+            config = TritonConfig(num_warps=num_warps)
+            validate_triton_cache(config)
+            update_cache_sentinel(config)
+        batch, T_plus_1, C = cum_scores.shape
+        T = T_plus_1 - 1
+        device = cum_scores.device
+        dtype = cum_scores.dtype
+
+        # Compute checkpoint interval if not provided
+        if checkpoint_interval is None:
+            checkpoint_interval = _compute_checkpoint_interval(T, K)
+        else:
+            checkpoint_interval = max(checkpoint_interval, K)
+
+        num_checkpoints = (T + checkpoint_interval - 1) // checkpoint_interval
+
+        # Pad C to next power of 2
+        C_PAD = _next_power_of_2(C)
+
+        # Determine if boundaries are provided
+        has_boundaries = proj_start is not None and proj_end is not None
+
+        # Determine if duration-dependent transitions
+        has_duration_transitions = transition.ndim == 3
+
+        # Ensure inputs are contiguous
+        cum_scores = cum_scores.contiguous()
+        transition = transition.contiguous()
+        duration_bias = duration_bias.contiguous()
+        lengths = lengths.contiguous()
+
+        # Handle boundary projections
+        if has_boundaries:
+            proj_start = proj_start.contiguous()
+            proj_end = proj_end.contiguous()
+            stride_ps_b, stride_ps_t, stride_ps_c = proj_start.stride()
+        else:
+            proj_start = cum_scores[:, :T, :]
+            proj_end = cum_scores[:, :T, :]
+            stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0
+
+        # Allocate outputs
+        partition = torch.empty(batch, device=device, dtype=dtype)
+        bp_k = torch.zeros((batch, T, C), device=device, dtype=torch.int32)
+        bp_c = torch.zeros((batch, T, C), device=device, dtype=torch.int32)
+        final_labels = torch.zeros(batch, device=device, dtype=torch.int64)
+
+        # Ring buffer
+        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
+        ring_buffer[:, 0, :C] = 0.0
+
+        # Checkpoint storage
+        ring_checkpoints = torch.full(
+            (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
+        )
+        ring_checkpoints[:, 0, 0, :C] = 0.0
+
+        # Get strides
+        stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()
+
+        if has_duration_transitions:
+            stride_tr_k, stride_tr_src, stride_tr_dst = transition.stride()
+        else:
+            stride_tr_k = 0
+            stride_tr_src, stride_tr_dst = transition.stride()
+
+        stride_db_k, stride_db_c = duration_bias.stride()
+        stride_ring_b, stride_ring_k, stride_ring_c = ring_buffer.stride()
+        stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_checkpoints.stride()
+        stride_bp_b, stride_bp_t, stride_bp_c = bp_k.stride()
+
+        # Launch kernel
+        grid = (batch,)
+        with torch.cuda.device(device):
+            semi_crf_streaming_scan_kernel_max_bp[grid](
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                proj_start,
+                proj_end,
+                partition,
+                ring_buffer,
+                ring_checkpoints,
+                bp_k,
+                bp_c,
+                final_labels,
+                batch,
+                T,
+                K,
+                C,
+                C_PAD,
+                checkpoint_interval,
+                num_checkpoints,
+                has_boundaries,
+                has_duration_transitions,
+                stride_cs_b,
+                stride_cs_t,
+                stride_cs_c,
+                stride_tr_k,
+                stride_tr_src,
+                stride_tr_dst,
+                stride_db_k,
+                stride_db_c,
+                stride_ps_b,
+                stride_ps_t,
+                stride_ps_c,
+                stride_ring_b,
+                stride_ring_k,
+                stride_ring_c,
+                stride_ckpt_b,
+                stride_ckpt_n,
+                stride_ckpt_k,
+                stride_ckpt_c,
+                stride_bp_b,
+                stride_bp_t,
+                stride_bp_c,
+                num_warps=num_warps,
+            )
+
+        return partition, bp_k, bp_c, final_labels
+
+    def semi_crf_streaming_viterbi_triton(
+        cum_scores: torch.Tensor,
+        transition: torch.Tensor,
+        duration_bias: torch.Tensor,
+        lengths: torch.Tensor,
+        K: int,
+        proj_start: torch.Tensor = None,
+        proj_end: torch.Tensor = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        r"""Triton-accelerated Viterbi forward pass with backpointer tracking.
+
+        This is the GPU-accelerated equivalent of
+        :func:`semi_crf_streaming_viterbi_with_backpointers` from pytorch_reference.py.
+
+        Args:
+            cum_scores (Tensor): Cumulative projected scores of shape
+                :math:`(\text{batch}, T+1, C)`.
+            transition (Tensor): Transition scores of shape :math:`(C, C)` or
+                :math:`(K, C, C)`.
+            duration_bias (Tensor): Duration bias of shape :math:`(K, C)`.
+            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
+            K (int): Maximum segment duration.
+            proj_start (Tensor, optional): Start boundary scores. Default: ``None``
+            proj_end (Tensor, optional): End boundary scores. Default: ``None``
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]: Same as
+                :func:`semi_crf_streaming_viterbi_with_backpointers`:
+                - **viterbi_scores** (Tensor): Best path scores ``(batch,)``.
+                - **bp_k** (Tensor): Best durations ``(batch, T, C)``.
+                - **bp_c** (Tensor): Best source labels ``(batch, T, C)``.
+                - **final_labels** (Tensor): Best final labels ``(batch,)``.
+        """
+        return launch_streaming_triton_kernel_max_bp(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            checkpoint_interval=None,
+            proj_start=proj_start,
+            proj_end=proj_end,
+        )

@@ -5,34 +5,12 @@ import torch
 from torch import Tensor
 
 from .semirings import LogSemiring
+from .validation import validate_cum_scores, validate_labels, validate_lengths
 
 
 @dataclass
 class Segment:
-    r"""A segment in a semi-Markov segmentation.
-
-    Represents a contiguous segment with a label in a sequence. Used by
-    :meth:`~torch_semimarkov.nn.SemiMarkovCRFHead.decode_with_traceback` to
-    return the optimal segmentation.
-
-    Args:
-        start (int): Start position (inclusive).
-        end (int): End position (inclusive).
-        label (int): Segment label (class index).
-        score (float, optional): Segment score contribution. Default: ``0.0``
-
-    Attributes:
-        start (int): Start position (inclusive).
-        end (int): End position (inclusive).
-        label (int): Segment label (class index).
-        score (float): Segment score contribution.
-
-    Examples::
-
-        >>> seg = Segment(start=0, end=4, label=2, score=1.5)
-        >>> seg.duration
-        5
-    """
+    """A segment in a semi-Markov segmentation: [start, end] with label."""
 
     start: int
     end: int
@@ -41,134 +19,41 @@ class Segment:
 
     @property
     def duration(self) -> int:
-        r"""Segment duration (number of positions).
-
-        Returns:
-            int: Duration computed as ``end - start + 1``.
-        """
         return self.end - self.start + 1
 
 
 @dataclass
 class ViterbiResult:
-    r"""Result from Viterbi decoding with traceback.
-
-    Returned by :meth:`~torch_semimarkov.nn.SemiMarkovCRFHead.decode_with_traceback`
-    containing both the best scores and the segment paths.
-
-    Args:
-        scores (Tensor): Best segmentation scores of shape :math:`(\text{batch},)`.
-        segments (List[List[Segment]]): Per-batch list of segments forming the
-            optimal segmentation. Each inner list contains :class:`Segment` objects
-            in order from start to end.
-
-    Attributes:
-        scores (Tensor): Best segmentation scores of shape :math:`(\text{batch},)`.
-        segments (List[List[Segment]]): Per-batch list of optimal segments.
-
-    Examples::
-
-        >>> result = crf.decode_with_traceback(hidden, lengths)
-        >>> print(f"Score: {result.scores[0].item():.2f}")
-        >>> for seg in result.segments[0]:
-        ...     print(f"  [{seg.start}, {seg.end}] label={seg.label}")
-    """
+    """Viterbi result: scores (batch,) and segments (per-batch list of Segment)."""
 
     scores: Tensor
     segments: list[list[Segment]]
 
 
-class Chart:
-    r"""Dynamic programming chart for structured prediction algorithms.
-
-    Provides a tensor wrapper with automatic semiring initialization and
-    gradient tracking for use in DP algorithms.
-
-    Args:
-        size (tuple): Shape of the chart (excluding semiring dimension).
-        potentials (Tensor): Reference tensor for dtype and device.
-        semiring: Semiring class defining the algebraic operations.
-
-    Attributes:
-        data (Tensor): The chart tensor of shape :math:`(\text{ssize},) + \text{size}`.
-        grad (Tensor): Gradient accumulator tensor (same shape as data).
-
-    Examples::
-
-        >>> from torch_semimarkov.semirings import LogSemiring
-        >>> potentials = torch.randn(2, 10, 4, 4)
-        >>> chart = Chart((2, 10, 4), potentials, LogSemiring)
-        >>> chart.data.shape
-        torch.Size([1, 2, 10, 4])
-    """
-
-    def __init__(self, size, potentials, semiring):
-        c = torch.zeros(
-            *((semiring.size(),) + size), dtype=potentials.dtype, device=potentials.device
-        )
-        c[:] = semiring.zero.view((semiring.size(),) + len(size) * (1,))
-
-        self.data = c
-        self.grad = self.data.detach().clone().fill_(0.0)
-
-    def __getitem__(self, ind):
-        r"""Index into chart data, preserving semiring and batch dimensions.
-
-        The first two dimensions (semiring and batch) are automatically included.
-
-        Args:
-            ind (tuple): Index into remaining dimensions.
-
-        Returns:
-            Tensor: Sliced chart data.
-        """
-        slice_all = slice(None)
-        return self.data[(slice_all, slice_all) + ind]
-
-    def __setitem__(self, ind, new):
-        r"""Set chart data at given index, preserving semiring and batch dimensions.
-
-        Args:
-            ind (tuple): Index into remaining dimensions.
-            new (Tensor): Values to assign.
-        """
-        slice_all = slice(None)
-        self.data[(slice_all, slice_all) + ind] = new
-
-
 class _Struct:
-    r"""Base class for structured prediction models.
+    """Base class for structured prediction with semiring DP algorithms.
 
-    Provides common infrastructure for dynamic programming algorithms over
-    structured output spaces, including chart allocation, marginal computation
-    via autograd, and semiring abstraction.
+    Provides common infrastructure for semiring-parameterized dynamic programming:
+    chart allocation, scoring, marginal computation, and binary tree utilities.
 
     Args:
-        semiring: Semiring class defining the algebraic operations for inference.
-            Default: :class:`~torch_semimarkov.semirings.LogSemiring`
-
-    Attributes:
-        semiring: The semiring used for inference operations.
-
-    See Also:
-        :class:`~torch_semimarkov.SemiMarkov`: Semi-Markov CRF implementation
+        semiring: Semiring class defining zero, one, sum, and prod operations.
+            Defaults to LogSemiring for partition function computation.
     """
 
     def __init__(self, semiring=LogSemiring):
         self.semiring = semiring
 
     def score(self, potentials, parts, batch_dims=None):
-        r"""score(potentials, parts, batch_dims=None) -> Tensor
-
-        Compute the score of a specific structure under the model.
+        """Score a structure given potentials and binary parts indicator.
 
         Args:
-            potentials (Tensor): Model potentials (structure-specific shape).
-            parts (Tensor): Binary indicator of structure parts (same shape as potentials).
-            batch_dims (list, optional): Dimensions to treat as batch. Default: ``[0]``
+            potentials: Log-potentials tensor.
+            parts: Binary indicator tensor (same shape as potentials).
+            batch_dims: List of batch dimension indices. Defaults to [0].
 
         Returns:
-            Tensor: Score for each batch element.
+            Semiring product of selected potentials, shape determined by batch_dims.
         """
         if batch_dims is None:
             batch_dims = [0]
@@ -176,28 +61,28 @@ class _Struct:
         batch = tuple(score.shape[b] for b in batch_dims)
         return self.semiring.prod(score.view(batch + (-1,)))
 
-    def _bin_length(self, length):
-        r"""Compute binary tree parameters for a given sequence length.
+    def _bin_length(self, length: int) -> tuple[int, int]:
+        """Compute binary tree parameters for given sequence length.
 
         Args:
-            length (int): Sequence length.
+            length: Original sequence length.
 
         Returns:
-            Tuple[int, int]: ``(log_N, bin_N)`` where ``log_N`` is tree depth and
-            ``bin_N`` is padded length (power of 2).
+            Tuple of (log_N, bin_N) where log_N is the tree depth and
+            bin_N is the padded power-of-2 length.
         """
         log_N = int(math.ceil(math.log(length, 2)))
         bin_N = int(math.pow(2, log_N))
         return log_N, bin_N
 
     def _get_dimension(self, edge):
-        r"""Extract dimensions from edge potentials and enable gradients.
+        """Extract dimensions from edge potentials and enable gradients.
 
         Args:
-            edge (Tensor or list): Edge potentials or list of tensors.
+            edge: Edge potentials tensor or list of tensors.
 
         Returns:
-            tuple: Shape of the edge potentials.
+            Shape tuple from edge (or first element if list).
         """
         if isinstance(edge, list):
             for t in edge:
@@ -207,30 +92,32 @@ class _Struct:
             edge.requires_grad_(True)
             return edge.shape
 
-    def _chart(self, size, potentials, force_grad):
-        r"""Allocate a single DP chart tensor.
+    def _chart(self, size: tuple, potentials: Tensor, force_grad: bool) -> Tensor:
+        """Allocate a single DP chart tensor.
 
         Args:
-            size (tuple): Shape of the chart (excluding semiring dimension).
-            potentials (Tensor): Reference tensor for dtype and device.
-            force_grad (bool): Force gradient computation.
+            size: Shape tuple for the chart (excluding semiring dimension).
+            potentials: Reference tensor for dtype and device.
+            force_grad: Whether to enable gradients on the chart.
 
         Returns:
-            Tensor: Initialized chart tensor.
+            Chart tensor of shape (semiring.size(), *size) initialized to semiring.zero.
         """
         return self._make_chart(1, size, potentials, force_grad)[0]
 
-    def _make_chart(self, N, size, potentials, force_grad=False):
-        r"""Allocate multiple DP chart tensors.
+    def _make_chart(
+        self, N: int, size: tuple, potentials: Tensor, force_grad: bool = False
+    ) -> list:
+        """Allocate N DP chart tensors initialized to semiring.zero.
 
         Args:
-            N (int): Number of charts to allocate.
-            size (tuple): Shape of each chart (excluding semiring dimension).
-            potentials (Tensor): Reference tensor for dtype and device.
-            force_grad (bool, optional): Force gradient computation. Default: ``False``
+            N: Number of chart tensors to allocate.
+            size: Shape tuple for each chart (excluding semiring dimension).
+            potentials: Reference tensor for dtype and device.
+            force_grad: Whether to enable gradients (only if potentials doesn't require grad).
 
         Returns:
-            List[Tensor]: List of N initialized chart tensors.
+            List of N chart tensors, each of shape (semiring.size(), *size).
         """
         chart = []
         for _ in range(N):
@@ -243,69 +130,21 @@ class _Struct:
         return chart
 
     def sum(self, logpotentials, lengths=None, _raw=False, **kwargs):
-        r"""sum(logpotentials, lengths=None, _raw=False, **kwargs) -> Tensor
-
-        Compute the semiring sum over all valid structures.
-
-        For :class:`LogSemiring`, this returns the log partition function.
-        For :class:`MaxSemiring`, this returns the Viterbi score.
-
-        Args:
-            logpotentials (Tensor): Model potentials (structure-specific shape).
-            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None``
-            _raw (bool, optional): If ``True``, return unconverted semiring values.
-                Default: ``False``
-            **kwargs: Additional arguments passed to :meth:`logpartition`.
-
-        Returns:
-            Tensor: Semiring sum of shape :math:`(\text{batch},)`.
-        """
+        """Semiring sum over structures. LogSemiring: log Z. MaxSemiring: Viterbi."""
         v = self.logpartition(logpotentials, lengths, **kwargs)[0]
         if _raw:
             return v
         return self.semiring.unconvert(v)
 
     def marginals(self, logpotentials, lengths=None, _raw=False, **kwargs):
-        r"""marginals(logpotentials, lengths=None, _raw=False, **kwargs) -> Tensor
-
-        Compute posterior marginals via automatic differentiation.
-
-        The marginal of each potential is computed as the gradient of the log
-        partition function with respect to that potential, which equals the
-        posterior probability under the model.
-
-        Args:
-            logpotentials (Tensor): Model potentials (structure-specific shape).
-            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None``
-            _raw (bool, optional): If ``True``, return raw semiring marginals.
-                Default: ``False``
-            **kwargs: Additional arguments passed to :meth:`logpartition`.
-
-        Returns:
-            Tensor: Marginal probabilities with same shape as ``logpotentials``.
-
-        Examples::
-
-            >>> model = SemiMarkov(LogSemiring)
-            >>> edge = torch.randn(2, 99, 8, 4, 4)
-            >>> marginals = model.marginals(edge)
-            >>> marginals.shape
-            torch.Size([2, 99, 8, 4, 4])
-        """
+        """Posterior marginals via d(log Z)/d(potentials)."""
         v, edges, _ = self.logpartition(logpotentials, lengths=lengths, force_grad=True, **kwargs)
         if _raw:
             all_m = []
             for k in range(v.shape[0]):
                 obj = v[k].sum(dim=0)
-
                 marg = torch.autograd.grad(
-                    obj,
-                    edges,
-                    create_graph=True,
-                    only_inputs=True,
-                    allow_unused=False,
+                    obj, edges, create_graph=True, only_inputs=True, allow_unused=False
                 )
                 all_m.append(self.semiring.unconvert(self._arrange_marginals(marg)))
             return torch.stack(all_m, dim=0)
@@ -314,51 +153,20 @@ class _Struct:
             marg = torch.autograd.grad(
                 obj, edges, create_graph=True, only_inputs=True, allow_unused=False
             )
-            a_m = self._arrange_marginals(marg)
-            return self.semiring.unconvert(a_m)
+            return self.semiring.unconvert(self._arrange_marginals(marg))
 
     @staticmethod
     def to_parts(spans, extra, lengths=None):
-        r"""Convert structure representation to parts tensor.
-
-        Base implementation returns input unchanged. Subclasses override
-        to implement structure-specific conversion.
-
-        Args:
-            spans (Tensor): Structure representation.
-            extra: Additional conversion parameters.
-            lengths (Tensor, optional): Sequence lengths. Default: ``None``
-
-        Returns:
-            Tensor: Parts tensor for scoring.
-        """
+        """Base impl: return spans unchanged. Subclasses override."""
         return spans
 
     @staticmethod
     def from_parts(spans):
-        r"""Convert parts tensor to structure representation.
-
-        Base implementation returns input unchanged. Subclasses override
-        to implement structure-specific conversion.
-
-        Args:
-            spans (Tensor): Parts tensor.
-
-        Returns:
-            Tuple[Tensor, Any]: ``(structure, extra)`` where extra contains
-            additional information needed for reconstruction.
-        """
+        """Base impl: return (spans, None). Subclasses override."""
         return spans, None
 
     def _arrange_marginals(self, marg):
-        r"""Arrange marginal gradients into output format.
-
-        Args:
-            marg (tuple): Tuple of gradient tensors from autograd.
-
-        Returns:
-            Tensor: Arranged marginal tensor.
-        """
+        """Arrange marginal gradients into output format."""
         return marg[0]
 
 
@@ -370,36 +178,28 @@ def score_gold_vectorized(
     duration_bias: torch.Tensor,
     max_duration: int,
 ) -> torch.Tensor:
-    r"""Vectorized gold sequence scoring without Python loops.
+    r"""Score gold label sequences for Semi-CRF loss computation.
 
-    Computes the score of gold segmentations by extracting segments from
-    per-position labels and summing content, duration, and transition scores.
-
-    This is a vectorized replacement for the loop-based ``_score_gold`` method,
-    providing significant speedup for batches with many segments.
+    Computes :math:`\text{score}(y^*) = \sum_{\text{segments}} (\text{content} + \text{duration} + \text{transition})`
 
     Args:
-        cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`.
+        cum_scores (Tensor): Cumulative scores of shape :math:`(\text{batch}, T+1, C)`.
         labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
         transition (Tensor): Transition scores of shape :math:`(C, C)`.
-        duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+        duration_bias (Tensor): Duration bias of shape :math:`(K, C)`.
         max_duration (int): Maximum segment duration (K).
 
     Returns:
         Tensor: Gold sequence scores of shape :math:`(\text{batch},)`.
-
-    Note:
-        Segments are identified by label changes. A segment at positions
-        ``[start, end]`` (inclusive) with label ``c`` contributes:
-
-        - Content: ``cum_scores[end+1, c] - cum_scores[start, c]``
-        - Duration: ``duration_bias[min(duration, K-1), c]`` (duration_bias[k] stores bias for duration k)
-        - Transition: ``transition[prev_label, c]`` (except first segment)
     """
+    # Input validation
+    validate_cum_scores(cum_scores)
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
+    validate_labels(labels, C, batch_size=batch, seq_length=T)
+    validate_lengths(lengths, T, batch_size=batch)
+
     device = cum_scores.device
     dtype = cum_scores.dtype
 
@@ -408,15 +208,50 @@ def score_gold_vectorized(
 
     # Handle single-position sequences
     if T == 1:
-        # Single segment per batch: content + duration_bias[1, label] (duration=1 uses index 1)
+        # Single segment per batch: content + duration_bias[dur_idx, label]
+        # Duration index convention: min(duration, K-1) where K = max_duration
+        # For K=1: min(1, 0) = 0. For K>1: min(1, K-1) = 1
         label_0 = labels[:, 0]  # (batch,)
         content = cum_scores[:, 1, :].gather(1, label_0.unsqueeze(1)).squeeze(1)
         content -= cum_scores[:, 0, :].gather(1, label_0.unsqueeze(1)).squeeze(1)
-        dur_bias = duration_bias[1, label_0]  # duration=1 uses duration_bias[1]
+        dur_idx = min(1, max_duration - 1)
+        dur_bias = duration_bias[dur_idx, label_0]
         scores = content + dur_bias
         # Zero out scores for zero-length sequences
         scores = scores * (lengths > 0).to(dtype)
         return scores
+
+    # Handle K=1 (linear CRF) specially: each frame is its own segment
+    # This ensures gold scoring matches the partition function which assumes
+    # duration-1 segments for K=1
+    if max_duration == 1:
+        # Content: sum of scores[t, label[t]] for all positions
+        # = sum over t of (cum_scores[t+1, label[t]] - cum_scores[t, label[t]])
+        labels_exp = labels.unsqueeze(-1)  # (batch, T, 1)
+        cum_at_pos = cum_scores[:, :-1, :].gather(2, labels_exp).squeeze(-1)  # (batch, T)
+        cum_at_next = cum_scores[:, 1:, :].gather(2, labels_exp).squeeze(-1)  # (batch, T)
+        content_per_pos = cum_at_next - cum_at_pos  # (batch, T)
+
+        # Duration: duration_bias[0, label[t]] for each position
+        dur_per_pos = duration_bias[0, labels]  # (batch, T)
+
+        # Transition: transition[label[t-1], label[t]] for t >= 1
+        # First position has no incoming transition
+        prev_labels = torch.zeros_like(labels)
+        prev_labels[:, 1:] = labels[:, :-1]
+        trans_flat = transition.view(-1)  # (C * C,)
+        trans_indices = prev_labels * C + labels  # (batch, T)
+        trans_per_pos = trans_flat[trans_indices]  # (batch, T)
+        # Zero out first position's transition
+        trans_per_pos[:, 0] = 0
+
+        # Mask for valid positions
+        pos_indices = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
+        valid_mask = pos_indices < lengths.unsqueeze(1)  # (batch, T)
+
+        # Sum all components with masking
+        total_per_pos = (content_per_pos + dur_per_pos + trans_per_pos) * valid_mask.to(dtype)
+        return total_per_pos.sum(dim=1)  # (batch,)
 
     # Step 1: Detect segment boundaries (where label changes)
     # changes[b, t] = True if labels[b, t] != labels[b, t+1]
@@ -507,11 +342,12 @@ def score_gold_vectorized(
     seg_labels_expanded = seg_labels.unsqueeze(-1)  # (batch, max_segments, 1)
     content_scores = content_all.gather(2, seg_labels_expanded).squeeze(-1)  # (batch, max_segments)
 
-    # Duration scores (duration_bias[k] stores bias for segments of duration k)
-    durations = seg_ends - seg_starts + 1  # (batch, max_segments)
-    dur_indices = durations.clamp(
-        1, max_duration - 1
-    )  # duration k uses index k, clamped to valid range
+    # Duration scores
+    # Duration index convention: duration d uses index min(d, K-1) where K = max_duration
+    # For K=1: all durations map to index 0
+    # For K>1: duration d maps to min(d, K-1)
+    durations = seg_ends - seg_starts + 1  # (batch, max_segments), always >= 1
+    dur_indices = durations.clamp(max=max_duration - 1)
 
     # Gather duration bias: duration_bias[dur_idx, label]
     # duration_bias shape: (K, C), we need (batch, max_segments) values
@@ -531,13 +367,19 @@ def score_gold_vectorized(
     trans_scores = trans_flat[trans_indices]  # (batch, max_segments)
 
     # Zero out first segment's transition
+    # Zero out first segment's transition (no predecessor)
+    # Use torch.where to avoid inf * 0 = NaN
     first_seg_mask = torch.zeros_like(seg_mask)
     first_seg_mask[:, 0] = True
-    trans_scores = trans_scores * (~first_seg_mask).to(dtype)
+    trans_scores = torch.where(first_seg_mask, torch.zeros_like(trans_scores), trans_scores)
 
     # Step 4: Sum with masking
+    # Use torch.where instead of multiplication to avoid inf * 0 = NaN
+    # This can happen if parameters drift to extreme values during training
     total_per_segment = content_scores + dur_scores + trans_scores  # (batch, max_segments)
-    total_per_segment = total_per_segment * seg_mask.to(dtype)  # Zero out padded segments
+    total_per_segment = torch.where(
+        seg_mask, total_per_segment, torch.zeros_like(total_per_segment)
+    )
 
     scores = total_per_segment.sum(dim=1)  # (batch,)
 

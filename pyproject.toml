@@ -48,6 +48,17 @@ dev = [
     "flake8",
     "mypy",
 ]
+benchmarks = [
+    "numpy",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "pyfaidx>=0.7.0",      # Gencode: FASTA parsing
+    "librosa>=0.10.0",     # TIMIT: audio features
+    "soundfile>=0.12.0",   # TIMIT: WAV files
+    "pytorch-crf>=0.7.2",  # Linear CRF baseline
+]
+# NOTE: mamba-ssm requires CUDA. Install separately: pip install mamba-ssm
 cuda = []  # CUDA extension is optional, built separately
 
 [project.urls]

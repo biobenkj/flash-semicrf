@@ -2,7 +2,7 @@
 
 # torch-semimarkov
 
-Efficient Semi-Markov CRF Inference using PyTorch and Triton
+Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -16,36 +16,53 @@ Efficient Semi-Markov CRF Inference using PyTorch and Triton
 
 ## Overview
 
-Semi-Markov CRFs are powerful models for sequences with natural segment structure, such as genomic annotations. However, their inference algorithms are resource-intensive. The segment-level forward pass requires $O(TKC^2)$ time and critically $O(TKC)$ memory, where $T$ is sequence length, $K$ is maximum segment duration, and $C$ is the number of states. For chromosome-scale sequences with biologically realistic duration bounds, this memory footprint quickly exceeds GPU capacity.
+Semi-Markov CRFs are powerful models for sequences with natural segment structure—speech (phone/word boundaries), biomedical signals (ECG/EEG events), digital pathology (tissue regions), NLP (named entities), time series (regimes), and genomics (genes, exons, chromatin states). However, their inference algorithms are resource-intensive. The segment-level forward pass requires $O(TKC^2)$ time and critically $O(TKC)$ memory, where $T$ is sequence length, $K$ is maximum segment duration, and $C$ is the number of states. For long sequences, this memory footprint quickly exceeds GPU capacity.
 
 Existing implementations navigate this through various tradeoffs—bounding $K$, chunked processing, or filtering heuristics. This package takes a different approach:
 
-Streaming the linear scan collapses memory to $O(KC)$—independent of sequence length and duration.
+Streaming the linear scan reduces DP working memory to $O(KC)$, avoiding the $O(TKC^2)$ edge tensor (see [streaming internals](docs/internals/streaming_internals.md) for details).
 
-This makes Semi-Markov CRF inference practical for genome-scale annotation without architectural compromises.
+This makes Semi-Markov CRF inference practical for long sequences—chromosome-scale genomics, multi-hour clinical recordings, or large document collections—without architectural compromises.
 
 **torch-semimarkov** provides:
 
-- **Streaming scan** — $O(KC)$ memory, universally applicable across genomic parameter regimes
-- **Triton fused kernel** — optional GPU acceleration
+- **Streaming Semi-CRF inference** with $O(KC)$ memory via ring buffer and on-the-fly edge computation
+  - PyTorch reference implementation (CPU/GPU, always available)
+  - Triton fused kernel (GPU, 2-5x faster when available)
 
-## Why Semi-Markov CRFs in genomics contexts?
+## Why Semi-CRFs?
 
-Many biological sequences have inherent *segment* structurelike genes, exons, transcript isoforms, chromatin states, transposable elements, etc. where segment *duration* carries biological meaning. Linear-chain CRFs handle sequential dependencies well but lack explicit duration modeling, often requiring post-hoc grouping or producing biologically implausible outputs (single-base "exons," fragmentary annotations).
+Neural sequence models - Transformers, Mamba SSMs, CNNs, LSTMs—produce per - position representations, but many tasks require segment-level predictions with structural constraints. Standard per-position prediction heads have limitations:
 
-Semi-Markov CRFs resolve this by modeling segments directly. The potential function scores an entire segment spanning positions $s$ to $e$:
+- No guarantee of valid segmentations (gaps, overlaps, implausible boundaries)
+- Duration constraints require post-hoc heuristics
+- No principled uncertainty over segment boundaries
 
-$$\psi(x_{s:e}, c', c, d) = \underbrace{\psi_{\text{emit}}(x_{s:e}, c)}_{\text{sequence content}} + \underbrace{\psi_{\text{trans}}(c', c)}_{\text{state grammar}} + \underbrace{\psi_{\text{dur}}(c, d)}_{\text{length prior}}$$
+Semi-Markov CRFs bridge this gap as a **structured decoder layer**. The potential function scores an entire segment spanning positions $s$ to $e$:
 
-Each term encodes a distinct biological constraint: does the sequence *content* match this annotation? Is this state *transition* grammatically valid? Is this *duration* plausible for this feature type?
+$$\psi(x_{s:e}, c', c, d) = \underbrace{\psi_{\text{emit}}(x_{s:e}, c)}_{\text{input content}} + \underbrace{\psi_{\text{trans}}(c', c)}_{\text{transition structure}} + \underbrace{\psi_{\text{dur}}(c, d)}_{\text{duration prior}}$$
+
+Each term encodes a distinct constraint: does the input *content* support this segment label? Is this *transition* structurally valid? Is this *duration* plausible for this segment type?
 
 This formulation provides:
 
 - **Valid segmentations by construction** — segments tile the sequence exactly, eliminating post-processing
-- **Explicit duration modeling** — encode priors like "exons are typically 50–300 bp"
-- **Segment-level posteriors** — enable calibration and principled uncertainty quantification over whole features, not just positions
+- **Explicit duration modeling** — encode priors like "named entities rarely exceed 10 tokens" or "exons are typically 50–300 bp"
+- **Segment-level posteriors** — principled uncertainty quantification over whole segments, not just positions
+- **Transition constraints** — encode structural grammars (e.g., which state transitions are valid)
 
-These properties also make Semi-Markov CRFs natural structured decoders for neural sequence encoders, adding output guarantees that per-position prediction heads typically don't provide.
+## Application Domains
+
+Semi-CRFs excel when sequences have inherent segment structure with meaningful durations:
+
+- **Speech & Audio** — phone/word boundaries, speaker diarization, music structure
+- **Biomedical Signals** — ECG event detection, EEG sleep staging, activity recognition
+- **Digital Pathology** — tissue region segmentation in whole slide images, tumor margin detection
+- **Natural Language** — named entity recognition with spans, discourse segmentation, chunking
+- **Time Series** — regime detection, anomaly localization, process phase identification
+- **Genomics** — gene structure annotation, chromatin states, transposable element detection
+
+Each domain benefits from explicit duration modeling and valid-by-construction segmentations.
 
 ## Installation
 
@@ -68,10 +85,10 @@ pip install triton
 import torch
 from torch_semimarkov import SemiMarkovCRFHead
 
-# Create CRF head (integrates with any encoder)
+# Create Semi-CRF decoder (integrates with Transformer, Mamba, CNN, etc.)
 crf = SemiMarkovCRFHead(
     num_classes=24,      # C: number of segment labels
-    max_duration=100,    # K: maximum segment length
+    max_duration=100,    # K: ring buffer size; max segment length is K-1=99
     hidden_dim=512       # matches encoder output
 )
 
@@ -92,7 +109,7 @@ viterbi_score = crf.decode(hidden_states, lengths)
 
 Works with PyTorch Lightning and DDP out of the box—see [examples/lightning_integration.py](examples/lightning_integration.py).
 
-For the low-level API with explicit edge tensors and semiring control, see the [API reference](docs/api.md).
+For the low-level API with explicit edge tensors and semiring control, see the [API reference](docs/reference/api.md).
 
 ## Tensor Conventions
 
@@ -124,13 +141,13 @@ This library follows **destination-first** convention for edge tensors, where `e
 
 **Special case K=1:** When `max_duration=1`, the model behaves like a standard HMM where all segments have duration 1. In this case, `duration_bias[0]` stores the bias for duration 1 (due to clamping).
 
-### Triton Kernel
+### GPU Acceleration (Triton)
 
-When Triton is installed, torch-semimarkov uses fused GPU kernels that significantly accelerate both forward and backward passes.
+When Triton is installed, torch-semimarkov uses custom GPU kernels with fused edge computation that significantly accelerate both forward and backward passes.
 
 **How it works:**
 
-The streaming API computes edge potentials on-the-fly from cumulative scores rather than materializing the full `O(T × K × C²)` edge tensor. The Triton kernel fuses this computation with the forward scan:
+The streaming API computes edge potentials on-the-fly from cumulative scores rather than materializing the full `O(T x K x C²)` edge tensor. The Triton kernel fuses this edge computation with the DP scan:
 
 ```
 # Edge computed on-the-fly (never materialized):
@@ -138,10 +155,13 @@ content = cum_scores[t+k, c] - cum_scores[t, c]  # O(1) lookup
 edge[t, k, c_dst, c_src] = content + duration_bias[k, c] + transition[c_src, c_dst]
 ```
 
+Both the PyTorch reference and Triton implementations use the same streaming algorithm: ring buffer for O(KC) DP state, prefix-sum edge decomposition, and checkpoint-based backward pass. The Triton kernel fuses these operations for higher GPU throughput.
+
 Key optimizations:
+
 - **Fused edge computation** — computes edges on-the-fly via prefix-sum, avoiding the full edge tensor
 - **O(KC) memory** — ring buffer for DP state, independent of sequence length
-- **Custom backward kernel** — custom Triton kernel for gradients, not autograd
+- **Separate forward/backward kernels** — the forward-backward algorithm requires computing marginals from both α (forward) and β (backward) messages, so these are necessarily separate kernel launches with checkpointing
 - **Checkpointing** — trades compute for memory by recomputing alpha values during backward
 
 **Usage:**
@@ -159,17 +179,17 @@ partition = semi_crf_streaming_forward(
 )
 ```
 
-For performance characteristics, see [Benchmarking](docs/benchmarks.md).
+For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md).
 
 ## Documentation
 
-- [Integration guide](docs/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
-- [Parameter guide: T, K, C](docs/parameter_guide.md) — understanding sequence length, duration, and state dimensions
-- [Semirings guide](docs/semirings.md) — context and intuition for semirings used in torch-semimarkov
-- [Uncertainty and focused learning](docs/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
-- [Backends and Triton kernel](docs/backends.md) — algorithm selection and GPU acceleration
-- [API reference](docs/api.md) — detailed API documentation
-- [Benchmarking](docs/benchmarks.md) — performance measurement
+- [Integration guide](docs/guides/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
+- [Parameter guide: T, K, C](docs/guides/parameter_guide.md) — understanding sequence length, duration, and state dimensions
+- [Semirings guide](docs/guides/semirings.md) — context and intuition for semirings used in torch-semimarkov
+- [Uncertainty and focused learning](docs/guides/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
+- [Backends and Triton kernel](docs/reference/backends.md) — algorithm selection and GPU acceleration
+- [API reference](docs/reference/api.md) — detailed API documentation
+- [Benchmarking](docs/reference/benchmarks.md) — performance measurement
 - [AI disclosure](docs/disclosure.md)
 
 ## Testing
@@ -185,8 +205,9 @@ Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.
 
 | Component | Status |
 |-----------|--------|
-| **Streaming Scan** | O(KC) memory, default backend |
-| **Triton Kernel** | GPU acceleration, Log/Max semirings, custom forward/backward |
+| **Streaming Algorithm** | O(KC) memory, ring buffer + prefix-sum edges |
+| **PyTorch Backend** | Reference implementation, CPU/GPU |
+| **Triton Backend** | Fused GPU kernel, Log/Max semirings, 2-5x faster |
 | **Semirings** | Log, Max, Std, KMax, Entropy, CrossEntropy, KLDivergence |
 
 ## Acknowledgments

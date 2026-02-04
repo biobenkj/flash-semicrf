@@ -201,8 +201,8 @@ def unaccumulate_(a, b, grad_output, preserve, fn, step=10000):
         with torch.enable_grad():
             a_in = a.clone().requires_grad_(True)
             b_in = b.clone().requires_grad_(True)
-            q = fn(a, b)
-        ag, bg = torch.autograd.grad(q, (a, b), grad_output)
+            q = fn(a_in, b_in)
+        ag, bg = torch.autograd.grad(q, (a_in, b_in), grad_output)
         return ag, bg
 
     a2 = a.expand(*size[:-2], a.shape[-2], a.shape[-1])

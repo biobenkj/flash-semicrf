@@ -5,8 +5,8 @@ These tests verify that the streaming implementation does NOT OOM at scale.
 The primary success metric is: no OOM for T=100K, K=1K, C=24.
 
 Memory expectations:
-- Pre-computed edge API: O(T × K × C²) = 2.76 TB for T=400K, K=3K, C=24
-- Streaming API: O(K × C + T × C) ≈ 50 MB for same dimensions
+- Pre-computed edge API: O(T * K * C²) = 2.76 TB for T=400K, K=3K, C=24
+- Streaming API: O(K * C + T * C) ≈ 50 MB for same dimensions
 """
 
 import gc
@@ -133,7 +133,7 @@ class TestMemoryUsage:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_memory_scales_with_KC_not_TKC(self):
-        """Verify memory usage scales with K×C, not T×K×C."""
+        """Verify memory usage scales with K*C, not T*K*C."""
         C = 24
         K = 100
         batch = 1
@@ -171,8 +171,8 @@ class TestMemoryUsage:
         print(f"  T={T2}: {mem_T2:.1f} MB")
         print(f"  Ratio: {mem_T2 / mem_T1:.2f}x (expected ~4x for O(TC), ~1x for O(KC))")
 
-        # If memory scaled with T×K×C, ratio would be 4x
-        # If memory scales with K×C (plus T×C for input), ratio should be < 4x
+        # If memory scaled with T*K*C, ratio would be 4x
+        # If memory scales with K*C (plus T*C for input), ratio should be < 4x
         # The ratio should be closer to 4x due to cum_scores input, but working memory
         # should not scale with T
         assert mem_T2 < mem_T1 * 5, f"Memory scaling too high: {mem_T2 / mem_T1:.2f}x"
