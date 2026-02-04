@@ -535,8 +535,154 @@ if HAS_TRITON:
                                 # Clamp alpha_t once per k (reused across tiles)
                                 alpha_t_clamped = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
 
+                                # === PASS 1: Compute global statistics across all tiles ===
+                                # Initialize global accumulators for marginal computation
+                                global_max = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+                                global_sum_exp = tl.zeros([C_PAD], dtype=tl.float64)
+
+                                # Loop over tiles to accumulate global max and sum using online algorithm
+                                for c_dst_tile_start in tl.range(0, C_PAD, TILE_C):
+                                    # Tile indices
+                                    c_dst_tile = tl.arange(0, TILE_C)
+                                    c_dst_idx_tile = c_dst_tile_start + c_dst_tile
+                                    c_dst_mask_tile = c_dst_idx_tile < C
+                                    c_dst_idx_tile_safe = tl.minimum(c_dst_idx_tile, C - 1)
+                                    tile_mask_2d = c_dst_mask_tile[:, None] & c_mask[None, :]
+
+                                    # Load beta_next tile (TILE_C,)
+                                    beta_tile = tl.load(
+                                        beta_ring_base
+                                        + end_ring_idx * stride_br_k
+                                        + c_dst_idx_tile_safe * stride_br_c,
+                                        mask=c_dst_mask_tile,
+                                        other=NEG_INF,
+                                    )
+
+                                    # Load edge components to compute edge_tile
+                                    cum_end_tile = tl.load(
+                                        cum_scores_base
+                                        + end_pos * stride_cs_t
+                                        + c_dst_idx_tile_safe * stride_cs_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    cum_start_tile = tl.load(
+                                        cum_scores_base
+                                        + t * stride_cs_t
+                                        + c_dst_idx_tile_safe * stride_cs_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    content_score_tile = cum_end_tile - cum_start_tile
+
+                                    dur_bias_tile = tl.load(
+                                        duration_bias_ptr
+                                        + dur_idx * stride_db_k
+                                        + c_dst_idx_tile_safe * stride_db_c,
+                                        mask=c_dst_mask_tile,
+                                        other=0.0,
+                                    )
+                                    segment_score_tile = content_score_tile + dur_bias_tile
+
+                                    # Add boundary scores if provided
+                                    if HAS_BOUNDARIES:
+                                        start_score_tile = tl.load(
+                                            proj_start_base
+                                            + t * stride_ps_t
+                                            + c_dst_idx_tile_safe * stride_ps_c,
+                                            mask=c_dst_mask_tile,
+                                            other=0.0,
+                                        )
+                                        end_pos_boundary = end_pos - 1
+                                        end_score_tile = tl.load(
+                                            proj_end_base
+                                            + end_pos_boundary * stride_ps_t
+                                            + c_dst_idx_tile_safe * stride_ps_c,
+                                            mask=c_dst_mask_tile,
+                                            other=0.0,
+                                        )
+                                        segment_score_tile = (
+                                            segment_score_tile + start_score_tile + end_score_tile
+                                        )
+
+                                    # Load transition tile (TILE_C, C_PAD)
+                                    if HAS_DURATION_TRANSITIONS:
+                                        transition_tile = tl.load(
+                                            transition_ptr
+                                            + dur_idx * stride_tr_k
+                                            + c_dst_idx_tile_safe[:, None] * stride_tr_dst
+                                            + c_idx_safe[None, :] * stride_tr_src,
+                                            mask=tile_mask_2d,
+                                            other=0.0,
+                                        )
+                                    else:
+                                        transition_tile = tl.load(
+                                            transition_ptr
+                                            + c_dst_idx_tile_safe[:, None] * stride_tr_dst
+                                            + c_idx_safe[None, :] * stride_tr_src,
+                                            mask=tile_mask_2d,
+                                            other=0.0,
+                                        )
+
+                                    # edge_tile: (TILE_C, C_PAD)
+                                    edge_tile = segment_score_tile[:, None] + transition_tile
+
+                                    # Clamp inputs for numerical stability
+                                    beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
+                                    edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
+
+                                    # Compute log_joint for this tile
+                                    log_joint_tile = (
+                                        alpha_t_clamped[None, :]  # (1, C_PAD) for c_src
+                                        + edge_tile_clamped  # (TILE_C, C_PAD)
+                                        + beta_tile_clamped[:, None]  # (TILE_C, 1) for c_dst
+                                    )
+
+                                    # Mask invalid entries
+                                    log_joint_masked = tl.where(
+                                        tile_mask_2d, log_joint_tile, NEG_INF
+                                    )
+
+                                    # Compute tile max (reduce over rows, keep columns)
+                                    tile_max = tl.max(log_joint_masked, axis=0)  # (C_PAD,)
+                                    tile_max = tile_max.to(tl.float64)
+
+                                    # Update global max using Flash Attention online pattern
+                                    new_global_max = tl.maximum(global_max, tile_max)
+
+                                    # Rescale previous accumulator
+                                    rescale_factor = tl.exp(global_max - new_global_max)
+                                    global_sum_exp = global_sum_exp * rescale_factor
+
+                                    # Add current tile's contribution
+                                    tile_exp = tl.exp(log_joint_masked - new_global_max[None, :])
+                                    tile_sum_exp = tl.sum(tile_exp, axis=0)  # (C_PAD,)
+                                    global_sum_exp = global_sum_exp + tile_sum_exp
+
+                                    # Update global max
+                                    global_max = new_global_max
+
+                                # Compute global scale factor (once for all tiles)
+                                # Guard against all-NEG_INF case
+                                is_global_max_neginf = global_max < (NEG_INF + 1.0)
+                                global_max_safe = tl.where(is_global_max_neginf, 0.0, global_max)
+
+                                # CRITICAL: Add log_norm_at_ckpt to bridge normalized alpha and log_Z
+                                #   alpha_t is normalized (~0), log_Z is full (~250k at T=100k)
+                                #   log_norm_at_ckpt contains the accumulated shift (~125k at midpoint)
+                                log_scale = global_max_safe + log_norm_at_ckpt - log_Z
+
+                                # Clamp scale to prevent overflow/underflow
+                                log_scale_clamped = tl.minimum(log_scale, 0.0)  # Upper bound: scale ≤ 1
+                                log_scale_clamped = tl.maximum(log_scale_clamped, -700.0)  # Prevent underflow
+                                scale = tl.exp(log_scale_clamped)  # (C_PAD,)
+
+                                # Guard: If global_max was all NEG_INF, set scale to 0
+                                scale = tl.where(is_global_max_neginf, 0.0, scale)
+
+                                # === PASS 2: Compute marginals and gradients using global statistics ===
                                 # === Tile loop over c_dst dimension ===
-                                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
+                                for c_dst_tile_start in tl.range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
                                     c_dst_idx_tile = c_dst_tile_start + c_dst_tile
@@ -624,13 +770,10 @@ if HAS_TRITON:
                                     # edge_tile: (TILE_C, C_PAD)
                                     edge_tile = segment_score_tile[:, None] + transition_tile
 
-                                    # === Compute marginal tile (TILE_C, C_PAD) ===
-                                    # Use relative log-marginal computation for numerical stability
-                                    # at extreme scale (T=100k+). Following Flash Attention pattern:
-                                    #   1. Compute log_joint without normalizing by log_Z
-                                    #   2. Subtract local_ref (max over tile) to keep exp bounded
-                                    #   3. Apply scale factor exp(local_ref - log_Z) separately
-                                    # This prevents overflow when alpha + beta >> log_Z at scale.
+                                    # === Compute marginal tile (TILE_C, C_PAD) using GLOBAL statistics ===
+                                    # Two-pass algorithm: Pass 1 computed global_max and scale,
+                                    # Pass 2 uses them for all tiles to ensure consistent normalization.
+                                    # This fixes the per-tile local_ref bug that caused 10-400% errors.
                                     beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
                                     edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
 
@@ -641,72 +784,22 @@ if HAS_TRITON:
                                         + beta_tile_clamped[:, None]  # (TILE_C, 1) for c_dst
                                     )
 
-                                    # Step 2: Find local reference (max over valid entries in tile)
-                                    # Mask out invalid entries with NEG_INF before taking max
+                                    # Step 2: Mask invalid entries
                                     log_joint_masked = tl.where(
                                         tile_mask_2d, log_joint_tile, NEG_INF
                                     )
-                                    local_ref = tl.max(log_joint_masked)
-                                    # Guard against all-NEG_INF case (empty tile)
-                                    is_local_ref_neginf = local_ref < (NEG_INF + 1.0)
-                                    local_ref_safe = tl.where(is_local_ref_neginf, 0.0, local_ref)
 
-                                    # Step 3: Compute relative log-marginal (bounded in (-∞, 0])
-                                    log_marginal_rel = log_joint_tile - local_ref_safe
+                                    # Step 3: Compute relative log-marginal using GLOBAL max
+                                    # This is the KEY FIX: global_max_safe is the same for all tiles
+                                    log_marginal_rel = log_joint_masked - global_max_safe[None, :]
 
                                     # Step 4: Compute unnormalized marginal (bounded in (0, 1])
                                     marginal_unnorm = tl.exp(log_marginal_rel)
 
-                                    # Step 5: CRITICAL - Add log_norm_at_ckpt to bridge the gap
-                                    #   alpha_t is normalized (~0), log_Z is full (~250k at T=100k)
-                                    #   log_norm_at_ckpt contains the accumulated shift (~125k at midpoint)
-                                    #
-                                    #   Example at t=50k:
-                                    #     local_ref ≈ 125,000 (beta mass)
-                                    #     log_norm_at_ckpt ≈ 125,000 (forward mass to checkpoint)
-                                    #     log_Z ≈ 250,000
-                                    #     log_scale = (125k + 125k) - 250k ≈ 0  ✓
-                                    #
-                                    log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
-
-                                    # Temporary debug (remove after validation):
-                                    # if batch_idx == 0 and t % 10000 == 0:
-                                    #     # Check forward-backward identity:
-                                    #     # true_alpha + beta = log_Z
-                                    #     # (normalized_alpha + log_norm) + beta = log_Z
-                                    #     max_alpha = tl.max(
-                                    #         tl.where(
-                                    #             c_mask[None, :], alpha_t_clamped[None, :], NEG_INF
-                                    #         )
-                                    #     )
-                                    #     max_beta = tl.max(
-                                    #         tl.where(
-                                    #             c_dst_mask_tile[:, None],
-                                    #             beta_tile_clamped[:, None],
-                                    #             NEG_INF,
-                                    #         )
-                                    #     )
-                                    #     tl.device_print(
-                                    #         "BWD t, max_alpha, max_beta:", t, max_alpha, max_beta
-                                    #     )
-                                    #     tl.device_print(
-                                    #         "BWD true_alpha+beta vs log_Z:",
-                                    #         max_alpha + log_norm_at_ckpt + max_beta,
-                                    #         log_Z,
-                                    #     )
-                                    #     tl.device_print("BWD log_scale:", log_scale)
-
-                                    # Step 6: Defensive clamping (scale should be ≤ 1 for valid marginals)
-                                    log_scale_clamped = tl.minimum(
-                                        log_scale, 0.0
-                                    )  # Upper bound: scale ≤ 1
-                                    log_scale_clamped = tl.maximum(
-                                        log_scale_clamped, -700.0
-                                    )  # Prevent underflow
-                                    scale = tl.exp(log_scale_clamped)
-
-                                    # Step 7: Final marginal = unnorm * scale
-                                    marginal_tile = marginal_unnorm * scale
+                                    # Step 5: Final marginal using GLOBAL scale
+                                    # scale was computed once in Pass 1: exp(global_max + log_norm - log_Z)
+                                    # This ensures ALL tiles use the same scale factor
+                                    marginal_tile = marginal_unnorm * scale[None, :]
                                     marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
 
                                     # === Accumulate gradients from this tile ===
@@ -995,9 +1088,9 @@ if HAS_TRITON:
 
         # Compute adaptive TILE_C based on number of classes
         # Forces multiple tiles at small C to reduce atomic contention
-        # tile_c = _compute_tile_c(C)
+        tile_c = _compute_tile_c(C)
         # DEBUG
-        tile_c = C_PAD
+        # tile_c = C_PAD
 
         # Validate cache if requested (only validates num_warps)
         # Note: TILE_C is handled automatically by Triton's cache via tl.constexpr
