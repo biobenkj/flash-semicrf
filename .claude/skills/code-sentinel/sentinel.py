@@ -13,6 +13,7 @@ Usage:
     ./sentinel.py install-hooks                   # Install git pre-commit hooks
     ./sentinel.py report --format json            # Generate verification report
 """
+
 from __future__ import annotations
 
 import argparse

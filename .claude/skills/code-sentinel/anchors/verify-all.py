@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify all anchors in anchors.yaml"""
+
 import argparse
 import re
 import subprocess

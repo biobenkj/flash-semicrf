@@ -757,8 +757,7 @@ def main():
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(
-        """
+    print("""
 Key Findings:
 
 1. MATHEMATICAL DIFFERENCE: The two implementations handle the first sequence
@@ -788,8 +787,7 @@ The torch-semimarkov K=1 mode is a valid linear CRF that:
 - Uses a simpler (fewer parameters) initialization scheme
 - Provides a clean generalization path to semi-CRF (K>1)
 - Offers GPU acceleration via Triton kernels
-"""
-    )
+""")
 
 
 if __name__ == "__main__":

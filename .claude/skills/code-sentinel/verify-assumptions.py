@@ -5,6 +5,7 @@ Supports two sources:
 1. assumptions.yaml (preferred) - structured verification specs
 2. Trace markdown tables (fallback) - for backwards compatibility
 """
+
 import re
 import subprocess
 import sys
