@@ -846,7 +846,9 @@ def _print_verification_result(result: TraceVerification) -> None:
         # Assumptions summary
         if result.assumptions:
             failed = [a for a in result.assumptions if not a.passed]
-            summary = ", ".join(f"{a.id} {'[PASS]' if a.passed else '[FAIL]'}" for a in result.assumptions)
+            summary = ", ".join(
+                f"{a.id} {'[PASS]' if a.passed else '[FAIL]'}" for a in result.assumptions
+            )
             print(f"  Assumptions: {summary}")
             if failed:
                 for a in failed:

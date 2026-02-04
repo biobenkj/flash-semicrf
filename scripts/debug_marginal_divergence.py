@@ -5,18 +5,14 @@ Adds targeted debug prints to compare Triton vs PyTorch intermediate values.
 """
 
 import sys
-from pathlib import Path
 
 import torch
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.torch_semimarkov.streaming import (
+from torch_semimarkov.streaming import (
     launch_streaming_triton_marginals,
     semi_crf_streaming_marginals_pytorch,
 )
-from src.torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
 
 # Configuration matching the failing test
 batch, T, C, K = 1, 48, 8, 16

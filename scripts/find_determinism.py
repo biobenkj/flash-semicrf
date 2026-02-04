@@ -15,17 +15,12 @@ Expected behavior after loop tiling fix:
     - num_warps=8: May pass depending on register pressure
 """
 
-import os
-import sys
+import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import torch  # noqa: E402
-
-from torch_semimarkov.streaming.triton_backward import (  # noqa: E402
+from torch_semimarkov.streaming.triton_backward import (
     launch_streaming_triton_backward,
 )
-from torch_semimarkov.streaming.triton_forward import (  # noqa: E402
+from torch_semimarkov.streaming.triton_forward import (
     _compute_checkpoint_interval,
     _next_power_of_2,
     launch_streaming_triton_kernel,
