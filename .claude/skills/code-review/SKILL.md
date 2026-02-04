@@ -175,7 +175,7 @@ correct_code()
 ### Memory Issues
 
 ```python
-# BAD: Materializes O(T×K×C²) tensor
+# BAD: Materializes O(T*K*C²) tensor
 edge = torch.zeros(batch, T, K, C, C)
 for t in range(T):
     for k in range(K):
@@ -243,6 +243,19 @@ When reviewing code:
 7. **Acknowledge good code**: Note well-implemented patterns and clever solutions.
 
 8. **Consider context**: A research prototype has different standards than production code.
+
+## Project-Specific Reference
+
+When reviewing Semi-Markov CRF code (streaming vs exact backends, edge tensors, loop bounds), consult:
+
+**[STREAMING_VS_EXACT_CONVENTIONS.md](STREAMING_VS_EXACT_CONVENTIONS.md)**
+
+This document covers:
+- Tensor shapes and dimension conventions
+- The critical `lengths + 1` convention when using SemiMarkov with streaming-style edge tensors
+- Loop bounds for all implementations (PyTorch reference, Triton kernel, SemiMarkov class)
+- Duration indexing (`dur_idx = min(k, K - 1)`)
+- Common bug sources (off-by-one errors, score preprocessing mismatches)
 
 ## Example Review Invocations
 

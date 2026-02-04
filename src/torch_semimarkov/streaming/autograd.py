@@ -1,21 +1,17 @@
-r"""Autograd functions and public API for streaming Semi-CRF.
-
-This module contains the :class:`torch.autograd.Function` classes and the main
-entry point for the streaming Semi-CRF API.
-
-Classes:
-    SemiCRFStreaming: Pure PyTorch autograd function for streaming Semi-CRF.
-    SemiCRFStreamingTriton: Triton-accelerated autograd function for streaming Semi-CRF.
-
-Functions:
-    semi_crf_streaming_forward: Main entry point for streaming Semi-CRF computation.
-"""
+r"""Autograd functions and public API for streaming Semi-CRF."""
 
 from typing import Optional
 
 import torch
 
+from ..validation import validate_cum_scores, validate_lengths
 from .pytorch_reference import (
+    linear_crf_backward_pytorch,
+    linear_crf_forward_pytorch,
+    linear_crf_viterbi_pytorch,
+    semi_crf_k2_backward_pytorch,
+    semi_crf_k2_forward_pytorch,
+    semi_crf_k2_viterbi_pytorch,
     semi_crf_streaming_backward_pytorch,
     semi_crf_streaming_forward_pytorch,
 )
@@ -31,26 +27,7 @@ except ImportError:
 
 
 class SemiCRFStreaming(torch.autograd.Function):
-    r"""Autograd function for streaming Semi-CRF with on-the-fly edge computation.
-
-    This wraps the forward and backward passes to enable automatic differentiation.
-    Memory usage is :math:`O(KC)` for the ring buffer, independent of sequence length T.
-
-    The forward pass computes:
-
-    .. math::
-        \alpha[t, c] = \bigoplus_{k=1}^{K-1} \bigoplus_{c'} \alpha[t-k, c'] \otimes \text{edge}[t-k, k, c, c']
-
-    where :math:`\oplus` is logsumexp (log semiring) or max (max semiring).
-
-    .. note::
-        This class is used internally by :func:`semi_crf_streaming_forward`.
-        Users should call that function directly rather than using this class.
-
-    See Also:
-        :func:`semi_crf_streaming_forward`: Main entry point for streaming Semi-CRF
-        :class:`SemiCRFStreamingTriton`: Triton-accelerated version
-    """
+    r"""Pure PyTorch autograd function for streaming Semi-CRF. O(KC) memory."""
 
     @staticmethod
     def forward(
@@ -65,15 +42,17 @@ class SemiCRFStreaming(torch.autograd.Function):
         proj_end: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Detach inputs for forward computation
-        partition, ring_checkpoints, checkpoint_interval = semi_crf_streaming_forward_pytorch(
-            cum_scores.detach(),
-            transition.detach(),
-            duration_bias.detach(),
-            lengths,
-            K,
-            semiring,
-            proj_start.detach() if proj_start is not None else None,
-            proj_end.detach() if proj_end is not None else None,
+        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+            semi_crf_streaming_forward_pytorch(
+                cum_scores.detach(),
+                transition.detach(),
+                duration_bias.detach(),
+                lengths,
+                K,
+                semiring,
+                proj_start.detach() if proj_start is not None else None,
+                proj_end.detach() if proj_end is not None else None,
+            )
         )
 
         # Save for backward
@@ -83,6 +62,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -101,10 +81,22 @@ class SemiCRFStreaming(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
         ) = ctx.saved_tensors
+
+        # Validate partition from forward pass before running backward
+        # If partition is already NaN/Inf, backward will produce garbage
+        if not torch.isfinite(partition).all():
+            nan_count = torch.isnan(partition).sum().item()
+            inf_count = torch.isinf(partition).sum().item()
+            raise RuntimeError(
+                f"Non-finite partition from forward pass (PyTorch): "
+                f"{nan_count} NaN, {inf_count} Inf. "
+                f"Check forward pass numerical stability."
+            )
 
         grads = semi_crf_streaming_backward_pytorch(
             cum_scores,
@@ -114,6 +106,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             ctx.K,
             partition,
             ring_checkpoints,
+            log_norm_checkpoints,
             ctx.checkpoint_interval,
             ctx.semiring,
             proj_start,
@@ -122,6 +115,16 @@ class SemiCRFStreaming(torch.autograd.Function):
 
         grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end = grads
 
+        # Validate backward outputs - catch NaN/Inf before they corrupt parameters
+        # This helps debug stochastic NaN issues in training
+        if not torch.isfinite(grad_cum_scores).all():
+            nan_count = torch.isnan(grad_cum_scores).sum().item()
+            inf_count = torch.isinf(grad_cum_scores).sum().item()
+            raise RuntimeError(
+                f"Non-finite values in CRF backward (PyTorch): "
+                f"grad_cum_scores has {nan_count} NaN, {inf_count} Inf"
+            )
+
         # Scale by upstream gradient
         #
         # Per-batch parameters (cum_scores, proj_start, proj_end):
@@ -129,7 +132,7 @@ class SemiCRFStreaming(torch.autograd.Function):
         #
         # Shared parameters (transition, duration_bias):
         #   These now come as per-batch tensors: (batch, C, C) or (batch, K, C, C)
-        #   We apply weighted sum: grad = Σ_b[grad_output[b] × grad_per_batch[b]]
+        #   We apply weighted sum: grad = Σ_b[grad_output[b] * grad_per_batch[b]]
         #   Using einsum for memory efficiency (avoids large intermediate tensor)
         batch = grad_output.shape[0]
         scale = grad_output.view(batch, 1, 1)
@@ -162,27 +165,7 @@ class SemiCRFStreaming(torch.autograd.Function):
 
 
 class SemiCRFStreamingTriton(torch.autograd.Function):
-    r"""Autograd function using Triton forward and backward kernels.
-
-    This class uses custom Triton kernels for both forward and backward passes,
-    providing maximum performance for GPU training. The backward pass uses
-    checkpointing to recompute alpha values, trading compute for memory.
-
-    Memory complexity:
-
-    - Forward: :math:`O(KC)` ring buffer + :math:`O(\frac{T}{S} \times KC)` checkpoints
-    - Backward: :math:`O((S+K) \times C)` alpha buffer + :math:`O(KC)` beta ring
-
-    where :math:`S = \sqrt{T \times K}` is the checkpoint interval.
-
-    .. note::
-        This class is used internally when ``use_triton=True`` and gradients
-        are needed. Users should call :func:`semi_crf_streaming_forward` directly.
-
-    See Also:
-        :class:`SemiCRFStreaming`: Pure PyTorch autograd function
-        :func:`semi_crf_streaming_forward`: Main entry point
-    """
+    r"""Triton-accelerated autograd function for streaming Semi-CRF. O(KC) memory."""
 
     @staticmethod
     def forward(
@@ -195,17 +178,21 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         semiring: str = "log",
         proj_start: Optional[torch.Tensor] = None,
         proj_end: Optional[torch.Tensor] = None,
+        num_warps: int = 4,
     ) -> torch.Tensor:
         # Use Triton kernel for forward
-        partition, ring_checkpoints, checkpoint_interval = launch_streaming_triton_kernel(
-            cum_scores.detach(),
-            transition.detach(),
-            duration_bias.detach(),
-            lengths,
-            K,
-            semiring,
-            proj_start=proj_start.detach() if proj_start is not None else None,
-            proj_end=proj_end.detach() if proj_end is not None else None,
+        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+            launch_streaming_triton_kernel(
+                cum_scores.detach(),
+                transition.detach(),
+                duration_bias.detach(),
+                lengths,
+                K,
+                semiring,
+                proj_start=proj_start.detach() if proj_start is not None else None,
+                proj_end=proj_end.detach() if proj_end is not None else None,
+                num_warps=num_warps,
+            )
         )
 
         # Save for backward
@@ -215,6 +202,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
@@ -222,6 +210,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         ctx.K = K
         ctx.semiring = semiring
         ctx.checkpoint_interval = checkpoint_interval
+        ctx.num_warps = num_warps
 
         return partition
 
@@ -233,14 +222,27 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             duration_bias,
             lengths,
             ring_checkpoints,
+            log_norm_checkpoints,
             partition,
             proj_start,
             proj_end,
         ) = ctx.saved_tensors
 
+        # Validate partition from forward pass before running backward
+        # If partition is already NaN/Inf, backward will produce garbage
+        if not torch.isfinite(partition).all():
+            nan_count = torch.isnan(partition).sum().item()
+            inf_count = torch.isinf(partition).sum().item()
+            raise RuntimeError(
+                f"Non-finite partition from forward pass (Triton): "
+                f"{nan_count} NaN, {inf_count} Inf. "
+                f"Check forward pass numerical stability."
+            )
+
         # Use Triton backward kernel for gradient computation
         # The kernel already scales by grad_output internally
-        grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end = (
+        # Note: launch_streaming_triton_backward returns 6 values; the 6th (boundary_marginals) is unused here
+        grad_cum_scores, grad_transition, grad_duration_bias, grad_proj_start, grad_proj_end, _ = (
             launch_streaming_triton_backward(
                 cum_scores,
                 transition,
@@ -248,12 +250,42 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
                 lengths,
                 partition,
                 ring_checkpoints,
+                log_norm_checkpoints,
                 ctx.checkpoint_interval,
                 grad_output,
                 proj_start=proj_start,
                 proj_end=proj_end,
+                num_warps=ctx.num_warps,
             )
         )
+
+        # Validate ALL backward outputs - catch NaN/Inf before they corrupt parameters
+        # This helps debug stochastic NaN issues in Triton kernels
+        for name, tensor in [
+            ("grad_cum_scores", grad_cum_scores),
+            ("grad_transition", grad_transition),
+            ("grad_duration_bias", grad_duration_bias),
+        ]:
+            if not torch.isfinite(tensor).all():
+                nan_count = torch.isnan(tensor).sum().item()
+                inf_count = torch.isinf(tensor).sum().item()
+                raise RuntimeError(
+                    f"Non-finite values in CRF backward (Triton): "
+                    f"{name} has {nan_count} NaN, {inf_count} Inf"
+                )
+
+        if grad_proj_start is not None:
+            for name, tensor in [
+                ("grad_proj_start", grad_proj_start),
+                ("grad_proj_end", grad_proj_end),
+            ]:
+                if not torch.isfinite(tensor).all():
+                    nan_count = torch.isnan(tensor).sum().item()
+                    inf_count = torch.isinf(tensor).sum().item()
+                    raise RuntimeError(
+                        f"Non-finite values in CRF backward (Triton): "
+                        f"{name} has {nan_count} NaN, {inf_count} Inf"
+                    )
 
         return (
             grad_cum_scores,
@@ -264,6 +296,188 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             None,  # semiring
             grad_proj_start,
             grad_proj_end,
+            None,  # num_warps
+        )
+
+
+# =============================================================================
+# K=1 Linear CRF Fast Path
+# =============================================================================
+
+
+class LinearCRFStreaming(torch.autograd.Function):
+    r"""Optimized K=1 (linear CRF) autograd function. O(batch*C) memory."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        cum_scores: torch.Tensor,
+        transition: torch.Tensor,
+        duration_bias: torch.Tensor,
+        lengths: torch.Tensor,
+        semiring: str = "log",
+    ) -> torch.Tensor:
+        if semiring == "max":
+            # Viterbi: return scores only, no gradient support for max semiring
+            scores, _ = linear_crf_viterbi_pytorch(
+                cum_scores.detach(),
+                transition.detach(),
+                lengths,
+                duration_bias.detach(),
+            )
+            return scores
+
+        # Forward pass
+        partition = linear_crf_forward_pytorch(
+            cum_scores.detach(),
+            transition.detach(),
+            lengths,
+            duration_bias.detach(),
+        )
+
+        # Save for backward
+        ctx.save_for_backward(cum_scores, transition, duration_bias, lengths, partition)
+        ctx.semiring = semiring
+
+        return partition
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        cum_scores, transition, duration_bias, lengths, partition = ctx.saved_tensors
+
+        # Validate partition before backward
+        if not torch.isfinite(partition).all():
+            nan_count = torch.isnan(partition).sum().item()
+            inf_count = torch.isinf(partition).sum().item()
+            raise RuntimeError(
+                f"Non-finite partition from forward pass (K=1): "
+                f"{nan_count} NaN, {inf_count} Inf."
+            )
+
+        grad_cum_scores, grad_transition, grad_duration_bias = linear_crf_backward_pytorch(
+            cum_scores,
+            transition,
+            lengths,
+            partition,
+            duration_bias,
+        )
+
+        # Validate backward outputs
+        if not torch.isfinite(grad_cum_scores).all():
+            nan_count = torch.isnan(grad_cum_scores).sum().item()
+            inf_count = torch.isinf(grad_cum_scores).sum().item()
+            raise RuntimeError(
+                f"Non-finite values in K=1 backward: "
+                f"grad_cum_scores has {nan_count} NaN, {inf_count} Inf"
+            )
+
+        # Scale by upstream gradient
+        batch = grad_output.shape[0]
+        scale = grad_output.view(batch, 1, 1)
+        grad_cum_scores = grad_cum_scores * scale
+
+        # Shared parameters: weighted sum via einsum
+        grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
+
+        if grad_duration_bias is not None:
+            # grad_duration_bias is (batch, 1, C) -> reduce to (1, C)
+            grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
+
+        return (
+            grad_cum_scores,
+            grad_transition,
+            grad_duration_bias,
+            None,  # lengths
+            None,  # semiring
+        )
+
+
+# =============================================================================
+# K=2 Specialized Path
+# =============================================================================
+
+
+class SemiCRFK2Streaming(torch.autograd.Function):
+    r"""Optimized K=2 semi-CRF autograd function. O(batch*C) memory."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        cum_scores: torch.Tensor,
+        transition: torch.Tensor,
+        duration_bias: torch.Tensor,
+        lengths: torch.Tensor,
+        semiring: str = "log",
+    ) -> torch.Tensor:
+        if semiring == "max":
+            # Viterbi: return scores only
+            scores, _, _ = semi_crf_k2_viterbi_pytorch(
+                cum_scores.detach(),
+                transition.detach(),
+                duration_bias.detach(),
+                lengths,
+            )
+            return scores
+
+        # Forward pass
+        partition = semi_crf_k2_forward_pytorch(
+            cum_scores.detach(),
+            transition.detach(),
+            duration_bias.detach(),
+            lengths,
+        )
+
+        # Save for backward
+        ctx.save_for_backward(cum_scores, transition, duration_bias, lengths, partition)
+        ctx.semiring = semiring
+
+        return partition
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        cum_scores, transition, duration_bias, lengths, partition = ctx.saved_tensors
+
+        # Validate partition before backward
+        if not torch.isfinite(partition).all():
+            nan_count = torch.isnan(partition).sum().item()
+            inf_count = torch.isinf(partition).sum().item()
+            raise RuntimeError(
+                f"Non-finite partition from forward pass (K=2): "
+                f"{nan_count} NaN, {inf_count} Inf."
+            )
+
+        grad_cum_scores, grad_transition, grad_duration_bias = semi_crf_k2_backward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            partition,
+        )
+
+        # Validate backward outputs
+        if not torch.isfinite(grad_cum_scores).all():
+            nan_count = torch.isnan(grad_cum_scores).sum().item()
+            inf_count = torch.isinf(grad_cum_scores).sum().item()
+            raise RuntimeError(
+                f"Non-finite values in K=2 backward: "
+                f"grad_cum_scores has {nan_count} NaN, {inf_count} Inf"
+            )
+
+        # Scale by upstream gradient
+        batch = grad_output.shape[0]
+        scale = grad_output.view(batch, 1, 1)
+        grad_cum_scores = grad_cum_scores * scale
+
+        # Shared parameters: weighted sum via einsum
+        grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
+        grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
+
+        return (
+            grad_cum_scores,
+            grad_transition,
+            grad_duration_bias,
+            None,  # lengths
+            None,  # semiring
         )
 
 
@@ -278,26 +492,24 @@ def semi_crf_streaming_forward(
     proj_end: Optional[torch.Tensor] = None,
     use_triton: bool = True,
     use_compile: bool = False,  # Deprecated, kept for API compatibility
+    num_warps: int = 4,
 ) -> torch.Tensor:
-    r"""semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K, semiring="log", proj_start=None, proj_end=None, use_triton=True) -> Tensor
+    r"""Compute Semi-CRF partition function with streaming edge computation.
 
-    Compute Semi-CRF partition function with streaming edge computation.
+    O(KC) memory (ring buffer), O(T*K*C²) compute. Automatically dispatches to
+    optimized implementations based on K:
 
-    This is the main entry point for the streaming API. Edge potentials are
-    computed on-the-fly from cumulative scores, eliminating the need for the
-    full :math:`(\text{batch}, T-1, K, C, C)` edge tensor.
-
-    Memory: :math:`O(KC)` ring buffer, independent of sequence length T.
-    Compute: :math:`O(T \times K \times C^2)` same as standard Semi-CRF.
-
-    Uses custom Triton kernels for optimal performance on GPU:
-
-    - **Inference** (no gradients): Uses custom Triton forward kernel
-    - **Training** (with gradients): Uses custom Triton forward and backward kernels
+    - **K=1**: Linear CRF fast path. O(batch*C) memory, no ring buffer.
+    - **K=2**: Specialized 2-step path. O(batch*C) memory, explicit history.
+    - **K≥3**: Triton streaming kernel on GPU, PyTorch fallback on CPU.
 
     .. warning::
         ``cum_scores`` **MUST** be float32 for numerical stability at T > 100K.
         Zero-centering before cumsum is critical to prevent precision loss.
+
+    .. note::
+        The Triton kernel requires K≥3 for correct operation due to ring buffer
+        architecture constraints. K=1 and K=2 use specialized PyTorch paths.
 
     Args:
         cum_scores (Tensor): Cumulative projected scores of shape
@@ -306,7 +518,7 @@ def semi_crf_streaming_forward(
         transition (Tensor): Label transition scores of shape :math:`(C, C)` for
             static transitions, or :math:`(K, C, C)` for duration-dependent
             transitions. ``transition[c_src, c_dest]`` is the score for
-            c_src → c_dest.
+            c_src -> c_dest.
         duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
             Required to compensate for sum-pooling length bias.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
@@ -319,6 +531,9 @@ def semi_crf_streaming_forward(
             :math:`(\text{batch}, T, C)`. Default: ``None``
         use_triton (bool, optional): If ``True``, use Triton kernels when available.
             Default: ``True``
+        num_warps (int, optional): Number of warps per block for Triton kernels.
+            Higher values increase parallelism but also register pressure.
+            Recommended range: 2-8. Default: ``4``
 
     Returns:
         Tensor: Log partition function (or max score) of shape :math:`(\text{batch},)`.
@@ -354,17 +569,15 @@ def semi_crf_streaming_forward(
         ... )
         >>> partition.shape
         torch.Size([2])
-
-    See Also:
-        :class:`~torch_semimarkov.SemiMarkov`: Pre-computed edge tensor API
-        :func:`compute_edge_block_streaming`: On-the-fly edge computation helper
     """
     if semiring not in ("log", "max"):
         raise ValueError(f"semiring must be 'log' or 'max', got {semiring!r}")
 
-    # Check if Triton is available and applicable
-    # Note: As of Phase 4B, Triton kernels now support boundary projections
-    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+    # Input validation
+    validate_cum_scores(cum_scores)
+    batch, T_plus_1, C = cum_scores.shape
+    T = T_plus_1 - 1
+    validate_lengths(lengths, T, batch_size=batch)
 
     # Determine if gradients are needed
     needs_grad = (
@@ -375,10 +588,67 @@ def semi_crf_streaming_forward(
         or (proj_end is not None and proj_end.requires_grad)
     )
 
+    # =========================================================================
+    # K=1 Fast Path: Linear CRF (no ring buffer, no duration loop)
+    # =========================================================================
+    if K == 1:
+        if proj_start is not None or proj_end is not None:
+            # K=1 fast path doesn't support boundary projections yet
+            # Fall through to generic implementation
+            pass
+        elif needs_grad:
+            return LinearCRFStreaming.apply(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                semiring,
+            )
+        else:
+            # Inference path
+            if semiring == "max":
+                scores, _ = linear_crf_viterbi_pytorch(
+                    cum_scores, transition, lengths, duration_bias
+                )
+                return scores
+            else:
+                return linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias)
+
+    # =========================================================================
+    # K=2 Fast Path: Explicit 2-step history (no ring buffer)
+    # =========================================================================
+    if K == 2:
+        if proj_start is not None or proj_end is not None:
+            # K=2 fast path doesn't support boundary projections yet
+            # Fall through to generic implementation
+            pass
+        elif needs_grad:
+            return SemiCRFK2Streaming.apply(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                semiring,
+            )
+        else:
+            # Inference path
+            if semiring == "max":
+                scores, _, _ = semi_crf_k2_viterbi_pytorch(
+                    cum_scores, transition, duration_bias, lengths
+                )
+                return scores
+            else:
+                return semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths)
+
+    # =========================================================================
+    # K>=3: Triton streaming kernel (ring buffer architecture)
+    # =========================================================================
+    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+
     if needs_grad:
         # Training path
         if can_use_triton:
-            # Use Triton forward + Triton backward kernels (now supports boundaries)
+            # Use Triton forward + Triton backward kernels
             return SemiCRFStreamingTriton.apply(
                 cum_scores,
                 transition,
@@ -388,6 +658,7 @@ def semi_crf_streaming_forward(
                 semiring,
                 proj_start,
                 proj_end,
+                num_warps,
             )
         else:
             # Pure PyTorch path
@@ -404,8 +675,8 @@ def semi_crf_streaming_forward(
     else:
         # Inference path (no gradients)
         if can_use_triton:
-            # Use fast custom Triton kernel (now supports boundaries)
-            partition, _, _ = launch_streaming_triton_kernel(
+            # Use fast custom Triton kernel
+            partition, _, _, _ = launch_streaming_triton_kernel(
                 cum_scores,
                 transition,
                 duration_bias,
@@ -414,11 +685,12 @@ def semi_crf_streaming_forward(
                 semiring,
                 proj_start=proj_start,
                 proj_end=proj_end,
+                num_warps=num_warps,
             )
             return partition
         else:
             # CPU fallback
-            partition, _, _ = semi_crf_streaming_forward_pytorch(
+            partition, _, _, _ = semi_crf_streaming_forward_pytorch(
                 cum_scores,
                 transition,
                 duration_bias,

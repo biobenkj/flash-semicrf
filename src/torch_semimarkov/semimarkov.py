@@ -1,68 +1,27 @@
 import torch
 
+from .blocktriangular import BlockTriangularMatrix, block_triang_matmul
 from .helpers import _Struct
 
 
 class SemiMarkov(_Struct):
-    r"""Semi-Markov CRF inference for structured sequence prediction.
+    r"""Semi-Markov CRF for sequence segmentation with duration constraints.
 
-    Implements efficient forward algorithms for Semi-Markov Conditional Random
-    Fields with explicit duration modeling. Uses streaming linear scan with
-    O(KC) memory, enabling chromosome-scale sequences (T=400K+).
+    Computes partition functions and marginals over segmentations where each
+    segment has a label and duration up to K. Multiple algorithm variants
+    are available with different time/memory trade-offs.
 
     Args:
-        semiring: Semiring class defining the algebra for inference.
-            Common choices: :class:`~torch_semimarkov.semirings.LogSemiring` (default),
-            :class:`~torch_semimarkov.semirings.MaxSemiring` (Viterbi).
+        semiring: Semiring for DP computation. Default: :class:`LogSemiring`
 
-    .. note::
-        For even more memory efficiency with large sequences, use the
-        :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward` API
-        which computes edge potentials on-the-fly from cumulative scores.
-
-    Input format:
-        Edge potentials have shape :math:`(\text{batch}, N-1, K, C, C)` where:
-
-        - :math:`N` is the sequence length
-        - :math:`K` is the maximum segment duration
-        - :math:`C` is the number of labels/classes
-        - ``edge[b, n, k, c2, c1]`` is the log-potential for transitioning from
-          label ``c1`` to label ``c2`` with duration ``k`` at position ``n``
-
-    Examples::
-
-        >>> import torch
-        >>> from torch_semimarkov import SemiMarkov
-        >>> from torch_semimarkov.semirings import LogSemiring
-        >>> model = SemiMarkov(LogSemiring)
-        >>> # batch=2, seq_len=100, max_dur=8, num_labels=4
-        >>> edge = torch.randn(2, 99, 8, 4, 4)
-        >>> lengths = torch.tensor([100, 100])
-        >>> log_Z, potentials = model.logpartition(edge, lengths=lengths)
-        >>> log_Z.shape
-        torch.Size([2])
-
-    See Also:
-        :meth:`logpartition`: Compute log partition function
-        :meth:`marginals`: Compute posterior marginals
-        :func:`hsmm`: Convert HSMM parameters to edge potentials
-        :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`:
-            Memory-efficient API for very long sequences
+    Edge Potentials:
+        Shape :math:`(\text{batch}, N-1, K, C, C)` where ``edge[b, n, k, c_dst, c_src]``
+        is the score for a segment of duration ``k`` ending at position ``n``
+        transitioning from ``c_src`` to ``c_dst``.
     """
 
     def _check_potentials(self, edge, lengths=None):
-        r"""Validate and convert edge potentials.
-
-        Args:
-            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
-            lengths (Tensor, optional): Sequence lengths. Default: ``None``
-
-        Returns:
-            Tuple: ``(edge, batch, N, K, C, lengths)`` with validated dimensions.
-
-        Raises:
-            AssertionError: If shapes are inconsistent or lengths invalid.
-        """
+        """Validate edge potentials and return (edge, batch, N, K, C, lengths)."""
         batch, N_1, K, C, C2 = self._get_dimension(edge)
         edge = self.semiring.convert(edge)
         N = N_1 + 1
@@ -78,83 +37,119 @@ class SemiMarkov(_Struct):
         log_potentials,
         lengths=None,
         force_grad=False,
+        use_linear_scan=None,
+        use_vectorized=False,
+        use_banded=False,
+        banded_perm: str = "auto",
+        banded_bw_ratio: float = 0.6,
     ):
-        r"""logpartition(log_potentials, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
-
-        Compute the log partition function using streaming linear scan.
-
-        The partition function :math:`Z(x) = \sum_y \exp(\phi(x, y))` sums over
-        all valid segmentations. This method returns :math:`\log Z(x)`.
-
-        Memory: :math:`O(KC)` - independent of sequence length :math:`T`.
-        Compute: :math:`O(T \times K \times C^2)`.
+        r"""Compute log partition function via forward algorithm.
 
         Args:
-            log_potentials (Tensor): Edge potentials of shape
-                :math:`(\text{batch}, N-1, K, C, C)` in log-space.
-            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None`` (assumes all sequences have length N)
-            force_grad (bool, optional): If ``True``, force gradient computation even
-                when not needed. Default: ``False``
+            log_potentials (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
+            lengths (Tensor, optional): Sequence lengths. Default: ``None``
+            force_grad (bool, optional): Force gradient computation. Default: ``False``
+            use_linear_scan (bool, optional): Use O(N) linear scan. Auto-selected if ``None``.
+            use_vectorized (bool, optional): Use vectorized scan (2-3x faster, O(TKC) memory).
+            use_banded (bool, optional): Use banded matrix algorithm.
+            banded_perm (str, optional): Permutation mode for banded: ``"auto"``, ``"snake"``, ``"rcm"``.
+            banded_bw_ratio (float, optional): Bandwidth ratio threshold for banded.
 
         Returns:
-            Tuple[Tensor, List[Tensor], None]: A tuple containing:
-
-            - **log_Z** (Tensor): Log partition function of shape :math:`(\text{ssize}, \text{batch})`
-              where ssize is the semiring size (typically 1 for LogSemiring)
-            - **potentials** (List[Tensor]): List containing the input potentials for gradient computation
-            - **beta** (None): Placeholder for backward compatibility (always ``None``)
-
-        Examples::
-
-            >>> model = SemiMarkov(LogSemiring)
-            >>> edge = torch.randn(4, 99, 8, 6, 6)
-            >>> lengths = torch.full((4,), 100)
-            >>> log_Z, potentials, _ = model.logpartition(edge, lengths=lengths)
-            >>> log_Z.shape
-            torch.Size([1, 4])
-
-        See Also:
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`:
-                For very long sequences, use the streaming API which computes
-                edges on-the-fly from cumulative scores.
+            Tuple[Tensor, List[Tensor], None]: ``(log_Z, [potentials], None)``
         """
-        return self._dp_scan_streaming(log_potentials, lengths, force_grad)
+        # Auto-select algorithm if not specified
+        if use_linear_scan is None:
+            _, _, K, C, _ = self._get_dimension(log_potentials)
+            K_C_product = K * C
+            use_linear_scan = K_C_product > 200
+
+        # Dispatch to appropriate algorithm
+        if use_banded:
+            return self._dp_banded(
+                log_potentials,
+                lengths,
+                force_grad,
+                banded_perm=banded_perm,
+                banded_bw_ratio=banded_bw_ratio,
+            )
+        if use_linear_scan:
+            if use_vectorized:
+                return self._dp_standard_vectorized(log_potentials, lengths, force_grad)
+            else:
+                return self._dp_scan_streaming(log_potentials, lengths, force_grad)
+
+        # Binary tree algorithm
+        return self._dp_binary_tree(log_potentials, lengths, force_grad)
+
+    def _dp_binary_tree(self, log_potentials, lengths=None, force_grad=False):
+        r"""Binary tree algorithm - O((KC)^3) per matmul.
+
+        Use linear scan for large state spaces.
+        """
+        log_potentials, batch, N, K, C, lengths = self._check_potentials(log_potentials, lengths)
+        semiring = self.semiring
+        ssize = semiring.size()
+        log_potentials.requires_grad_(True)
+        log_N, bin_N = self._bin_length(N - 1)
+        init = self._chart((batch, bin_N, K - 1, K - 1, C, C), log_potentials, force_grad)
+
+        # Init.
+        mask = torch.zeros(*init.shape, device=log_potentials.device).bool()
+        mask[:, :, :, 0, 0].diagonal(0, -2, -1).fill_(True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        # Length mask
+        big = torch.zeros(
+            ssize,
+            batch,
+            bin_N,
+            K,
+            C,
+            C,
+            dtype=log_potentials.dtype,
+            device=log_potentials.device,
+        )
+        big[:, :, : N - 1] = log_potentials
+        c = init[:, :, :].view(ssize, batch * bin_N, K - 1, K - 1, C, C)
+        lp = big[:, :, :].view(ssize, batch * bin_N, K, C, C)
+        mask = torch.arange(bin_N).view(1, bin_N).expand(batch, bin_N)
+        mask = mask.to(log_potentials.device)
+        mask = mask >= (lengths - 1).view(batch, 1)
+        mask = mask.view(batch * bin_N, 1, 1, 1).to(lp.device)
+        lp.data[:] = semiring.fill(lp.data, mask, semiring.zero)
+        c.data[:, :, :, 0] = semiring.fill(c.data[:, :, :, 0], (~mask), semiring.zero)
+        c[:, :, : K - 1, 0] = semiring.sum(
+            torch.stack([c.data[:, :, : K - 1, 0], lp[:, :, 1:K]], dim=-1)
+        )
+        mask = torch.zeros(*init.shape, device=log_potentials.device).bool()
+        mask_length = torch.arange(bin_N).view(1, bin_N, 1).expand(batch, bin_N, C)
+        mask_length = mask_length.to(log_potentials.device)
+        for k in range(1, K - 1):
+            mask_length_k = mask_length < (lengths - 1 - (k - 1)).view(batch, 1, 1)
+            mask_length_k = semiring.convert(mask_length_k)
+            mask[:, :, :, k - 1, k].diagonal(0, -2, -1).masked_fill_(mask_length_k, True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        K_1 = K - 1
+
+        # Order n, n-1
+        chart = (
+            init.permute(0, 1, 2, 3, 5, 4, 6).contiguous().view(-1, batch, bin_N, K_1 * C, K_1 * C)
+        )
+
+        for _level in range(1, log_N + 1):
+            chart = semiring.matmul(chart[:, :, 1::2], chart[:, :, 0::2])
+
+        final = chart.view(-1, batch, K_1, C, K_1, C)
+        v = semiring.sum(semiring.sum(final[:, :, 0, :, 0, :].contiguous()))
+        return v, [log_potentials], None
 
     def _dp_scan_streaming(self, edge, lengths=None, force_grad=False):
-        r"""_dp_scan_streaming(edge, lengths=None, force_grad=False) -> Tuple[Tensor, List[Tensor], None]
+        r"""O(N) streaming scan with O(KC) ring buffer memory.
 
-        Streaming :math:`O(N)` scan with :math:`O(KC)` memory.
-
-        Uses a ring buffer of the last :math:`K` beta values instead of storing all
-        :math:`T` betas. Alpha values are computed inline and consumed immediately
-        without storage.
-
-        The recurrence computes:
-
-        .. math::
-            \beta[n, c] = \text{logsumexp}_{k=1}^{\min(K-1,n)} \sum_{c'} \left(
-                \beta[n-k, c'] + \text{edge}[n-k, k, c, c']
-            \right)
-
-        Args:
-            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
-            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None``
-            force_grad (bool, optional): Force gradient computation even when not needed.
-                Default: ``False``
-
-        Returns:
-            Tuple[Tensor, List[Tensor], None]: A tuple containing:
-
-            - **log_Z** (Tensor): Log partition of shape :math:`(\text{ssize}, \text{batch})`
-            - **potentials** (List[Tensor]): Input potentials for gradient computation
-            - **beta** (None): Placeholder (always ``None`` for streaming)
-
-        .. note::
-            Memory is :math:`O(KC)` for the ring buffer, independent of sequence length
-            :math:`T`. This makes it universally applicable across all genomic parameter
-            regimes where :math:`T` can exceed 400K.
+        Memory-efficient linear scan using a ring buffer to store only
+        the last K beta values instead of the full O(NK) table.
         """
         semiring = self.semiring
         ssize = semiring.size()
@@ -183,16 +178,15 @@ class SemiMarkov(_Struct):
         mask_len1 = (lengths == 1).view(1, batch, 1)
         final_beta = torch.where(mask_len1, beta0, final_beta)
 
-        # Pre-allocate duration indices (avoid re-creating each step)
-        # max(K, 2) ensures K=1 still has duration 1 available
-        dur_full = torch.arange(1, max(K, 2), device=edge.device)  # 1..max(K-1, 1)
+        # Pre-allocate duration values (avoid re-creating each step)
+        # Durations range from 1 to K
+        dur_full = torch.arange(1, K + 1, device=edge.device)  # 1..K
 
         for n in range(1, N):
-            # Number of valid durations at this position
-            # max(1, ...) ensures K=1 still processes duration 1
-            k_eff = max(1, min(K - 1, n))
+            # Number of valid durations at this position: k = 1, 2, ..., min(K, n)
+            k_eff = min(K, n)
 
-            # Duration indices: 1, 2, ..., k_eff (slice pre-allocated tensor)
+            # Duration values: 1, 2, ..., k_eff (slice pre-allocated tensor)
             dur = dur_full[:k_eff]
 
             # Position indices where segments start: n-1, n-2, ..., n-k_eff
@@ -205,9 +199,9 @@ class SemiMarkov(_Struct):
 
             # Get edge potentials for these (start, duration) pairs
             # edge shape: (ssize, batch, N-1, K, C, C)
-            # Clamp dur to valid index range for K=1 case
-            dur_clamped = torch.clamp(dur, max=K - 1)
-            edge_slice = edge[:, :, start, dur_clamped, :, :]  # (ssize, batch, k_eff, C, C)
+            # Duration k uses edge index k-1
+            dur_idx = dur - 1
+            edge_slice = edge[:, :, start, dur_idx, :, :]  # (ssize, batch, k_eff, C, C)
 
             # Compute: logsumexp over c_prev (last dim) of beta_prev + edge
             # beta_prev: (ssize, batch, k_eff, C) -> unsqueeze to (ssize, batch, k_eff, 1, C)
@@ -231,33 +225,395 @@ class SemiMarkov(_Struct):
         v = semiring.sum(final_beta, dim=-1)  # (ssize, batch)
         return v, [edge], None
 
-    @staticmethod
-    def to_parts(sequence, extra, lengths=None):
-        r"""to_parts(sequence, extra, lengths=None) -> Tensor
+    def _dp_standard(self, edge, lengths=None, force_grad=False):
+        r"""Standard O(N) linear scan dynamic programming for Semi-Markov CRF.
 
-        Convert a sequence label representation to edge potentials.
+        This is the reference implementation using list comprehensions. Kept for
+        backward compatibility and correctness validation.
 
         Args:
-            sequence (Tensor): Label sequence of shape :math:`(\text{batch}, N)` with
-                values in ``[-1, 0, ..., C-1]``. Value ``-1`` indicates continuation
-                of the previous segment (no label boundary).
-            extra (tuple): Tuple of ``(C, K)`` where C is number of labels and K is
-                maximum duration.
-            lengths (Tensor, optional): Sequence lengths of shape :math:`(\text{batch},)`.
-                Default: ``None``
+            edge (Tensor): Edge potentials of shape (batch, N-1, K, C, C).
+            lengths (Tensor, optional): Sequence lengths. Default: None
+            force_grad (bool, optional): Force gradient computation. Default: False
 
         Returns:
-            Tensor: Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)` where
-            ``edge[b, n, k, c2, c1] = 1`` if there is a transition from label ``c1``
-            to label ``c2`` with duration ``k`` at position ``n``.
-
-        Examples::
-
-            >>> # Sequence with labels [0, -1, 1, -1, -1, 2]
-            >>> # means: label 0 (dur 2), label 1 (dur 3), label 2 (dur 1)
-            >>> seq = torch.tensor([[0, -1, 1, -1, -1, 2]])
-            >>> edge = SemiMarkov.to_parts(seq, (3, 4))
+            Tuple[Tensor, List[Tensor], List[Tensor]]: (log_Z, [edge], beta tables)
         """
+        semiring = self.semiring
+        ssize = semiring.size()
+        edge, batch, N, K, C, lengths = self._check_potentials(edge, lengths)
+        edge.requires_grad_(True)
+
+        # Init
+        # All paths starting at N of len K
+        alpha = self._make_chart(1, (batch, N, K, C), edge, force_grad)[0]
+
+        # All paths finishing at N with label C
+        beta = self._make_chart(N, (batch, C), edge, force_grad)
+        beta[0] = semiring.fill(beta[0], torch.tensor(True).to(edge.device), semiring.one)
+
+        # Main.
+        for n in range(1, N):
+            alpha[:, :, n - 1] = semiring.dot(
+                beta[n - 1].view(ssize, batch, 1, 1, C),
+                edge[:, :, n - 1].view(ssize, batch, K, C, C),
+            )
+
+            # Duration k (1 to K) uses index k-1 (0-based indexing)
+            # Include K positions: t = n-K-1 so f1 has up to K elements
+            t = max(n - K - 1, -1)
+            f1 = torch.arange(n - 1, t, -1)  # time positions [n-1, n-2, ..., n-K]
+            f2 = torch.arange(0, len(f1))  # duration indices [0, 1, ..., K-1]
+            beta[n][:] = semiring.sum(
+                torch.stack([alpha[:, :, a, b] for a, b in zip(f1, f2, strict=True)], dim=-1)
+            )
+        v = semiring.sum(
+            torch.stack([beta[length_val - 1][:, i] for i, length_val in enumerate(lengths)], dim=1)
+        )
+        return v, [edge], beta
+
+    def _dp_standard_vectorized(self, edge, lengths=None, force_grad=False):
+        r"""Vectorized O(N) linear scan with O(TKC) memory.
+
+        Provides 2-3x speedup over _dp_standard through:
+        1. Direct broadcasting instead of semiring.dot for alpha updates
+        2. Advanced indexing instead of list comprehension for beta accumulation
+
+        Args:
+            edge (Tensor): Edge potentials of shape (batch, N-1, K, C, C).
+            lengths (Tensor, optional): Sequence lengths. Default: None
+            force_grad (bool, optional): Force gradient computation. Default: False
+
+        Returns:
+            Tuple[Tensor, List[Tensor], List[Tensor]]: (log_Z, [edge], beta tables)
+        """
+        semiring = self.semiring
+        ssize = semiring.size()
+        edge, batch, N, K, C, lengths = self._check_potentials(edge, lengths)
+        edge.requires_grad_(True)
+
+        # Init
+        alpha = self._make_chart(1, (batch, N, K, C), edge, force_grad)[0]
+        beta = self._make_chart(N, (batch, C), edge, force_grad)
+        beta[0] = semiring.fill(beta[0], torch.tensor(True).to(edge.device), semiring.one)
+
+        # Main loop - vectorized operations
+        for n in range(1, N):
+            # Alpha update: Vectorized broadcast + logsumexp
+            alpha[:, :, n - 1] = semiring.sum(
+                beta[n - 1].view(ssize, batch, 1, 1, C) + edge[:, :, n - 1], dim=-1
+            )
+
+            # Beta accumulation: Vectorized advanced indexing
+            # Duration k (1 to K) uses index k-1 (0-based indexing)
+            # Include K positions: t = n-K-1 so time_indices has up to K elements
+            t = max(n - K - 1, -1)
+            time_indices = torch.arange(n - 1, t, -1, device=edge.device)
+            dur_indices = torch.arange(0, time_indices.numel(), device=edge.device)
+
+            # Gather: alpha[:, :, time_indices[i], dur_indices[i], :]
+            gathered = alpha[:, :, time_indices, dur_indices, :]  # (ssize, batch, k_eff, C)
+            beta[n][:] = semiring.sum(gathered, dim=-2)  # Sum over k dimension
+
+        # Final: Sum over sequence endpoints
+        v = semiring.sum(
+            torch.stack([beta[length_val - 1][:, i] for i, length_val in enumerate(lengths)], dim=1)
+        )
+        return v, [edge], beta
+
+    def _dp_blocktriangular(self, edge, lengths=None, force_grad=False):
+        r"""Binary-tree DP using block-triangular matrix multiplication.
+
+        Exploits the duration constraint k1 + k2 <= span to sparsify
+        the (K*C, K*C) matrices via BlockTriangularMatrix at each tree level.
+
+        Args:
+            edge (Tensor): Edge potentials of shape (batch, N-1, K, C, C).
+            lengths (Tensor, optional): Sequence lengths. Default: None
+            force_grad (bool, optional): Force gradient computation. Default: False
+
+        Returns:
+            Tuple[Tensor, List[Tensor], None]: (log_Z, [edge], None)
+        """
+        semiring = self.semiring
+        ssize = semiring.size()
+        edge, batch, N, K, C, lengths = self._check_potentials(edge, lengths)
+        edge.requires_grad_(True)
+
+        log_N, bin_N = self._bin_length(N - 1)
+        init = self._chart((batch, bin_N, K - 1, K - 1, C, C), edge, force_grad)
+
+        # Init mask (same as standard)
+        mask = torch.zeros(*init.shape, device=edge.device).bool()
+        mask[:, :, :, 0, 0].diagonal(0, -2, -1).fill_(True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        # Length mask (same as standard)
+        big = torch.zeros(
+            ssize,
+            batch,
+            bin_N,
+            K,
+            C,
+            C,
+            dtype=edge.dtype,
+            device=edge.device,
+        )
+        big[:, :, : N - 1] = edge
+        c = init[:, :, :].view(ssize, batch * bin_N, K - 1, K - 1, C, C)
+        lp = big[:, :, :].view(ssize, batch * bin_N, K, C, C)
+        mask = torch.arange(bin_N).view(1, bin_N).expand(batch, bin_N)
+        mask = mask.to(edge.device)
+        mask = mask >= (lengths - 1).view(batch, 1)
+        mask = mask.view(batch * bin_N, 1, 1, 1).to(lp.device)
+        lp.data[:] = semiring.fill(lp.data, mask, semiring.zero)
+        c.data[:, :, :, 0] = semiring.fill(c.data[:, :, :, 0], (~mask), semiring.zero)
+        c[:, :, : K - 1, 0] = semiring.sum(
+            torch.stack([c.data[:, :, : K - 1, 0], lp[:, :, 1:K]], dim=-1)
+        )
+        mask = torch.zeros(*init.shape, device=edge.device).bool()
+        mask_length = torch.arange(bin_N).view(1, bin_N, 1).expand(batch, bin_N, C)
+        mask_length = mask_length.to(edge.device)
+        for k in range(1, K - 1):
+            mask_length_k = mask_length < (lengths - 1 - (k - 1)).view(batch, 1, 1)
+            mask_length_k = semiring.convert(mask_length_k)
+            mask[:, :, :, k - 1, k].diagonal(0, -2, -1).masked_fill_(mask_length_k, True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        K_1 = K - 1
+
+        # Flatten to (K*C, K*C) - same permutation as standard algorithm
+        chart = (
+            init.permute(0, 1, 2, 3, 5, 4, 6).contiguous().view(-1, batch, bin_N, K_1 * C, K_1 * C)
+        )
+
+        for level in range(1, log_N + 1):
+            span_length = 2 ** (level + 1)
+
+            left = chart[:, :, 1::2]  # Odd indices
+            right = chart[:, :, 0::2]  # Even indices
+
+            result_parts = []
+            for s in range(ssize):
+                # Collapse batch and pair dims for BlockTriangularMatrix
+                left_dense = left[s].reshape(-1, K_1 * C, K_1 * C)
+                right_dense = right[s].reshape(-1, K_1 * C, K_1 * C)
+
+                left_bt = BlockTriangularMatrix.from_dense(left_dense, K_1, C, span_length)
+                right_bt = BlockTriangularMatrix.from_dense(right_dense, K_1, C, span_length)
+
+                prod_bt = block_triang_matmul(left_bt, right_bt, semiring, span_length)
+                prod_dense = prod_bt.to_dense().reshape(batch, -1, K_1 * C, K_1 * C)
+                result_parts.append(prod_dense)
+
+            chart = torch.stack(result_parts, dim=0)
+
+        final = chart.view(-1, batch, K_1, C, K_1, C)
+        v = semiring.sum(semiring.sum(final[:, :, 0, :, 0, :].contiguous()))
+        return v, [edge], None
+
+    def _compute_bandwidth(self, span_length, K, C):
+        """Compute bandwidth for Semi-Markov transitions over a span.
+
+        At a binary tree level with span length S, the constraint that
+        k1 + k2 <= S (duration pairs must fit within span) creates
+        implicit sparsity in the (K*C, K*C) state space.
+        """
+        effective_K = min(K - 1, span_length // 2)
+        lu = ld = effective_K * C
+        return lu, ld
+
+    def _build_adjacency(self, span_length: int, K: int, C: int, device) -> torch.Tensor:
+        """Build a dense adjacency (K_1*C) x (K_1*C) for duration/label pairs
+        under the constraint k1 + k2 <= span_length.
+        """
+        K_1 = K - 1
+        size = K_1 * C
+        adj = torch.zeros((size, size), device=device, dtype=torch.bool)
+
+        for k1 in range(K_1):
+            max_k2 = min(K_1 - 1, span_length - k1)
+            if max_k2 < 0:
+                continue
+            for k2 in range(max_k2 + 1):
+                for c1 in range(C):
+                    for c2 in range(C):
+                        i = k1 * C + c1
+                        j = k2 * C + c2
+                        adj[i, j] = True
+        return adj
+
+    def _choose_banded_permutation(
+        self,
+        span_length: int,
+        K: int,
+        C: int,
+        perm_mode: str,
+        bw_ratio: float,
+        device,
+    ):
+        """Decide whether to use banded matmul for a given span length and optionally
+        return a permutation that reduces bandwidth.
+
+        Returns:
+            use_banded (bool), permutation (torch.Tensor or None), best_bw (int), threshold (float)
+        """
+        from .banded_utils import (
+            apply_permutation,
+            measure_effective_bandwidth,
+            rcm_ordering_from_adjacency,
+            snake_ordering,
+        )
+
+        K_1 = K - 1
+        size = K_1 * C
+        adj = self._build_adjacency(span_length, K, C, device=device)
+        best_bw = measure_effective_bandwidth(adj.float(), fill_value=0.0)
+        best_perm = None
+
+        def maybe_update(perm):
+            nonlocal best_bw, best_perm
+            perm_bw = measure_effective_bandwidth(
+                apply_permutation(adj.float(), perm), fill_value=0.0
+            )
+            if perm_bw < best_bw:
+                best_bw = perm_bw
+                best_perm = perm
+
+        mode = perm_mode.lower() if isinstance(perm_mode, str) else "auto"
+        if mode in ("auto", "snake"):
+            perm = snake_ordering(K_1, C).to(device)
+            maybe_update(perm)
+        if mode in ("auto", "rcm"):
+            perm_rcm, used = rcm_ordering_from_adjacency(adj.float().cpu())
+            if used:
+                maybe_update(perm_rcm.to(device))
+
+        threshold = bw_ratio * size
+        use_banded = best_bw < threshold
+        return use_banded, best_perm, best_bw, threshold
+
+    def _dp_banded(
+        self, edge, lengths=None, force_grad=False, banded_perm="auto", banded_bw_ratio=0.6
+    ):
+        """PROTOTYPE - Banded Semi-Markov binary tree forward pass.
+
+        Uses BandedMatrix representations to exploit implicit sparsity from
+        duration constraints. At each tree level, the constraint k1 + k2 <= span_length
+        creates banded structure in the (K*C, K*C) state space.
+        """
+        from .banded import BandedMatrix
+
+        semiring = self.semiring
+        ssize = semiring.size()
+        edge, batch, N, K, C, lengths = self._check_potentials(edge, lengths)
+        edge.requires_grad_(True)
+
+        # Binary tree setup (same as standard algorithm)
+        log_N, bin_N = self._bin_length(N - 1)
+        init = self._chart((batch, bin_N, K - 1, K - 1, C, C), edge, force_grad)
+
+        # Init mask (same as standard)
+        mask = torch.zeros(*init.shape, device=edge.device).bool()
+        mask[:, :, :, 0, 0].diagonal(0, -2, -1).fill_(True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        # Length mask (same as standard)
+        big = torch.zeros(
+            ssize,
+            batch,
+            bin_N,
+            K,
+            C,
+            C,
+            dtype=edge.dtype,
+            device=edge.device,
+        )
+        big[:, :, : N - 1] = edge
+        c = init[:, :, :].view(ssize, batch * bin_N, K - 1, K - 1, C, C)
+        lp = big[:, :, :].view(ssize, batch * bin_N, K, C, C)
+        mask = torch.arange(bin_N).view(1, bin_N).expand(batch, bin_N)
+        mask = mask.to(edge.device)
+        mask = mask >= (lengths - 1).view(batch, 1)
+        mask = mask.view(batch * bin_N, 1, 1, 1).to(lp.device)
+        lp.data[:] = semiring.fill(lp.data, mask, semiring.zero)
+        c.data[:, :, :, 0] = semiring.fill(c.data[:, :, :, 0], (~mask), semiring.zero)
+        c[:, :, : K - 1, 0] = semiring.sum(
+            torch.stack([c.data[:, :, : K - 1, 0], lp[:, :, 1:K]], dim=-1)
+        )
+        mask = torch.zeros(*init.shape, device=edge.device).bool()
+        mask_length = torch.arange(bin_N).view(1, bin_N, 1).expand(batch, bin_N, C)
+        mask_length = mask_length.to(edge.device)
+        for k in range(1, K - 1):
+            mask_length_k = mask_length < (lengths - 1 - (k - 1)).view(batch, 1, 1)
+            mask_length_k = semiring.convert(mask_length_k)
+            mask[:, :, :, k - 1, k].diagonal(0, -2, -1).masked_fill_(mask_length_k, True)
+        init = semiring.fill(init, mask, semiring.one)
+
+        K_1 = K - 1
+
+        # Flatten to (K*C, K*C)
+        chart = (
+            init.permute(0, 1, 2, 3, 5, 4, 6).contiguous().view(-1, batch, bin_N, K_1 * C, K_1 * C)
+        )
+
+        # Binary tree with banded matmul
+        for level in range(1, log_N + 1):
+            span_length = 2 ** (level + 1)
+            lu, ld = self._compute_bandwidth(span_length, K, C)
+
+            left = chart[:, :, 1::2]
+            right = chart[:, :, 0::2]
+
+            # Decide whether banded is worthwhile
+            use_banded, perm, bw, threshold = self._choose_banded_permutation(
+                span_length, K, C, banded_perm, banded_bw_ratio, device=edge.device
+            )
+            matrix_size = K_1 * C
+            if not use_banded or (lu + ld + 1) >= matrix_size:
+                chart = semiring.matmul(left, right)
+                continue
+
+            if perm is not None:
+                left = left[..., :, perm]
+                left = left[..., perm, :]
+                right = right[..., :, perm]
+                right = right[..., perm, :]
+
+            fill_value = semiring.zero if hasattr(semiring, "zero") else -1e9
+
+            ssize_val = left.shape[0]
+            result_parts = []
+            for s in range(ssize_val):
+                batch_parts = []
+                for b in range(batch):
+                    left_matrices = left[s, b]
+                    right_matrices = right[s, b]
+
+                    left_banded = BandedMatrix.from_dense(left_matrices, lu, ld, fill_value)
+                    right_banded = BandedMatrix.from_dense(right_matrices, lu, ld, fill_value)
+
+                    if hasattr(semiring, "zero") and semiring.zero == -1e9:
+                        result_banded = right_banded.multiply_log(left_banded.transpose())
+                    elif hasattr(semiring, "one") and semiring.one == -1e9:
+                        result_banded = right_banded.multiply_max(left_banded.transpose())
+                    else:
+                        result_banded = right_banded.multiply(left_banded.transpose())
+
+                    result_dense = result_banded.to_dense()
+                    batch_parts.append(result_dense)
+
+                result_parts.append(torch.stack(batch_parts, dim=0))
+
+            chart = torch.stack(result_parts, dim=0)
+
+        final = chart.view(-1, batch, K_1, C, K_1, C)
+        v = semiring.sum(semiring.sum(final[:, :, 0, :, 0, :].contiguous()))
+        return v, [edge], None
+
+    @staticmethod
+    def to_parts(sequence, extra, lengths=None):
+        """Convert label sequence (batch, N) with -1 continuations to edge potentials."""
         C, K = extra
         batch, N = sequence.shape
         labels = torch.zeros(batch, N - 1, K, C, C).long()
@@ -281,27 +637,7 @@ class SemiMarkov(_Struct):
 
     @staticmethod
     def from_parts(edge):
-        r"""from_parts(edge) -> Tuple[Tensor, Tuple[int, int]]
-
-        Convert edge potentials to a sequence label representation.
-
-        Args:
-            edge (Tensor): Edge potentials of shape :math:`(\text{batch}, N-1, K, C, C)`.
-                Should contain binary indicators (0 or 1) marking segment boundaries.
-
-        Returns:
-            Tuple[Tensor, Tuple[int, int]]: A tuple containing:
-
-            - **sequence** (Tensor): Label sequence of shape :math:`(\text{batch}, N)` with
-              values in ``[-1, 0, ..., C-1]``. Value ``-1`` indicates continuation.
-            - **extra** (tuple): Tuple of ``(C, K)`` for reconstructing edge shape.
-
-        Examples::
-
-            >>> edge = torch.zeros(1, 5, 4, 3, 3)
-            >>> edge[0, 0, 2, 1, 0] = 1  # transition 0->1 at pos 0, dur 2
-            >>> seq, (C, K) = SemiMarkov.from_parts(edge)
-        """
+        """Convert edge potentials to label sequence (batch, N) with -1 continuations."""
         batch, N_1, K, C, _ = edge.shape
         N = N_1 + 1
         labels = torch.zeros(batch, N).long().fill_(-1)
@@ -314,46 +650,7 @@ class SemiMarkov(_Struct):
 
     @staticmethod
     def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
-        r"""hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z) -> Tensor
-
-        Convert Hidden Semi-Markov Model parameters to edge potentials.
-
-        This adapter transforms standard HSMM parameterization (initial distribution,
-        transition matrix, duration distribution, emissions) into the edge potential
-        format expected by :meth:`logpartition`.
-
-        Args:
-            init_z_1 (Tensor): Initial state log-probabilities of shape :math:`(C,)` or
-                :math:`(\text{batch}, C)`. Represents :math:`\log P(z_{-1}=i)` where
-                :math:`z_{-1}` is an auxiliary state inducing the distribution over :math:`z_0`.
-            transition_z_to_z (Tensor): State transition log-probabilities of shape
-                :math:`(C, C)` where ``transition_z_to_z[i, j]`` = :math:`\log P(z_{n+1}=j | z_n=i)`.
-            transition_z_to_l (Tensor): Duration log-probabilities of shape :math:`(C, K)`
-                where ``transition_z_to_l[i, j]`` = :math:`\log P(l_n=j | z_n=i)`.
-            emission_n_l_z (Tensor): Emission log-probabilities of shape
-                :math:`(\text{batch}, N, K, C)` where ``emission[b, n, k, c]`` =
-                :math:`\log P(x_{n:n+k} | z_n=c, l_n=k)`.
-
-        Returns:
-            Tensor: Edge potentials of shape :math:`(\text{batch}, N, K, C, C)` where:
-
-            .. math::
-                \text{edge}[b, n, k, c_2, c_1] = \log P(z_n=c_2 | z_{n-1}=c_1)
-                + \log P(l_n=k | z_n=c_2) + \log P(x_{n:n+k} | z_n=c_2, l_n=k)
-
-            with the initial state distribution added at position 0.
-
-        Examples::
-
-            >>> C, K, N, batch = 4, 8, 100, 2
-            >>> init = torch.log_softmax(torch.randn(C), dim=-1)
-            >>> trans_z = torch.log_softmax(torch.randn(C, C), dim=-1)
-            >>> trans_l = torch.log_softmax(torch.randn(C, K), dim=-1)
-            >>> emission = torch.randn(batch, N, K, C)
-            >>> edge = SemiMarkov.hsmm(init, trans_z, trans_l, emission)
-            >>> edge.shape
-            torch.Size([2, 100, 8, 4, 4])
-        """
+        """Convert HSMM params (init, trans, duration, emission) to edge potentials."""
         batch, N, K, C = emission_n_l_z.shape
         edges = torch.zeros(batch, N, K, C, C).type_as(emission_n_l_z)
 

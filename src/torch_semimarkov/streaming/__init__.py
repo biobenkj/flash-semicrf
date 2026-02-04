@@ -30,7 +30,7 @@ eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
     +-----------------------+------------------+-------------------+
 
     For the T=400K case, the edge tensor cannot fit in memory. This module
-    computes edges on-the-fly from O(T×C) cumulative scores instead.
+    computes edges on-the-fly from O(TxC) cumulative scores instead.
 
     **Performance comparison (forward-only, NVIDIA L40S):**
 
@@ -39,17 +39,17 @@ eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
     +-----------------------+---------------------+---------------------+-------------------+
     | Configuration         | triton_scan         | streaming           | Streaming wins by |
     +=======================+=====================+=====================+===================+
-    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           | 3.35× faster      |
+    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           | 3.35x faster      |
     +-----------------------+---------------------+---------------------+-------------------+
-    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          | 1.48× faster      |
+    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          | 1.48x faster      |
     +-----------------------+---------------------+---------------------+-------------------+
 
     Why streaming is faster:
 
-    - **Memory bandwidth**: Loading O(T×K×C²) edges from memory is slower than
-      computing O(T×C) edge blocks on-the-fly from cumulative scores
+    - **Memory bandwidth**: Loading O(TxKxC²) edges from memory is slower than
+      computing O(TxC) edge blocks on-the-fly from cumulative scores
     - **Cache efficiency**: Streaming keeps working set in L1/L2 cache
-    - **Linear batch scaling**: Memory grows as O(batch×T×C), not O(batch×T×K×C²)
+    - **Linear batch scaling**: Memory grows as O(batchxTxC), not O(batchxTxKxC²)
 
     **Training advantages:**
 
@@ -72,8 +72,8 @@ This module takes **cumulative scores** and computes edges on-the-fly::
 
 Memory Complexity
 -----------------
-- Pre-computed edge API (triton_scan): O(T × K × C²) - 2.76 TB for T=400K, K=3K, C=24
-- Streaming API (this module): O(T × C + K × C + C²) - ~50 MB for same dimensions
+- Pre-computed edge API (triton_scan): O(T x K x C²) - 2.76 TB for T=400K, K=3K, C=24
+- Streaming API (this module): O(T x C + K x C + C²) - ~50 MB for same dimensions
 
 Streaming Edge Computation
 --------------------------
@@ -110,6 +110,22 @@ Two critical requirements for T=400K+ sequences:
    smaller than that is completely erased. Zero-centering keeps magnitude
    at √T (~632 for T=400K), preserving signals down to ~10⁻⁴.
 
+Transition Matrix Convention
+----------------------------
+The transition matrix follows ``transition[source, destination]`` convention::
+
+    transition[i, j] = log P(label_j | previous_label_i)
+                     = score for transitioning FROM i TO j
+
+When computing edge potentials, the transition is transposed to match
+the edge tensor orientation ``(C_dest, C_src)``::
+
+    edge[c_dest, c_src] = segment_score[c_dest] + transition.T[c_dest, c_src]
+                        = segment_score[c_dest] + transition[c_src, c_dest]
+
+This transposition ensures efficient memory access during the forward pass,
+where the reduction is over ``c_src`` (the source/previous label).
+
 Usage
 -----
 >>> import torch
@@ -144,6 +160,8 @@ from .pytorch_reference import (
     compute_edge_block_streaming,
     semi_crf_streaming_backward_pytorch,
     semi_crf_streaming_forward_pytorch,
+    semi_crf_streaming_marginals_pytorch,
+    semi_crf_streaming_viterbi_with_backpointers,
 )
 
 # Re-export HAS_TRITON for external checks
@@ -154,8 +172,15 @@ except ImportError:
 
 # Conditionally export Triton launchers
 if HAS_TRITON:
-    from .triton_backward import launch_streaming_triton_backward
-    from .triton_forward import launch_streaming_triton_kernel
+    from .triton_backward import (
+        launch_streaming_triton_backward,
+        launch_streaming_triton_marginals,
+    )
+    from .triton_forward import (
+        launch_streaming_triton_kernel,
+        launch_streaming_triton_kernel_max_bp,
+        semi_crf_streaming_viterbi_triton,
+    )
 
 __all__ = [
     # Main API
@@ -166,6 +191,8 @@ __all__ = [
     # PyTorch reference implementations
     "semi_crf_streaming_forward_pytorch",
     "semi_crf_streaming_backward_pytorch",
+    "semi_crf_streaming_marginals_pytorch",
+    "semi_crf_streaming_viterbi_with_backpointers",
     "compute_edge_block_streaming",
     # Utilities
     "_compute_checkpoint_interval",
@@ -173,5 +200,8 @@ __all__ = [
     "HAS_TRITON",
     # Triton launchers (conditionally available)
     "launch_streaming_triton_backward",
+    "launch_streaming_triton_marginals",
     "launch_streaming_triton_kernel",
+    "launch_streaming_triton_kernel_max_bp",
+    "semi_crf_streaming_viterbi_triton",
 ]

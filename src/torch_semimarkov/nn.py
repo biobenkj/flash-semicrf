@@ -1,31 +1,6 @@
 r"""Neural network modules for Semi-Markov CRF.
 
-This module provides :class:`torch.nn.Module` wrappers around the streaming Semi-CRF
-kernels, making them easy to integrate with PyTorch Lightning and other training
-frameworks.
-
-Classes:
-    :class:`SemiMarkovCRFHead`: Basic CRF head for sequence labeling.
-    :class:`UncertaintySemiMarkovCRFHead`: Extended CRF head with uncertainty
-        quantification methods for clinical applications.
-
-For clinical applications requiring boundary uncertainty or focused learning,
-use :class:`UncertaintySemiMarkovCRFHead` which provides:
-
-- :meth:`~UncertaintyMixin.compute_boundary_marginals`: :math:`P(\text{boundary at position } t)`
-- :meth:`~UncertaintyMixin.compute_position_marginals`: :math:`P(\text{label}=c \text{ at position } t)`
-- :meth:`~UncertaintyMixin.compute_entropy_streaming`: Approximate entropy for uncertainty
-- :meth:`~UncertaintyMixin.compute_loss_uncertainty_weighted`: Uncertainty-weighted loss for active learning
-
-Examples::
-
-    >>> from torch_semimarkov import UncertaintySemiMarkovCRFHead
-    >>> model = UncertaintySemiMarkovCRFHead(num_classes=5, max_duration=100, hidden_dim=64)
-    >>> boundary_probs = model.compute_boundary_marginals(hidden, lengths)
-
-See Also:
-    :mod:`torch_semimarkov.uncertainty`: Uncertainty quantification module
-    :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`: Streaming API
+Provides :class:`torch.nn.Module` wrappers around streaming Semi-CRF kernels.
 """
 
 from typing import Optional, Union
@@ -36,17 +11,26 @@ from torch import Tensor
 
 from .duration import DurationDistribution, LearnedDuration, create_duration_distribution
 from .helpers import Segment, ViterbiResult, score_gold_vectorized
-from .streaming import semi_crf_streaming_forward
+from .streaming import (
+    HAS_TRITON,
+    semi_crf_streaming_forward,
+    semi_crf_streaming_viterbi_with_backpointers,
+)
+
+# Conditionally import Triton viterbi for GPU acceleration
+if HAS_TRITON:
+    from .streaming import semi_crf_streaming_viterbi_triton
 from .streaming.constants import NEG_INF
 from .streaming.pytorch_reference import compute_edge_block_streaming
-
-# Re-export uncertainty module for convenience
-from .uncertainty import UncertaintyMixin, UncertaintySemiMarkovCRFHead
+from .validation import (
+    validate_device_consistency,
+    validate_hidden_states,
+    validate_labels,
+    validate_lengths,
+)
 
 __all__ = [
     "SemiMarkovCRFHead",
-    "UncertaintyMixin",
-    "UncertaintySemiMarkovCRFHead",
     "Segment",
     "ViterbiResult",
 ]
@@ -83,15 +67,24 @@ class SemiMarkovCRFHead(nn.Module):
             - A :class:`~torch_semimarkov.duration.DurationDistribution` instance
 
             Default: ``None`` (uses learned duration bias)
+        edge_memory_threshold (float, optional): Memory threshold in bytes for
+            switching to streaming backend. Default: ``8e9`` (8GB)
+        num_warps (int, optional): Number of warps per block for Triton kernels.
+            Higher values increase parallelism but also register pressure.
+            Recommended range: 2-8. Default: ``4``
 
     Attributes:
         transition (Parameter): Label transition scores of shape :math:`(C, C)`.
+            Uses ``(source, destination)`` indexing: ``transition[i, j]`` is the
+            score for transitioning FROM label ``i`` TO label ``j``.
         duration_dist (DurationDistribution): Duration distribution module.
         projection (Linear or None): Optional projection from encoder hidden dim.
 
     Properties:
         duration_bias: Returns the current duration bias tensor of shape :math:`(K, C)`.
-            This is a property for backward compatibility - internally uses ``duration_dist()``.
+
+    Transition Matrix Convention:
+        ``transition[i, j]`` = score for transitioning FROM label ``i`` TO label ``j``.
 
     Examples::
 
@@ -122,13 +115,7 @@ class SemiMarkovCRFHead(nn.Module):
         >>> loss.backward()
 
     .. note::
-        For numerical stability at T > 100K, all computations are done in float32.
-        When using with PyTorch Lightning, set ``precision=32`` in the trainer.
-
-    See Also:
-        :class:`UncertaintySemiMarkovCRFHead`: Extended version with uncertainty methods
-        :func:`~torch_semimarkov.streaming.semi_crf_streaming_forward`: Underlying API
-        :mod:`torch_semimarkov.duration`: Available duration distributions
+        For T > 100K, use float32 precision for numerical stability.
     """
 
     def __init__(
@@ -138,10 +125,14 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_dim: Optional[int] = None,
         init_scale: float = 0.1,
         duration_distribution: Optional[Union[str, DurationDistribution]] = None,
+        edge_memory_threshold: float = 8e9,
+        num_warps: int = 4,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.max_duration = max_duration
+        self.edge_memory_threshold = edge_memory_threshold
+        self.num_warps = num_warps
 
         # CRF parameters
         self.transition = nn.Parameter(torch.randn(num_classes, num_classes) * init_scale)
@@ -163,28 +154,140 @@ class SemiMarkovCRFHead(nn.Module):
 
     @property
     def duration_bias(self) -> Tensor:
-        """Duration bias tensor of shape (K, C).
-
-        This property provides backward compatibility. Internally calls
-        ``self.duration_dist()`` to compute the duration bias.
-        """
+        """Duration bias tensor of shape :math:`(K, C)`."""
         return self.duration_dist()
+
+    def _should_use_streaming(self, T: int) -> bool:
+        """Return True if edge tensor would exceed memory threshold."""
+        K = self.max_duration
+        C = self.num_classes
+
+        # Edge tensor size in bytes: T * K * C * C * 4 (float32)
+        edge_tensor_bytes = T * K * C * C * 4
+
+        return edge_tensor_bytes > self.edge_memory_threshold
+
+    def _select_backend(self, T: int, semiring: str, use_triton: bool) -> tuple[str, bool]:
+        """Select backend based on memory and semiring requirements."""
+        # Semirings beyond log/max require exact backend
+        if semiring not in ("log", "max"):
+            if self._should_use_streaming(T):
+                K, C = self.max_duration, self.num_classes
+                raise ValueError(
+                    f"Semiring '{semiring}' requires exact backend, but T={T}, K={K}, C={C} "
+                    f"would require ~{T * K * C * C * 4 / 1e9:.1f}GB edge tensor. "
+                    f"Use 'log' or 'max' semiring for streaming, or reduce T/K/C."
+                )
+            return "exact", False
+
+        # Heuristic-based automatic selection
+        if self._should_use_streaming(T):
+            return "streaming", use_triton
+        else:
+            return "exact", False
+
+    def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
+        """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
+        batch, T, C = scores.shape
+        K = self.max_duration
+
+        # Cumulative scores for content computation
+        # Zero-center before cumsum to match streaming preprocessing
+        # Skip for T=1 since mean of single value zeros out content scores
+        scores_float = scores.float()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
+        cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float32, device=scores.device)
+        cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
+
+        # Build edge tensor with T positions (streaming can access positions 0 to T-1)
+        edge = torch.full(
+            (batch, T, K, C, C), float("-inf"), dtype=torch.float32, device=scores.device
+        )
+
+        for n in range(T):
+            # Loop over valid durations k = 1, 2, ..., min(K, T - n)
+            for k in range(1, min(K, T - n) + 1):
+                # Content score for segment [n, n+k)
+                content = cum_scores[:, n + k, :] - cum_scores[:, n, :]  # (batch, C)
+
+                # Duration k uses index k-1 (0-based indexing)
+                dur_idx = k - 1
+
+                # Add duration bias
+                segment_score = content + self.duration_bias[dur_idx]  # (batch, C)
+
+                # Add transition (C_dest x C_src)
+                # edge[n, dur_idx, c_dest, c_src] = segment_score[c_dest] + transition[c_src, c_dest]
+                edge[:, n, dur_idx] = segment_score.unsqueeze(-1) + self.transition.T.unsqueeze(0)
+
+        return edge
+
+    def _forward_exact(self, scores: Tensor, lengths: Tensor, semiring: str) -> Tensor:
+        """Compute partition via exact edge tensor. O(TKC²) memory."""
+        from .semimarkov import SemiMarkov
+        from .semirings import LogSemiring, MaxSemiring
+
+        SEMIRING_MAP = {"log": LogSemiring, "max": MaxSemiring}
+        semiring_cls = SEMIRING_MAP[semiring]
+
+        # Build edge tensor (O(T*K*C^2) memory)
+        # Edge tensor has shape (batch, T, K, C, C) to match streaming API
+        edge = self._build_edge_tensor(scores, lengths)
+
+        # SemiMarkov interprets edge shape (batch, N-1, K, C, C) as sequence of length N
+        # Since our edge has T positions, SemiMarkov sees N = T + 1
+        # We need to pass lengths + 1 to match
+        model = SemiMarkov(semiring_cls)
+        result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
+        return result[0].squeeze(0)
+
+    def _forward_binary_tree_sharded(
+        self, scores: Tensor, lengths: Tensor, semiring: str
+    ) -> Tensor:
+        """Compute partition via sharded binary tree. Memory-efficient reference implementation.
+
+        Uses CheckpointShardSemiring to reduce peak memory by splitting large matmuls
+        into smaller shards that are processed sequentially with gradient checkpointing.
+        This is slower than streaming but provides a reference implementation for validation.
+        """
+        from .semimarkov import SemiMarkov
+        from .semirings import LogSemiring, MaxSemiring
+        from .semirings.checkpoint import CheckpointShardSemiring
+
+        SEMIRING_MAP = {"log": LogSemiring, "max": MaxSemiring}
+        base_semiring = SEMIRING_MAP[semiring]
+
+        # Wrap semiring with sharded checkpointing for memory efficiency
+        ShardedSemiring = CheckpointShardSemiring(base_semiring, max_size=10000)
+
+        # Build edge tensor (still O(T*K*C^2) memory, but matmuls are sharded)
+        edge = self._build_edge_tensor(scores, lengths)
+
+        # Use binary tree algorithm with sharded semiring
+        model = SemiMarkov(ShardedSemiring)
+        result = model._dp_binary_tree(edge, lengths=lengths + 1, force_grad=True)
+        return result[0].squeeze(0)
 
     def forward(
         self,
         hidden_states: Tensor,
         lengths: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
     ) -> dict:
-        r"""forward(hidden_states, lengths, use_triton=True) -> dict
-
-        Compute partition function from encoder hidden states.
+        r"""Compute partition function from encoder hidden states.
 
         Args:
             hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
                 if projection is enabled, or :math:`(\text{batch}, T, C)` if projection is ``None``.
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            backend (str, optional): Backend selection mode:
+
+                - ``"auto"``: Select based on memory heuristic (default)
+                - ``"streaming"``: Force streaming backend (genome-scale)
+                - ``"exact"``: Force exact backend via ``semimarkov.py``
 
         Returns:
             dict: Dictionary containing:
@@ -193,6 +296,11 @@ class SemiMarkovCRFHead(nn.Module):
             - **cum_scores** (Tensor): Cumulative scores of shape :math:`(\text{batch}, T+1, C)`
               for loss computation.
         """
+        # Input validation
+        validate_hidden_states(hidden_states)
+        validate_lengths(lengths, hidden_states.shape[1], batch_size=hidden_states.shape[0])
+        validate_device_consistency(hidden_states, lengths, names=["hidden_states", "lengths"])
+
         batch, T, _ = hidden_states.shape
 
         # Project to label space if needed
@@ -201,23 +309,67 @@ class SemiMarkovCRFHead(nn.Module):
         else:
             scores = hidden_states
 
+        # Debug check for gradient corruption after projection
+        # This catches NaN propagation from corrupted model parameters early
+        if scores.requires_grad and torch.isnan(scores).any():
+            raise ValueError(
+                "NaN detected in projected scores. This typically indicates gradient "
+                "corruption from a previous backward pass. Check if model parameters "
+                "contain NaN values (e.g., via torch.isnan(param).any() for each param)."
+            )
+
+        # Select backend
+        if backend == "auto":
+            backend_type, use_triton_final = self._select_backend(T, "log", use_triton)
+        elif backend == "streaming":
+            backend_type, use_triton_final = "streaming", use_triton
+        elif backend == "exact":
+            backend_type, use_triton_final = "exact", False
+        elif backend == "binary_tree_sharded":
+            backend_type, use_triton_final = "binary_tree_sharded", False
+        else:
+            raise ValueError(
+                f"Unknown backend: {backend}. "
+                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
+            )
+
         # Build cumulative scores for prefix-sum edge retrieval
         # CRITICAL: Use float32 for numerical stability at T > 100K
+        # Zero-center before cumsum to prevent magnitude drift at long sequences
+        # Skip for T=1 since mean of single value zeros out content scores
+        scores_float = scores.float()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(
             batch, T + 1, self.num_classes, dtype=torch.float32, device=scores.device
         )
-        cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
+        cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
-        # Compute partition function via streaming algorithm
-        partition = semi_crf_streaming_forward(
-            cum_scores,
-            self.transition,
-            self.duration_bias,
-            lengths,
-            self.max_duration,
-            semiring="log",
-            use_triton=use_triton,
-        )
+        # Debug check for NaN in cumsum (can happen if scores have extreme values)
+        if cum_scores.requires_grad and torch.isnan(cum_scores).any():
+            raise ValueError(
+                "NaN detected in cumulative scores after cumsum. This typically indicates "
+                "extreme values in the input scores or projection layer weights."
+            )
+
+        if backend_type == "streaming":
+            # Compute partition function via streaming algorithm
+            partition = semi_crf_streaming_forward(
+                cum_scores,
+                self.transition,
+                self.duration_bias,
+                lengths,
+                self.max_duration,
+                semiring="log",
+                use_triton=use_triton_final,
+                num_warps=self.num_warps,
+            )
+        elif backend_type == "binary_tree_sharded":
+            # Use sharded binary tree backend for memory-efficient reference implementation
+            partition = self._forward_binary_tree_sharded(scores, lengths, "log")
+        else:
+            # Use exact backend via semimarkov.py
+            partition = self._forward_exact(scores, lengths, "log")
 
         return {"partition": partition, "cum_scores": cum_scores}
 
@@ -227,13 +379,10 @@ class SemiMarkovCRFHead(nn.Module):
         lengths: Tensor,
         labels: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
         reduction: str = "mean",
     ) -> Tensor:
-        r"""compute_loss(hidden_states, lengths, labels, use_triton=True, reduction="mean") -> Tensor
-
-        Compute negative log-likelihood loss.
-
-        The NLL loss is computed as:
+        r"""Compute negative log-likelihood loss.
 
         .. math::
             \text{NLL} = \log Z - \text{score}(y^*)
@@ -247,6 +396,8 @@ class SemiMarkovCRFHead(nn.Module):
             labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`. Each position
                 has a label ID. Segments are extracted by finding where labels change.
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            backend (str, optional): Backend selection mode: ``"auto"``, ``"streaming"``,
+                or ``"exact"``. Default: ``"auto"``
             reduction (str, optional): Reduction mode: ``"mean"``, ``"sum"``, or ``"none"``.
                 Default: ``"mean"``
 
@@ -254,7 +405,15 @@ class SemiMarkovCRFHead(nn.Module):
             Tensor: NLL loss. Scalar if reduction is ``"mean"`` or ``"sum"``,
             shape :math:`(\text{batch},)` if ``"none"``.
         """
-        result = self.forward(hidden_states, lengths, use_triton)
+        # Validate labels (hidden_states and lengths validated in forward())
+        validate_labels(
+            labels,
+            self.num_classes,
+            batch_size=hidden_states.shape[0],
+            seq_length=hidden_states.shape[1],
+        )
+
+        result = self.forward(hidden_states, lengths, use_triton, backend)
         partition = result["partition"]
         cum_scores = result["cum_scores"]
 
@@ -270,30 +429,26 @@ class SemiMarkovCRFHead(nn.Module):
             return nll.sum()
         return nll
 
+    def parameter_penalty(self, p: float = 2.0) -> Tensor:
+        r"""Compute Lp penalty on CRF parameters.
+
+        Args:
+            p (float, optional): Norm order (2.0 for L2, 1.0 for L1). Default: ``2.0``
+
+        Returns:
+            Tensor: Scalar penalty :math:`\|W_{\text{trans}}\|_p^p + \|W_{\text{dur}}\|_p^p`.
+        """
+        penalty = self.transition.norm(p=p).pow(p)
+        penalty = penalty + self.duration_bias.norm(p=p).pow(p)
+        return penalty
+
     def _score_gold(
         self,
         cum_scores: Tensor,
         labels: Tensor,
         lengths: Tensor,
     ) -> Tensor:
-        r"""_score_gold(cum_scores, labels, lengths) -> Tensor
-
-        Score the gold segmentation.
-
-        Extracts segments from per-position labels (where label changes indicate
-        segment boundaries) and computes:
-
-        .. math::
-            \text{score} = \sum_i \text{content}_i + \sum_i \text{duration\_bias}_i + \sum_i \text{transition}_i
-
-        Args:
-            cum_scores (Tensor): Cumulative scores of shape :math:`(\text{batch}, T+1, C)`.
-            labels (Tensor): Per-position labels of shape :math:`(\text{batch}, T)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-
-        Returns:
-            Tensor: Gold sequence scores of shape :math:`(\text{batch},)`.
-        """
+        """Score the gold segmentation. Returns shape (batch,)."""
         return score_gold_vectorized(
             cum_scores=cum_scores,
             labels=labels,
@@ -308,28 +463,24 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_states: Tensor,
         lengths: Tensor,
         use_triton: bool = True,
+        backend: str = "auto",
     ) -> Tensor:
-        r"""decode(hidden_states, lengths, use_triton=True) -> Tensor
-
-        Decode best segmentation using Viterbi algorithm.
-
-        Computes the maximum score over all valid segmentations using the
-        max semiring (Viterbi decoding).
+        r"""Compute Viterbi (max) score without path reconstruction.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape :math:`(\text{batch}, T, \text{hidden\_dim})`
-                or :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
+            hidden_states (Tensor): Shape :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
+            lengths (Tensor): Shape :math:`(\text{batch},)`.
+            use_triton (bool, optional): Use Triton kernels. Default: ``True``
+            backend (str, optional): ``"auto"``, ``"streaming"``, or ``"exact"``. Default: ``"auto"``
 
         Returns:
-            Tensor: Best score (max over all segmentations) of shape :math:`(\text{batch},)`.
-
-        .. note::
-            This returns the score, not the actual segmentation. For the full
-            segmentation path, use the :class:`~torch_semimarkov.SemiMarkov` class
-            with :class:`~torch_semimarkov.semirings.MaxSemiring` and extract via marginals.
+            Tensor: Best segmentation scores of shape :math:`(\text{batch},)`.
         """
+        # Input validation
+        validate_hidden_states(hidden_states)
+        validate_lengths(lengths, hidden_states.shape[1], batch_size=hidden_states.shape[0])
+        validate_device_consistency(hidden_states, lengths, names=["hidden_states", "lengths"])
+
         batch, T, _ = hidden_states.shape
 
         # Project to label space if needed
@@ -338,22 +489,50 @@ class SemiMarkovCRFHead(nn.Module):
         else:
             scores = hidden_states
 
+        # Select backend
+        if backend == "auto":
+            backend_type, use_triton_final = self._select_backend(T, "max", use_triton)
+        elif backend == "streaming":
+            backend_type, use_triton_final = "streaming", use_triton
+        elif backend == "exact":
+            backend_type, use_triton_final = "exact", False
+        elif backend == "binary_tree_sharded":
+            backend_type, use_triton_final = "binary_tree_sharded", False
+        else:
+            raise ValueError(
+                f"Unknown backend: {backend}. "
+                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
+            )
+
         # Build cumulative scores
+        # Zero-center before cumsum to prevent magnitude drift at long sequences
+        # Skip for T=1 since mean of single value zeros out content scores
+        scores_float = scores.float()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(
             batch, T + 1, self.num_classes, dtype=torch.float32, device=scores.device
         )
-        cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
+        cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
-        # Use max semiring for Viterbi
-        max_score = semi_crf_streaming_forward(
-            cum_scores,
-            self.transition,
-            self.duration_bias,
-            lengths,
-            self.max_duration,
-            semiring="max",
-            use_triton=use_triton,
-        )
+        if backend_type == "streaming":
+            # Use max semiring for Viterbi
+            max_score = semi_crf_streaming_forward(
+                cum_scores,
+                self.transition,
+                self.duration_bias,
+                lengths,
+                self.max_duration,
+                semiring="max",
+                use_triton=use_triton_final,
+                num_warps=self.num_warps,
+            )
+        elif backend_type == "binary_tree_sharded":
+            # Use sharded binary tree backend for memory-efficient reference implementation
+            max_score = self._forward_binary_tree_sharded(scores, lengths, "max")
+        else:
+            # Use exact backend via semimarkov.py
+            max_score = self._forward_exact(scores, lengths, "max")
 
         return max_score
 
@@ -362,37 +541,29 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_states: Tensor,
         lengths: Tensor,
         max_traceback_length: int = 10000,
+        use_triton: bool = True,
+        backend: str = "auto",
     ) -> ViterbiResult:
-        r"""Decode best segmentation with full path reconstruction.
-
-        Computes the maximum-scoring segmentation using Viterbi algorithm
-        and returns both the score and the actual segment boundaries.
+        r"""Viterbi decode with path reconstruction.
 
         Args:
-            hidden_states (Tensor): Encoder output of shape
-                :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
-            lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
-            max_traceback_length (int, optional): Maximum sequence length for
-                traceback. Sequences longer than this will have empty segment
-                lists (score is still computed). Default: ``10000``
+            hidden_states (Tensor): Shape :math:`(\text{batch}, T, \text{hidden\_dim})` or :math:`(\text{batch}, T, C)`.
+            lengths (Tensor): Shape :math:`(\text{batch},)`.
+            max_traceback_length (int, optional): Maximum T for traceback. Longer
+                sequences return empty segment lists. Default: ``10000``
+            use_triton (bool, optional): Use Triton kernels for forward pass. Default: ``True``
+            backend (str, optional): ``"auto"``, ``"streaming"``, ``"exact"``, or
+                ``"binary_tree_sharded"``. Default: ``"auto"``
 
         Returns:
-            ViterbiResult: Named tuple containing:
-                - **scores** (Tensor): Best scores of shape :math:`(\text{batch},)`.
-                - **segments** (List[List[Segment]]): Per-batch segment lists.
-
-        Note:
-            For very long sequences (T > max_traceback_length), traceback requires
-            O(T × C) memory which may not be feasible. In such cases, the returned
-            segments list will be empty but scores are still computed.
-
-        Example::
-
-            >>> result = crf.decode_with_traceback(hidden_states, lengths)
-            >>> print(f"Score: {result.scores[0].item():.2f}")
-            >>> for seg in result.segments[0]:
-            ...     print(f"  [{seg.start}, {seg.end}] label={seg.label}")
+            ViterbiResult: Named tuple with ``scores`` :math:`(\text{batch},)` and
+            ``segments`` (list of list of :class:`Segment`).
         """
+        # Input validation
+        validate_hidden_states(hidden_states)
+        validate_lengths(lengths, hidden_states.shape[1], batch_size=hidden_states.shape[0])
+        validate_device_consistency(hidden_states, lengths, names=["hidden_states", "lengths"])
+
         batch, T, _ = hidden_states.shape
         device = hidden_states.device
 
@@ -403,41 +574,125 @@ class SemiMarkovCRFHead(nn.Module):
             scores = hidden_states
 
         # Build cumulative scores
+        # Zero-center before cumsum to prevent magnitude drift at long sequences
+        # Skip for T=1 since mean of single value zeros out content scores
+        scores_float = scores.float()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(batch, T + 1, self.num_classes, dtype=torch.float32, device=device)
-        cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
+        cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
-        # Get max scores using streaming API
-        max_scores = semi_crf_streaming_forward(
-            cum_scores,
-            self.transition,
-            self.duration_bias,
-            lengths,
-            self.max_duration,
-            semiring="max",
-            use_triton=False,  # Use PyTorch for traceback compatibility
-        )
-
-        # Perform traceback for each sequence
-        all_segments: list[list[Segment]] = []
-
-        for b in range(batch):
-            seq_len = lengths[b].item()
-
-            # Skip traceback for very long sequences
-            if seq_len > max_traceback_length:
-                all_segments.append([])
-                continue
-
-            if seq_len == 0:
-                all_segments.append([])
-                continue
-
-            # Run forward pass with backpointer storage for this sequence
-            segments = self._traceback_single(
-                cum_scores[b : b + 1],
-                seq_len,
+        # Select backend
+        if backend == "auto":
+            backend_type = "streaming"
+        elif backend == "streaming":
+            backend_type = "streaming"
+        elif backend in ("exact", "binary_tree_sharded"):
+            backend_type = backend
+        else:
+            raise ValueError(
+                f"Unknown backend: {backend}. "
+                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
             )
-            all_segments.append(segments)
+
+        # Check which sequences need traceback
+        needs_traceback = lengths <= max_traceback_length
+        any_needs_traceback = needs_traceback.any().item()
+
+        # Non-streaming backends use per-sequence traceback
+        if backend_type in ("exact", "binary_tree_sharded"):
+            all_segments: list[list[Segment]] = []
+            max_scores_list = []
+
+            for b in range(batch):
+                seq_len = int(lengths[b].item())
+                if seq_len > max_traceback_length:
+                    # Skip traceback for long sequences
+                    all_segments.append([])
+                    # Still need to compute score - use streaming for efficiency
+                    score = semi_crf_streaming_forward(
+                        cum_scores[b : b + 1],
+                        self.transition,
+                        self.duration_bias,
+                        lengths[b : b + 1],
+                        self.max_duration,
+                        semiring="max",
+                        use_triton=False,
+                    )
+                    max_scores_list.append(score)
+                else:
+                    # Use _traceback_single for per-sequence Viterbi with backpointers
+                    segments = self._traceback_single(cum_scores[b], seq_len)
+                    all_segments.append(segments)
+                    # Compute max score from segments
+                    if segments:
+                        max_scores_list.append(
+                            torch.tensor(
+                                sum(seg.score for seg in segments),
+                                device=device,
+                                dtype=torch.float32,
+                            )
+                        )
+                    else:
+                        # Empty segments - compute score via forward pass
+                        score = semi_crf_streaming_forward(
+                            cum_scores[b : b + 1],
+                            self.transition,
+                            self.duration_bias,
+                            lengths[b : b + 1],
+                            self.max_duration,
+                            semiring="max",
+                            use_triton=False,
+                        )
+                        max_scores_list.append(score.squeeze(0))
+
+            max_scores = torch.stack(max_scores_list)
+            return ViterbiResult(scores=max_scores, segments=all_segments)
+
+        # Streaming backend - use batched Viterbi with backpointers
+        if any_needs_traceback:
+            can_use_triton = False  # Triton backpointer disabled (memory corruption)
+
+            # Get max scores AND backpointers in a single forward pass
+            if can_use_triton:
+                max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_triton(
+                    cum_scores,
+                    self.transition,
+                    self.duration_bias,
+                    lengths,
+                    self.max_duration,
+                )
+            else:
+                max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_with_backpointers(
+                    cum_scores,
+                    self.transition,
+                    self.duration_bias,
+                    lengths,
+                    self.max_duration,
+                )
+
+            # Fast O(T) traceback using backpointers
+            all_segments = self._traceback_from_backpointers(
+                bp_k, bp_c, final_labels, lengths, cum_scores
+            )
+
+            # Clear segments for sequences that exceeded max_traceback_length
+            for b in range(batch):
+                if lengths[b].item() > max_traceback_length:
+                    all_segments[b] = []
+        else:
+            # No sequences need traceback - just compute scores
+            max_scores = semi_crf_streaming_forward(
+                cum_scores,
+                self.transition,
+                self.duration_bias,
+                lengths,
+                self.max_duration,
+                semiring="max",
+                use_triton=use_triton,
+                num_warps=self.num_warps,
+            )
+            all_segments = [[] for _ in range(batch)]
 
         return ViterbiResult(scores=max_scores, segments=all_segments)
 
@@ -446,15 +701,7 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores: Tensor,
         seq_len: int,
     ) -> list[Segment]:
-        """Traceback for a single sequence to recover optimal segmentation.
-
-        Args:
-            cum_scores: Cumulative scores of shape (1, T+1, C).
-            seq_len: Actual sequence length.
-
-        Returns:
-            List of Segment objects forming the optimal segmentation.
-        """
+        """Viterbi traceback for single sequence. O(TC) memory."""
         device = cum_scores.device
         C = self.num_classes
         K = self.max_duration
@@ -470,9 +717,10 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Forward pass with backpointer storage
         for t in range(1, seq_len + 1):
-            k_eff = min(K - 1, t)
+            # Number of valid durations at this position: k = 1, 2, ..., min(K, t)
+            k_eff = min(K, t)
 
-            for k in range(1, max(k_eff + 1, 2)):  # max ensures K=1 processes duration 1
+            for k in range(1, k_eff + 1):
                 start = t - k
 
                 # Compute edge block for this (start, k)
@@ -530,6 +778,58 @@ class SemiMarkovCRFHead(nn.Module):
         segments.reverse()
         return segments
 
+    def _traceback_from_backpointers(
+        self,
+        bp_k: Tensor,
+        bp_c: Tensor,
+        final_labels: Tensor,
+        lengths: Tensor,
+        cum_scores: Tensor,
+    ) -> list[list[Segment]]:
+        """O(T) traceback using pre-computed backpointers."""
+        batch = lengths.shape[0]
+        all_segments: list[list[Segment]] = []
+
+        for b in range(batch):
+            seq_len = lengths[b].item()
+            segments: list[Segment] = []
+
+            if seq_len == 0:
+                all_segments.append(segments)
+                continue
+
+            t = seq_len
+            c = final_labels[b].item()
+
+            while t > 0:
+                # bp_k and bp_c are 0-indexed: position t corresponds to index t-1
+                k = bp_k[b, t - 1, c].item()
+                c_prev = bp_c[b, t - 1, c].item()
+
+                if k == 0:
+                    # Safety check - shouldn't happen with proper forward pass
+                    break
+
+                start = t - k
+                end = t - 1  # Segment is [start, end] inclusive
+
+                # Compute segment score
+                # Always include transition, even for first segment - the forward pass
+                # computes: max_{c_src} [alpha[0, c_src] + segment_score + transition[c_src, c_dest]]
+                # where alpha[0, c_src] = 0, so transition from c_prev is part of the score
+                seg_score = self._compute_segment_score(cum_scores[b], start, end, c, c_prev)
+
+                segments.append(Segment(start=start, end=end, label=c, score=seg_score))
+
+                t = start
+                c = c_prev
+
+            # Reverse to get segments in order
+            segments.reverse()
+            all_segments.append(segments)
+
+        return all_segments
+
     def _compute_segment_score(
         self,
         cum_scores: Tensor,
@@ -538,13 +838,13 @@ class SemiMarkovCRFHead(nn.Module):
         label: int,
         prev_label: Optional[int],
     ) -> float:
-        """Compute the score contribution of a single segment."""
+        """Compute content + duration_bias + transition for a segment."""
         # Content score
         content = (cum_scores[end + 1, label] - cum_scores[start, label]).item()
 
-        # Duration bias (duration_bias[k] stores bias for segments of duration k)
+        # Duration bias: duration k uses index k-1
         duration = end - start + 1
-        dur_idx = min(duration, self.max_duration - 1)  # Clamp to valid range
+        dur_idx = duration - 1  # Duration k uses index k-1
         dur_bias = self.duration_bias[dur_idx, label].item()
 
         # Transition (if not first segment)

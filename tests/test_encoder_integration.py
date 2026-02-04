@@ -1,6 +1,6 @@
 """Integration tests for Transformer/Mamba encoders with SemiMarkovCRFHead.
 
-Tests encoder → decoder integration for clinical applications:
+Tests encoder -> decoder integration for clinical applications:
 - Forward pass shape validation
 - Gradient flow through encoder to CRF
 - Clinical sequence lengths (256, 512, 1000, 2048, 5000)

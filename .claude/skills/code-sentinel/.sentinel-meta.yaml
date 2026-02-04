@@ -1,0 +1,190 @@
+# Code Sentinel Metadata
+# Machine-readable state for automation and status queries
+
+version: 2.0
+last_global_verification: 2026-02-02T00:00:00Z
+
+# Note: Dual indexing scheme active during benchmarking phase
+# - Streaming backends: 0-based (dur_idx = k - 1) - production target
+# - Non-streaming backends: 1-based (dur_idx = k) - legacy
+# See dispatch-overview.md and non-streaming-backends.md for details
+
+sentinels:
+  triton-forward-k3plus:
+    verified_commit: 0c9b73e
+    source_files:
+      - src/torch_semimarkov/streaming/triton_forward.py
+    assumptions_mechanical: [A1, A2, A3, A5]
+    assumptions_agent: [A4]
+    anchors:
+      - KERNEL_ENTRY
+      - MAIN_LOOP_START
+      - RING_BUFFER_READ
+      - NEGINF_GUARD
+      - RING_BUFFER_WRITE
+      - CHECKPOINT_SAVE
+      - KERNEL_LAUNCH
+    linked_tests:
+      - tests/test_streaming_triton.py::TestTritonBasic::test_triton_matches_pytorch_small
+      - tests/test_streaming_triton.py::TestTritonBasic::test_triton_nans
+    status: VERIFIED
+    # depends_on: Traces that should be loaded alongside this one for full context.
+    # Currently advisory; no transitive verification implemented.
+    depends_on:
+      - dispatch-overview
+      - autograd-kernel-interface
+
+  dispatch-overview:
+    verified_commit: 26119fa
+    source_files:
+      - src/torch_semimarkov/streaming/autograd.py
+      - src/torch_semimarkov/semimarkov.py
+    assumptions_mechanical: [D1, D2, D3, D4]
+    assumptions_agent: [D5]
+    anchors:
+      - CAN_USE_TRITON
+      - STREAMING_ENTRY
+      - K1_DISPATCH
+      - K2_DISPATCH
+      - TRITON_DISPATCH
+    linked_tests:
+      - tests/test_streaming_triton.py::TestDispatch
+      - tests/test_semimarkov.py
+    status: VERIFIED
+    depends_on: []
+
+  autograd-kernel-interface:
+    verified_commit: 871c352
+    source_files:
+      - src/torch_semimarkov/streaming/autograd.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors:
+      - TRITON_FORWARD_CLASS
+      - PARTITION_VALIDATION
+    linked_tests:
+      - tests/test_streaming_triton.py::TestTritonGradients
+    status: VERIFIED
+    depends_on: []
+
+  # Remaining traces (lighter coverage)
+  triton-backward-k3plus:
+    verified_commit: b05260f
+    source_files:
+      - src/torch_semimarkov/streaming/triton_backward.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests:
+      - tests/test_streaming_triton.py::TestTritonGradients
+      - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
+    status: VERIFIED
+    depends_on:
+      - triton-forward-k3plus
+
+  pytorch-forward-k3plus:
+    verified_commit: d9aff99
+    source_files:
+      - src/torch_semimarkov/streaming/pytorch_reference.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests: []
+    status: VERIFIED
+    depends_on: []
+
+  pytorch-backward-k3plus:
+    verified_commit: d9aff99
+    source_files:
+      - src/torch_semimarkov/streaming/pytorch_reference.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests: []
+    status: VERIFIED
+    depends_on:
+      - pytorch-forward-k3plus
+
+  k1-linear-crf:
+    verified_commit: d9aff99
+    source_files:
+      - src/torch_semimarkov/streaming/pytorch_reference.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests: []
+    status: VERIFIED
+    depends_on: []
+
+  k2-fast-path:
+    verified_commit: d9aff99
+    source_files:
+      - src/torch_semimarkov/streaming/pytorch_reference.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests: []
+    status: VERIFIED
+    depends_on: []
+
+  non-streaming-backends:
+    verified_commit: 26119fa
+    source_files:
+      - src/torch_semimarkov/semimarkov.py
+    assumptions_mechanical: []
+    assumptions_agent: []
+    anchors: []
+    linked_tests: []
+    status: VERIFIED
+    depends_on: []
+
+  crf-heads:
+    verified_commit: 6d6c535
+    source_files:
+      - src/torch_semimarkov/nn.py
+    assumptions_mechanical: [N1, N2, N3, N4, N5]
+    assumptions_agent: [N6, N7, N8]
+    anchors:
+      - CLASS_DEFINITION
+      - INIT_METHOD
+      - FORWARD_METHOD
+      - ZERO_CENTER
+      - FLOAT32_CONVERT
+      - NAN_CHECK_PROJECTION
+      - NAN_CHECK_CUMSUM
+      - BACKEND_SELECT
+      - COMPUTE_LOSS
+      - DECODE_METHOD
+      - DECODE_TRACEBACK
+      - STREAMING_FORWARD_CALL
+    linked_tests:
+      - tests/test_semimarkov.py
+      - tests/test_streaming_triton.py::TestTritonBasic
+    status: VERIFIED
+    depends_on:
+      - dispatch-overview
+
+test_bindings:
+  # Maps source files to tests that should run when they change
+  src/torch_semimarkov/streaming/triton_forward.py:
+    - tests/test_streaming_triton.py::TestTritonBasic
+    - tests/test_streaming_triton.py::TestNumericalStability
+    - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
+  src/torch_semimarkov/streaming/triton_backward.py:
+    - tests/test_streaming_triton.py::TestTritonBasic
+    - tests/test_streaming_triton.py::TestGradients
+    - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
+  src/torch_semimarkov/streaming/autograd.py:
+    - tests/test_streaming_triton.py::TestDispatch
+    - tests/test_semimarkov.py
+    - tests/test_streaming_k_boundaries.py::TestKBoundaryTransitions
+  src/torch_semimarkov/streaming/pytorch_reference.py:
+    - tests/test_semimarkov.py
+    - tests/test_streaming_triton.py::TestTritonBasic
+    - tests/test_streaming_k_boundaries.py::TestK1LinearCRFBoundary
+    - tests/test_streaming_k_boundaries.py::TestK2SpecializedBoundary
+  src/torch_semimarkov/semimarkov.py:
+    - tests/test_semimarkov.py
+  src/torch_semimarkov/nn.py:
+    - tests/test_semimarkov.py
+    - tests/test_streaming_triton.py::TestTritonBasic
