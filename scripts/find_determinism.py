@@ -300,7 +300,7 @@ def main():
         minor = []  # < 0.1% relative diff (likely acceptable GPU noise)
 
         for T, C, K, C_PAD, result in bad_backward_configs:
-            max_rel = max(result['rel_diff_cs'], result['rel_diff_tr'], result['rel_diff_db'])
+            max_rel = max(result["rel_diff_cs"], result["rel_diff_tr"], result["rel_diff_db"])
             entry = (T, C, K, C_PAD, result, max_rel)
             if max_rel > 0.01:
                 severe.append(entry)
@@ -311,17 +311,21 @@ def main():
 
         if severe:
             print(f"\n  [SEVERE] {len(severe)} configs with >1% relative diff (likely bug):")
-            for T, C, K, C_PAD, result, max_rel in severe:
+            for T, C, K, _C_PAD, _result, max_rel in severe:
                 print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.2%}")
 
         if moderate:
-            print(f"\n  [MODERATE] {len(moderate)} configs with 0.1%-1% relative diff (worth investigating):")
-            for T, C, K, C_PAD, result, max_rel in moderate:
+            print(
+                f"\n  [MODERATE] {len(moderate)} configs with 0.1%-1% relative diff (worth investigating):"
+            )
+            for T, C, K, _C_PAD, _result, max_rel in moderate:
                 print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.2%}")
 
         if minor:
-            print(f"\n  [MINOR] {len(minor)} configs with <0.1% relative diff (acceptable GPU noise):")
-            for T, C, K, C_PAD, result, max_rel in minor:
+            print(
+                f"\n  [MINOR] {len(minor)} configs with <0.1% relative diff (acceptable GPU noise):"
+            )
+            for T, C, K, _C_PAD, _result, max_rel in minor:
                 print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.4%}")
 
         # Overall assessment

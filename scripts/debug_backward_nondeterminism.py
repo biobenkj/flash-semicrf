@@ -22,6 +22,10 @@ If these values differ between runs, it indicates where non-determinism enters.
 
 import torch
 
+from torch_semimarkov.streaming.pytorch_reference import (
+    semi_crf_streaming_backward_pytorch,
+    semi_crf_streaming_forward_pytorch,
+)
 from torch_semimarkov.streaming.triton_backward import (
     launch_streaming_triton_backward,
 )
@@ -29,10 +33,6 @@ from torch_semimarkov.streaming.triton_forward import (
     _compute_checkpoint_interval,
     _next_power_of_2,
     launch_streaming_triton_kernel,
-)
-from torch_semimarkov.streaming.pytorch_reference import (
-    semi_crf_streaming_backward_pytorch,
-    semi_crf_streaming_forward_pytorch,
 )
 
 
@@ -94,8 +94,12 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
     pytorch_grad_tr_reduced = pytorch_grad_tr.sum(dim=0)  # (batch, C, C) -> (C, C)
     pytorch_grad_db_reduced = pytorch_grad_db.sum(dim=0)  # (batch, K, C) -> (K, C)
     print(f"  PyTorch log_Z = {pytorch_log_Z[0].item():.6f}")
-    print(f"  PyTorch grad_tr shape: {pytorch_grad_tr.shape} -> reduced: {pytorch_grad_tr_reduced.shape}")
-    print(f"  PyTorch grad_db shape: {pytorch_grad_db.shape} -> reduced: {pytorch_grad_db_reduced.shape}")
+    print(
+        f"  PyTorch grad_tr shape: {pytorch_grad_tr.shape} -> reduced: {pytorch_grad_tr_reduced.shape}"
+    )
+    print(
+        f"  PyTorch grad_db shape: {pytorch_grad_db.shape} -> reduced: {pytorch_grad_db_reduced.shape}"
+    )
     # Use valid index based on C dimension
     c_idx = min(C - 1, 6)  # Use index 6 or last valid index
     print(f"  PyTorch grad_cs[0,9,{c_idx}] = {pytorch_grad_cs[0, 9, c_idx].item():.6f}")
@@ -110,7 +114,7 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
             )
 
             if run_idx == 0:
-                print(f"\nForward pass:")
+                print("\nForward pass:")
                 print(f"  partition[0] = {partition[0].item():.6f}")
                 print(f"  log_norm_ckpts[0] = {log_norm_ckpts[0].tolist()}")
 
@@ -138,11 +142,13 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
             if has_nan:
                 print(f"  Run {run_idx}: NaN detected!")
 
-            results.append({
-                "grad_cs": grad_cum_scores.clone(),
-                "grad_tr": grad_transition.clone(),
-                "grad_db": grad_duration_bias.clone(),
-            })
+            results.append(
+                {
+                    "grad_cs": grad_cum_scores.clone(),
+                    "grad_tr": grad_transition.clone(),
+                    "grad_db": grad_duration_bias.clone(),
+                }
+            )
 
     # Compare each run against PyTorch reference
     print(f"\n--- Comparison vs PyTorch Reference (grad_cs[0,9,{c_idx}]) ---")
@@ -152,21 +158,25 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
         diff = abs(triton_val - pytorch_val)
         rel_diff = diff / (abs(pytorch_val) + 1e-8)
         match = "[MATCH]" if rel_diff < 0.01 else "[DIFF]"
-        print(f"  Run {run_idx}: Triton={triton_val:.6f}, PyTorch={pytorch_val:.6f}, "
-              f"diff={diff:.6e}, rel={rel_diff:.2%} {match}")
+        print(
+            f"  Run {run_idx}: Triton={triton_val:.6f}, PyTorch={pytorch_val:.6f}, "
+            f"diff={diff:.6e}, rel={rel_diff:.2%} {match}"
+        )
 
     # Also compare full tensors
     # Use reduced PyTorch gradients for grad_tr and grad_db comparison
-    print(f"\n--- Full Tensor Comparison vs PyTorch ---")
+    print("\n--- Full Tensor Comparison vs PyTorch ---")
     for run_idx in range(num_runs):
         diff_cs = (results[run_idx]["grad_cs"].cpu() - pytorch_grad_cs).abs()
         diff_tr = (results[run_idx]["grad_tr"].cpu() - pytorch_grad_tr_reduced).abs()
         diff_db = (results[run_idx]["grad_db"].cpu() - pytorch_grad_db_reduced).abs()
-        print(f"  Run {run_idx}: max_diff_cs={diff_cs.max():.6e}, "
-              f"max_diff_tr={diff_tr.max():.6e}, max_diff_db={diff_db.max():.6e}")
+        print(
+            f"  Run {run_idx}: max_diff_cs={diff_cs.max():.6e}, "
+            f"max_diff_tr={diff_tr.max():.6e}, max_diff_db={diff_db.max():.6e}"
+        )
 
     # Analyze differences between runs
-    print(f"\n--- Difference Analysis (Run-to-Run) ---")
+    print("\n--- Difference Analysis (Run-to-Run) ---")
 
     ref = results[0]
     for run_idx in range(1, num_runs):
@@ -206,7 +216,9 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
                     dst_idx = flat_idx % diff_tr.shape[2]
                     print(f"    grad_tr max diff at: k={k_idx}, src={src_idx}, dst={dst_idx}")
                     print(f"      Run 0: {ref['grad_tr'][k_idx, src_idx, dst_idx].item():.6f}")
-                    print(f"      Run {run_idx}: {curr['grad_tr'][k_idx, src_idx, dst_idx].item():.6f}")
+                    print(
+                        f"      Run {run_idx}: {curr['grad_tr'][k_idx, src_idx, dst_idx].item():.6f}"
+                    )
                 else:  # (C, C)
                     src_idx = flat_idx // diff_tr.shape[1]
                     dst_idx = flat_idx % diff_tr.shape[1]
@@ -224,19 +236,19 @@ def test_config_detailed(batch, T, C, K, num_runs=5, device="cuda"):
                 print(f"      Run {run_idx}: {curr['grad_db'][k_idx, c_idx].item():.6f}")
 
     # Print gradient statistics from first run
-    print(f"\n--- Gradient Statistics (Run 0) ---")
-    print(f"grad_cum_scores:")
+    print("\n--- Gradient Statistics (Run 0) ---")
+    print("grad_cum_scores:")
     print(f"  shape: {ref['grad_cs'].shape}")
     print(f"  range: [{ref['grad_cs'].min().item():.6f}, {ref['grad_cs'].max().item():.6f}]")
     print(f"  mean: {ref['grad_cs'].mean().item():.6f}")
     print(f"  nonzero: {(ref['grad_cs'].abs() > 1e-8).sum().item()}")
 
-    print(f"grad_transition:")
+    print("grad_transition:")
     print(f"  shape: {ref['grad_tr'].shape}")
     print(f"  range: [{ref['grad_tr'].min().item():.6f}, {ref['grad_tr'].max().item():.6f}]")
     print(f"  mean: {ref['grad_tr'].mean().item():.6f}")
 
-    print(f"grad_duration_bias:")
+    print("grad_duration_bias:")
     print(f"  shape: {ref['grad_db'].shape}")
     print(f"  range: [{ref['grad_db'].min().item():.6f}, {ref['grad_db'].max().item():.6f}]")
     print(f"  mean: {ref['grad_db'].mean().item():.6f}")
@@ -274,7 +286,7 @@ def main():
     # Debug prints are conditional on t=9, k=1
     configs = [
         # (batch, T, C, K)
-        (2, 20, 8, 10),    # Config 1: T=20, C=8, K=10 - 348.26% rel diff (FAILS)
+        (2, 20, 8, 10),  # Config 1: T=20, C=8, K=10 - 348.26% rel diff (FAILS)
         # (2, 50, 8, 5),   # Config 2: T=50, C=8, K=5 - 335.92% rel diff
         # (2, 100, 8, 5),  # Config 3: T=100, C=8, K=5 - 356.67% rel diff
     ]
