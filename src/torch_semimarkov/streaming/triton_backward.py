@@ -995,7 +995,9 @@ if HAS_TRITON:
 
         # Compute adaptive TILE_C based on number of classes
         # Forces multiple tiles at small C to reduce atomic contention
-        tile_c = _compute_tile_c(C)
+        # tile_c = _compute_tile_c(C)
+        # DEBUG
+        tile_c = C_PAD
 
         # Validate cache if requested (only validates num_warps)
         # Note: TILE_C is handled automatically by Triton's cache via tl.constexpr
