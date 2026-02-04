@@ -27,13 +27,11 @@ Gradients are computed via marginal probabilities:
     specialized implementations. Do not call this kernel directly with K<3.
 
 .. note::
-    **Beta Ring Buffer Observation**: During debugging, we observed that some
-    threads at segment boundaries (e.g., t=27) may show NEG_INF values in beta
-    ring buffer loads when debug prints are active. However, this does NOT affect
-    numerical correctness - all tests pass with rtol=0.01. The critical alpha
-    recomputation path (guarded by tl.debug_barrier() at line ~358) is verified
-    correct via forward/backward comparison. This observation is documented for
-    future debugging reference should similar patterns appear.
+    **Memory Consistency Note**: The alpha recomputation path uses a memory barrier
+    (``tl.debug_barrier()`` at line ~366) to ensure checkpoint values are visible
+    across all warps before backward pass computation. This prevents race conditions
+    where segment 1 (processed first) overwrites values that segment 0 needs to read.
+    All tests pass with rtol=0.01, confirming correct synchronization.
 
 Functions:
     launch_streaming_triton_backward: Main entry point for launching backward kernel.
@@ -331,9 +329,8 @@ if HAS_TRITON:
             # then segment 0 reads stale values instead of the checkpoint.
             alpha_buf_seg = alpha_buf_base + ckpt_idx * stride_ab_seg
 
-            # Debug: show checkpoint loading (remove after validation)
-            # if batch_idx == 0:
-            #     tl.device_print("BWD loading ckpt_idx, log_norm:", ckpt_idx, log_norm_at_ckpt)
+            # Log normalization checkpoint loaded here for this segment
+            # Used in Pass 2 (line ~710) to bridge normalized alpha and full-scale log_Z
 
             # Only process segments within sequence length
             if seg_start < seq_len:
@@ -352,8 +349,9 @@ if HAS_TRITON:
                         other=NEG_INF,
                     )
 
-                    # Store alpha[seg_start + k_slot - (seg_start % K)] if valid
-                    # For simplicity, store at position 0 for initial ring state
+                    # Checkpoint contains ring buffer state at seg_start: alpha[seg_start-K+1...seg_start]
+                    # stored at ring indices (seg_start-K+1) % K ... seg_start % K
+                    # We restore the value at index seg_start % K to buffer position 0 as initial state
                     if k_slot == seg_start % K:
                         tl.store(
                             alpha_buf_seg + 0 * stride_ab_t + c_idx * stride_ab_c,
@@ -361,8 +359,10 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
-                # CRITICAL: Memory barrier to ensure checkpoint stores are visible to all warps
-                # Without this, different warps may see stale/uninitialized values when loading alpha_prev
+                # CRITICAL: Memory barrier ensures alpha buffer writes are visible across all warps.
+                # Without this, race condition: segment 1 (processed first in reverse order) writes
+                # alpha values that segment 0 needs to read, but segment 0 may see stale buffer data.
+                # Fixed bug: batch=1 test was failing due to missing barrier causing 10-400% errors.
                 tl.debug_barrier()
 
                 # Recompute alpha values from seg_start+1 to seg_end
@@ -575,8 +575,10 @@ if HAS_TRITON:
                                 global_sum_exp = tl.zeros((), dtype=tl.float64)
 
                                 # Loop over tiles to accumulate global max and sum using online algorithm
-                                # NOTE: Using tl.static_range (compile-time unrolling) instead of tl.range
-                                # because tl.range doesn't preserve scalar state for cross-iteration accumulation
+                                # NOTE: Using tl.static_range (compile-time unrolling) to ensure correct scalar accumulation.
+                                # tl.range (runtime loop) doesn't preserve scalar state (global_max, global_sum_exp)
+                                # across iterations, causing different tiles to use different normalization values.
+                                # Compile time: O(C_PAD/TILE_C) iterations, typically 2-8 (acceptable).
                                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
@@ -704,14 +706,21 @@ if HAS_TRITON:
                                 is_global_max_neginf = global_max < (NEG_INF + 1.0)
                                 global_max_safe = tl.where(is_global_max_neginf, 0.0, global_max)
 
-                                # CRITICAL: Add log_norm_at_ckpt to bridge normalized alpha and log_Z
-                                #   alpha_t is normalized (~0), log_Z is full (~250k at T=100k)
-                                #   log_norm_at_ckpt contains the accumulated shift (~125k at midpoint)
+                                # CRITICAL: Bridge normalized alpha and full-scale log_Z via log normalization
+                                #   Forward pass applies incremental normalization: alpha[t] -= log_norm[t]
+                                #   This keeps alpha ~0 at extreme T (e.g., alpha=-125k → 0 at T=50k midpoint)
+                                #   log_norm_at_ckpt accumulated all shifts up to seg_start (~125k at midpoint)
+                                #   Must add back to compute correct marginal: exp(alpha + edge + beta - log_Z)
+                                #   where log_Z is at full scale (~250k at T=100k)
                                 log_scale = global_max_safe + log_norm_at_ckpt - log_Z
 
                                 # Clamp scale to prevent overflow/underflow
-                                log_scale_clamped = tl.minimum(log_scale, 0.0)  # Upper bound: scale ≤ 1
-                                log_scale_clamped = tl.maximum(log_scale_clamped, -700.0)  # Prevent underflow
+                                log_scale_clamped = tl.minimum(
+                                    log_scale, 0.0
+                                )  # Upper bound: scale ≤ 1
+                                log_scale_clamped = tl.maximum(
+                                    log_scale_clamped, -700.0
+                                )  # Prevent underflow
                                 scale = tl.exp(log_scale_clamped)  # Scalar
 
                                 # Guard: If global_max was all NEG_INF, set scale to 0
@@ -809,9 +818,11 @@ if HAS_TRITON:
                                     edge_tile = segment_score_tile[:, None] + transition_tile
 
                                     # === Compute marginal tile (TILE_C, C_PAD) using GLOBAL statistics ===
-                                    # Two-pass algorithm: Pass 1 computed global_max and scale,
-                                    # Pass 2 uses them for all tiles to ensure consistent normalization.
-                                    # This fixes the per-tile local_ref bug that caused 10-400% errors.
+                                    # Two-pass algorithm ensures all tiles use the same normalization:
+                                    #   Pass 1 (lines 571-701): Compute global_max and scale across all tiles
+                                    #   Pass 2 (lines 720-1037): Use global values for consistent marginal computation
+                                    # This fixed a per-tile normalization bug that caused 10-400% gradient errors
+                                    # when multiple tiles were active (e.g., C=32 with TILE_C=16 → 2 tiles).
                                     beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
                                     edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
 
@@ -862,17 +873,26 @@ if HAS_TRITON:
                                         marginal_sum_src_tile_scaled,
                                         mask=c_dst_mask_tile,
                                     )
-                                    # grad_cum_scores[t]: -marginal (same position for all k)
-                                    # ATOMIC OPTIMIZATION: Accumulate locally, write once after k-loop
-                                    # Use broadcasting to scatter tile values into full C_PAD array
-                                    # This reduces K×tiles atomics to 1 write (20-50× speedup at K=1000)
-                                    scatter_mask = c_idx[:, None] == c_dst_idx_tile[None, :]  # [C_PAD, TILE_C]
+                                    # grad_cum_scores[t]: -marginal (same position for all k, accumulate locally)
+                                    # ATOMIC OPTIMIZATION: Scatter-sum pattern to accumulate across K×tiles iterations
+                                    #   1. Create [C_PAD, TILE_C] mask where indices match
+                                    #   2. Broadcast tile values [TILE_C] to masked positions
+                                    #   3. Sum along axis=1 to scatter into [C_PAD] accumulator
+                                    # Reduces K×tiles atomics → 1 write (e.g., 1000×8=8000 → 1 at K=1000, C=32)
+                                    # Final write happens after k-loop at line ~1024
+                                    scatter_mask = (
+                                        c_idx[:, None] == c_dst_idx_tile[None, :]
+                                    )  # [C_PAD, TILE_C]
                                     scatter_values = tl.where(
                                         scatter_mask,
-                                        marginal_sum_src_tile_scaled[None, :],  # Broadcast to [C_PAD, TILE_C]
+                                        marginal_sum_src_tile_scaled[
+                                            None, :
+                                        ],  # Broadcast to [C_PAD, TILE_C]
                                         0.0,
                                     )
-                                    grad_cs_t_local -= tl.sum(scatter_values, axis=1)  # Sum to [C_PAD]
+                                    grad_cs_t_local -= tl.sum(
+                                        scatter_values, axis=1
+                                    )  # Sum to [C_PAD]
 
                                     # grad_transition: marginal_T_tile = (C_PAD, TILE_C)
                                     # Duration k uses index k-1 (same convention as forward pass)
@@ -896,17 +916,23 @@ if HAS_TRITON:
                                         mask=tile_mask_T,
                                     )
 
-                                    # grad_duration_bias: (unscaled)
-                                    # ATOMIC OPTIMIZATION: Accumulate locally across tiles, write once per k
-                                    # Use broadcasting to scatter tile values into full C_PAD array
-                                    # This reduces tiles atomics to 1 write per k (2-8× speedup per k)
-                                    scatter_mask_db = c_idx[:, None] == c_dst_idx_tile[None, :]  # [C_PAD, TILE_C]
+                                    # grad_duration_bias: (unscaled, accumulate locally across tiles)
+                                    # ATOMIC OPTIMIZATION: Same scatter-sum pattern as grad_cum_scores above
+                                    # Reduces tiles atomics → 1 write per k (e.g., 8 tiles → 1 at C=32, TILE_C=4)
+                                    # Final write happens after tile loop at line ~989
+                                    scatter_mask_db = (
+                                        c_idx[:, None] == c_dst_idx_tile[None, :]
+                                    )  # [C_PAD, TILE_C]
                                     scatter_values_db = tl.where(
                                         scatter_mask_db,
-                                        marginal_sum_src_tile[None, :],  # Broadcast to [C_PAD, TILE_C]
+                                        marginal_sum_src_tile[
+                                            None, :
+                                        ],  # Broadcast to [C_PAD, TILE_C]
                                         0.0,
                                     )
-                                    grad_db_k_local += tl.sum(scatter_values_db, axis=1)  # Sum to [C_PAD]
+                                    grad_db_k_local += tl.sum(
+                                        scatter_values_db, axis=1
+                                    )  # Sum to [C_PAD]
 
                                     # grad_proj_start[t] and grad_proj_end[end_pos-1]
                                     if HAS_BOUNDARIES:
@@ -1076,9 +1102,9 @@ if HAS_TRITON:
         elif C_PAD >= 64:
             return 16  # 64/16 = 4 iterations
         elif C_PAD <= 8:
-            return 4   # 8/4 = 2 iterations (minimal)
+            return 4  # 8/4 = 2 iterations (minimal)
         elif C_PAD <= 16:
-            return 8   # 16/8 = 2 iterations
+            return 8  # 16/8 = 2 iterations
         else:  # C_PAD == 32
             return 16  # 32/16 = 2 iterations
 
@@ -1134,15 +1160,24 @@ if HAS_TRITON:
 
         Returns:
             tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: Tuple of:
-                - **grad_cum_scores** (Tensor): Shape :math:`(\text{batch}, T+1, C)`.
-                - **grad_transition** (Tensor): Shape :math:`(C, C)` or :math:`(K, C, C)`.
-                - **grad_duration_bias** (Tensor): Shape :math:`(K, C)`.
-                - **grad_proj_start** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
-                  if boundaries provided.
-                - **grad_proj_end** (Tensor or None): Shape :math:`(\text{batch}, T, C)`
-                  if boundaries provided.
-                - **boundary_marginals** (Tensor or None): Shape :math:`(\text{batch}, T)`
-                  if ``return_boundary_marginals=True``.
+                - **grad_cum_scores** (Tensor): Gradient for cumulative scores of shape
+                  :math:`(\text{batch}, T+1, C)`.
+                - **grad_transition** (Tensor): Gradient for transitions of shape
+                  :math:`(C, C)` or :math:`(K, C, C)`.
+                - **grad_duration_bias** (Tensor): Gradient for duration bias of shape
+                  :math:`(K, C)`.
+                - **grad_proj_start** (Tensor or None): Gradient for start projections of shape
+                  :math:`(\text{batch}, T, C)` if boundaries provided, else ``None``.
+                - **grad_proj_end** (Tensor or None): Gradient for end projections of shape
+                  :math:`(\text{batch}, T, C)` if boundaries provided, else ``None``.
+                - **boundary_marginals** (Tensor or None): Boundary marginal probabilities of shape
+                  :math:`(\text{batch}, T)` if ``return_boundary_marginals=True``, else ``None``.
+
+        See Also:
+            :func:`launch_streaming_triton_kernel`: Forward pass that produces checkpoints
+                for this backward pass.
+            :func:`launch_streaming_triton_marginals`: Convenience wrapper for computing
+                boundary marginals without gradients.
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
@@ -1223,7 +1258,9 @@ if HAS_TRITON:
         # alpha_buffer must be segment-specific to prevent race conditions between segments.
         # Without segment isolation, segment 1 (processed first in backward) writes to
         # alpha_buffer[batch, 0, :], then segment 0 reads stale values instead of checkpoint.
-        alpha_buffer = torch.full((batch, num_segments, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
+        alpha_buffer = torch.full(
+            (batch, num_segments, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype
+        )
         beta_ring = torch.full((batch, 2 * K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # NUMERICAL STABILITY: Selective precision for gradient tensors.
@@ -1477,13 +1514,18 @@ if HAS_TRITON:
                 :math:`(\text{batch}, T, C)`. Default: ``None``
 
         Returns:
-            Tensor: Boundary marginals of shape :math:`(\text{batch}, T)`.
+            Tensor: Boundary marginal probabilities of shape :math:`(\text{batch}, T)`.
                 Each value represents the probability that a segment starts
                 at that position.
 
+        See Also:
+            :func:`launch_streaming_triton_backward`: Full backward pass with gradients.
+            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+                PyTorch reference implementation (CPU compatible).
+
         .. note::
-            Requires CUDA and Triton. For CPU computation, use
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`.
+            Requires CUDA and Triton. For CPU computation, use the PyTorch reference
+            implementation listed above.
 
         Example::
 

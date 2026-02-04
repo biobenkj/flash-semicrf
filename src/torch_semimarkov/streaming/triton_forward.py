@@ -947,14 +947,19 @@ if HAS_TRITON:
 
         Returns:
             tuple[Tensor, Tensor, int, Tensor]: Tuple of:
-                - **partition** (Tensor): Partition function values of shape
-                  :math:`(\text{batch},)`.
-                - **ring_checkpoints** (Tensor): Saved ring buffer states of shape
-                  :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
-                - **checkpoint_interval** (int): Actual interval used.
-                - **log_norm_checkpoints** (Tensor): Cumulative log normalization
-                  factors at each checkpoint of shape
-                  :math:`(\text{batch}, \text{num\_ckpts})`.
+                - **partition** (Tensor): Partition function (log-space) or Viterbi scores
+                  (max-space) of shape :math:`(\text{batch},)`.
+                - **ring_checkpoints** (Tensor): Saved ring buffer states for backward pass
+                  of shape :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+                - **checkpoint_interval** (int): Actual checkpoint interval used.
+                - **log_norm_checkpoints** (Tensor): Cumulative log normalization factors
+                  at each checkpoint of shape :math:`(\text{batch}, \text{num\_ckpts})`.
+
+        See Also:
+            :func:`launch_streaming_triton_backward`: Backward pass that uses checkpoints
+                from this forward pass.
+            :func:`launch_streaming_triton_kernel_max_bp`: Max-semiring variant with
+                backpointer tracking for Viterbi decoding.
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 
@@ -1131,12 +1136,16 @@ if HAS_TRITON:
             tuple[Tensor, Tensor, Tensor, Tensor]: Tuple of:
                 - **viterbi_scores** (Tensor): Best path scores of shape
                   :math:`(\text{batch},)`.
-                - **bp_k** (Tensor): Best duration for each (t, c_dest) of shape
-                  :math:`(\text{batch}, T, C)`.
-                - **bp_c** (Tensor): Best source label for each (t, c_dest) of shape
-                  :math:`(\text{batch}, T, C)`.
-                - **final_labels** (Tensor): Best final label of shape
-                  :math:`(\text{batch},)`.
+                - **bp_k** (Tensor): Best duration backpointers for each
+                  :math:`(t, c_{\text{dest}})` of shape :math:`(\text{batch}, T, C)`.
+                - **bp_c** (Tensor): Best source label backpointers for each
+                  :math:`(t, c_{\text{dest}})` of shape :math:`(\text{batch}, T, C)`.
+                - **final_labels** (Tensor): Best final label (argmax of final alpha)
+                  of shape :math:`(\text{batch},)`.
+
+        See Also:
+            :func:`launch_streaming_triton_kernel`: Log-semiring variant for computing
+                partition function and gradients.
         """
         from .triton_cache import TritonConfig, update_cache_sentinel, validate_triton_cache
 

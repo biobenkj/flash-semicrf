@@ -4,9 +4,10 @@
 Adds targeted debug prints to compare Triton vs PyTorch intermediate values.
 """
 
-import torch
 import sys
 from pathlib import Path
+
+import torch
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -49,7 +50,9 @@ pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(
 
 print(f"PyTorch log_Z: {log_Z_pytorch[0].item():.6f}")
 print(f"PyTorch marginals sum: {pytorch_marginals[0].sum().item():.6f}")
-print(f"PyTorch marginals range: [{pytorch_marginals[0].min().item():.6f}, {pytorch_marginals[0].max().item():.6f}]")
+print(
+    f"PyTorch marginals range: [{pytorch_marginals[0].min().item():.6f}, {pytorch_marginals[0].max().item():.6f}]"
+)
 print()
 
 if device.type != "cuda":
@@ -68,12 +71,20 @@ print()
 
 print("Running Triton backward (marginals)...")
 triton_marginals = launch_streaming_triton_marginals(
-    cum_scores, transition, duration_bias, lengths,
-    log_Z_triton, ring_ckpts, log_norm_ckpts, interval
+    cum_scores,
+    transition,
+    duration_bias,
+    lengths,
+    log_Z_triton,
+    ring_ckpts,
+    log_norm_ckpts,
+    interval,
 )
 
 print(f"Triton marginals sum: {triton_marginals[0].sum().item():.6f}")
-print(f"Triton marginals range: [{triton_marginals[0].min().item():.6f}, {triton_marginals[0].max().item():.6f}]")
+print(
+    f"Triton marginals range: [{triton_marginals[0].min().item():.6f}, {triton_marginals[0].max().item():.6f}]"
+)
 print()
 
 # Compare
@@ -104,7 +115,9 @@ if error_indices:
         diff_val = diff[t].item()
         ratio_val = ratio[t].item()
         seg = 0 if t < interval else 1
-        print(f"  {t:3d} | {pt_val:10.6f} | {tr_val:10.6f} | {diff_val:10.6e} | {ratio_val:8.4f} | Seg{seg}")
+        print(
+            f"  {t:3d} | {pt_val:10.6f} | {tr_val:10.6f} | {diff_val:10.6e} | {ratio_val:8.4f} | Seg{seg}"
+        )
 
     if len(error_indices) > 20:
         print(f"  ... and {len(error_indices) - 20} more")
@@ -116,7 +129,7 @@ if error_indices:
     seg0_errors = [t for t in error_indices if t < interval]
     seg1_errors = [t for t in error_indices if t >= interval]
 
-    print(f"\nErrors by segment:")
+    print("\nErrors by segment:")
     print(f"  Segment 0 (t=0-{interval-1}): {len(seg0_errors)} errors")
     print(f"  Segment 1 (t={interval}-{T-1}): {len(seg1_errors)} errors")
 else:

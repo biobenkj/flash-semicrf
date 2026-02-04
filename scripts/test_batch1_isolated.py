@@ -1,6 +1,7 @@
 """Isolated test for batch=1 marginals to identify the issue."""
 
 import torch
+
 from torch_semimarkov.streaming import (
     HAS_TRITON,
     launch_streaming_triton_marginals,
@@ -84,12 +85,14 @@ print(f"  Mean rel diff: {rel_diff.mean():.6f}")
 # Find positions with largest errors
 top_errors = torch.topk(diff.flatten(), k=10)
 print("\nTop 10 error positions:")
-for i, (error, idx) in enumerate(zip(top_errors.values, top_errors.indices)):
+for i, (error, idx) in enumerate(zip(top_errors.values, top_errors.indices, strict=True)):
     batch_idx = idx // T
     t_idx = idx % T
     pytorch_val = pytorch_marginals[batch_idx, t_idx]
     triton_val = triton_marginals.cpu()[batch_idx, t_idx]
-    print(f"  {i+1}. t={t_idx}: pytorch={pytorch_val:.6f}, triton={triton_val:.6f}, diff={error:.6e}")
+    print(
+        f"  {i+1}. t={t_idx}: pytorch={pytorch_val:.6f}, triton={triton_val:.6f}, diff={error:.6e}"
+    )
 
 # Check tolerance
 try:

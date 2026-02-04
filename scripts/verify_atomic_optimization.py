@@ -6,10 +6,11 @@ This script tests the atomic optimization at two scales:
 """
 
 import torch
+
 from torch_semimarkov.streaming import (
     HAS_TRITON,
-    launch_streaming_triton_kernel,
     launch_streaming_triton_backward,
+    launch_streaming_triton_kernel,
 )
 
 if not HAS_TRITON:
@@ -47,13 +48,13 @@ def run_test(batch, T, C, K, test_name):
     lengths = torch.full((batch,), T, device=device, dtype=torch.long)
 
     # Forward pass
-    print(f"\nRunning forward pass...")
+    print("\nRunning forward pass...")
     log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
         cum_scores, transition, duration_bias, lengths, K
     )
 
     # Backward pass
-    print(f"Running backward pass...")
+    print("Running backward pass...")
     grad_output = torch.ones(batch, device=device, dtype=torch.float32)
     (
         grad_cum_scores,
@@ -75,15 +76,21 @@ def run_test(batch, T, C, K, test_name):
     )
 
     print("\nGradient statistics:")
-    print(f"  grad_cum_scores: shape={grad_cum_scores.shape}, "
-          f"mean={grad_cum_scores.mean():.6f}, "
-          f"std={grad_cum_scores.std():.6f}")
-    print(f"  grad_transition: shape={grad_transition.shape}, "
-          f"mean={grad_transition.mean():.6f}, "
-          f"std={grad_transition.std():.6f}")
-    print(f"  grad_duration_bias: shape={grad_duration_bias.shape}, "
-          f"mean={grad_duration_bias.mean():.6f}, "
-          f"std={grad_duration_bias.std():.6f}")
+    print(
+        f"  grad_cum_scores: shape={grad_cum_scores.shape}, "
+        f"mean={grad_cum_scores.mean():.6f}, "
+        f"std={grad_cum_scores.std():.6f}"
+    )
+    print(
+        f"  grad_transition: shape={grad_transition.shape}, "
+        f"mean={grad_transition.mean():.6f}, "
+        f"std={grad_transition.std():.6f}"
+    )
+    print(
+        f"  grad_duration_bias: shape={grad_duration_bias.shape}, "
+        f"mean={grad_duration_bias.mean():.6f}, "
+        f"std={grad_duration_bias.std():.6f}"
+    )
 
     # Check for NaN/Inf
     has_nan = (
@@ -124,7 +131,9 @@ if not run_test(batch=2, T=200, C=16, K=100, test_name="TEST 1: Basic Correctnes
 
 # Test 2: Mid-scale stress test
 # This exercises the atomic optimization more heavily while still being tractable
-if not run_test(batch=4, T=5000, C=32, K=500, test_name="TEST 2: Mid-Scale Stress Test (T=5K, K=500)"):
+if not run_test(
+    batch=4, T=5000, C=32, K=500, test_name="TEST 2: Mid-Scale Stress Test (T=5K, K=500)"
+):
     exit(1)
 
 print(f"\n{'='*70}")
