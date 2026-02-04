@@ -64,7 +64,7 @@ if HAS_TRITON:
         proj_start_ptr,  # (batch, T, C) - start boundary scores
         proj_end_ptr,  # (batch, T, C) - end boundary scores
         # Working memory
-        alpha_buffer_ptr,  # (batch, SEGMENT_SIZE, C_PAD) - recomputed alpha
+        alpha_buffer_ptr,  # (batch, num_segments, SEGMENT_SIZE, C_PAD) - recomputed alpha (segment-isolated)
         beta_ring_ptr,  # (batch, K, C_PAD) - beta ring buffer
         # Outputs (gradients)
         grad_cum_scores_ptr,  # (batch, T+1, C)
@@ -105,8 +105,9 @@ if HAS_TRITON:
         stride_ckpt_n,
         stride_ckpt_k,
         stride_ckpt_c,
-        # Strides for alpha buffer (batch, SEGMENT_SIZE, C_PAD)
+        # Strides for alpha buffer (batch, num_segments, SEGMENT_SIZE, C_PAD)
         stride_ab_b,
+        stride_ab_seg,  # Segment stride for isolation between segments
         stride_ab_t,
         stride_ab_c,
         # Strides for beta ring (batch, K, C_PAD)
@@ -316,6 +317,10 @@ if HAS_TRITON:
             # Each segment writes to its own workspace slice, eliminating cross-segment atomics.
             grad_tr_ws_seg = grad_tr_ws_base + ckpt_idx * stride_gtw_seg
             grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
+            # CRITICAL: Alpha buffer also needs segment isolation to prevent race conditions.
+            # Without this, segment 1 (processed first) writes alpha[27] to position 0,
+            # then segment 0 reads stale values instead of the checkpoint.
+            alpha_buf_seg = alpha_buf_base + ckpt_idx * stride_ab_seg
 
             # Debug: show checkpoint loading (remove after validation)
             # if batch_idx == 0:
@@ -337,14 +342,19 @@ if HAS_TRITON:
                         mask=c_mask,
                         other=NEG_INF,
                     )
+
                     # Store alpha[seg_start + k_slot - (seg_start % K)] if valid
                     # For simplicity, store at position 0 for initial ring state
                     if k_slot == seg_start % K:
                         tl.store(
-                            alpha_buf_base + 0 * stride_ab_t + c_idx * stride_ab_c,
+                            alpha_buf_seg + 0 * stride_ab_t + c_idx * stride_ab_c,
                             alpha_val,
                             mask=c_mask,
                         )
+
+                # CRITICAL: Memory barrier to ensure checkpoint stores are visible to all warps
+                # Without this, different warps may see stale/uninitialized values when loading alpha_prev
+                tl.debug_barrier()
 
                 # Recompute alpha values from seg_start+1 to seg_end
                 # Note: Use tl.range to avoid compile-time unrolling for large SEGMENT_SIZE
@@ -361,9 +371,10 @@ if HAS_TRITON:
                             if start_pos >= 0:
                                 # Get alpha_prev - either from buffer or checkpoint
                                 local_start = start_pos - seg_start
+
                                 if local_start >= 0 and local_start < SEGMENT_SIZE:
                                     alpha_prev = tl.load(
-                                        alpha_buf_base
+                                        alpha_buf_seg
                                         + local_start * stride_ab_t
                                         + c_idx * stride_ab_c,
                                         mask=c_mask,
@@ -482,7 +493,7 @@ if HAS_TRITON:
                         # Store recomputed alpha
                         alpha_t = tl.where(c_mask, alpha_t, NEG_INF)
                         tl.store(
-                            alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
+                            alpha_buf_seg + local_t * stride_ab_t + c_idx * stride_ab_c,
                             alpha_t,
                             mask=c_mask,
                         )
@@ -496,7 +507,7 @@ if HAS_TRITON:
                         # Get alpha[t] from buffer
                         local_t = t - seg_start
                         alpha_t = tl.load(
-                            alpha_buf_base + local_t * stride_ab_t + c_idx * stride_ab_c,
+                            alpha_buf_seg + local_t * stride_ab_t + c_idx * stride_ab_c,
                             mask=c_mask,
                             other=NEG_INF,
                         )
@@ -523,7 +534,9 @@ if HAS_TRITON:
 
                                 # === Accumulators for this k iteration ===
                                 # Boundary marginals accumulator (scalar)
-                                marginal_sum_all_k = 0.0
+                                # IMPORTANT: Use float64 for tl.range loop-carried variable type consistency
+                                # Note: Use empty shape () to create a scalar tensor, not [1][0]
+                                marginal_sum_all_k = tl.zeros((), dtype=tl.float64)
 
                                 # Online logsumexp accumulators for beta_k (indexed by c_src)
                                 # Accumulates logsumexp over c_dst tiles
@@ -537,11 +550,14 @@ if HAS_TRITON:
 
                                 # === PASS 1: Compute global statistics across all tiles ===
                                 # Initialize global accumulators for marginal computation
-                                global_max = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
-                                global_sum_exp = tl.zeros([C_PAD], dtype=tl.float64)
+                                # global_max is a SCALAR (max over entire log_joint matrix, not per column)
+                                global_max = tl.full((), NEG_INF, dtype=tl.float64)
+                                global_sum_exp = tl.zeros((), dtype=tl.float64)
 
                                 # Loop over tiles to accumulate global max and sum using online algorithm
-                                for c_dst_tile_start in tl.range(0, C_PAD, TILE_C):
+                                # NOTE: Using tl.static_range (compile-time unrolling) instead of tl.range
+                                # because tl.range doesn't preserve scalar state for cross-iteration accumulation
+                                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
                                     c_dst_idx_tile = c_dst_tile_start + c_dst_tile
@@ -643,9 +659,9 @@ if HAS_TRITON:
                                         tile_mask_2d, log_joint_tile, NEG_INF
                                     )
 
-                                    # Compute tile max (reduce over rows, keep columns)
-                                    tile_max = tl.max(log_joint_masked, axis=0)  # (C_PAD,)
-                                    tile_max = tile_max.to(tl.float64)
+                                    # Compute tile max (reduce over ENTIRE tile to get scalar)
+                                    # This matches PyTorch: local_ref = log_joint.amax(dim=(-2, -1))
+                                    tile_max = tl.max(log_joint_masked)  # Scalar
 
                                     # Update global max using Flash Attention online pattern
                                     new_global_max = tl.maximum(global_max, tile_max)
@@ -655,8 +671,9 @@ if HAS_TRITON:
                                     global_sum_exp = global_sum_exp * rescale_factor
 
                                     # Add current tile's contribution
-                                    tile_exp = tl.exp(log_joint_masked - new_global_max[None, :])
-                                    tile_sum_exp = tl.sum(tile_exp, axis=0)  # (C_PAD,)
+                                    # new_global_max is scalar, broadcasts automatically
+                                    tile_exp = tl.exp(log_joint_masked - new_global_max)
+                                    tile_sum_exp = tl.sum(tile_exp)  # Scalar (sum over entire tile)
                                     global_sum_exp = global_sum_exp + tile_sum_exp
 
                                     # Update global max
@@ -675,14 +692,15 @@ if HAS_TRITON:
                                 # Clamp scale to prevent overflow/underflow
                                 log_scale_clamped = tl.minimum(log_scale, 0.0)  # Upper bound: scale ≤ 1
                                 log_scale_clamped = tl.maximum(log_scale_clamped, -700.0)  # Prevent underflow
-                                scale = tl.exp(log_scale_clamped)  # (C_PAD,)
+                                scale = tl.exp(log_scale_clamped)  # Scalar
 
                                 # Guard: If global_max was all NEG_INF, set scale to 0
                                 scale = tl.where(is_global_max_neginf, 0.0, scale)
 
                                 # === PASS 2: Compute marginals and gradients using global statistics ===
                                 # === Tile loop over c_dst dimension ===
-                                for c_dst_tile_start in tl.range(0, C_PAD, TILE_C):
+                                # NOTE: Using tl.static_range to ensure consistent global_max/scale across all tiles
+                                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
                                     c_dst_idx_tile = c_dst_tile_start + c_dst_tile
@@ -790,16 +808,17 @@ if HAS_TRITON:
                                     )
 
                                     # Step 3: Compute relative log-marginal using GLOBAL max
-                                    # This is the KEY FIX: global_max_safe is the same for all tiles
-                                    log_marginal_rel = log_joint_masked - global_max_safe[None, :]
+                                    # This is the KEY FIX: global_max_safe is SCALAR, same for all tiles
+                                    # Scalar broadcasts automatically to (TILE_C, C_PAD)
+                                    log_marginal_rel = log_joint_masked - global_max_safe
 
                                     # Step 4: Compute unnormalized marginal (bounded in (0, 1])
                                     marginal_unnorm = tl.exp(log_marginal_rel)
 
                                     # Step 5: Final marginal using GLOBAL scale
-                                    # scale was computed once in Pass 1: exp(global_max + log_norm - log_Z)
+                                    # scale is SCALAR, computed once in Pass 1: exp(global_max + log_norm - log_Z)
                                     # This ensures ALL tiles use the same scale factor
-                                    marginal_tile = marginal_unnorm * scale[None, :]
+                                    marginal_tile = marginal_unnorm * scale
                                     marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
 
                                     # === Accumulate gradients from this tile ===
@@ -980,11 +999,10 @@ if HAS_TRITON:
                         )
 
     def _compute_tile_c(C: int) -> int:
-        """Compute optimal TILE_C based on number of classes.
+        """Compute adaptive TILE_C for c_dst dimension tiling.
 
-        Uses runtime heuristics to select TILE_C that forces multiple tiles
-        at small C, reducing atomic contention. This follows the Flash Attention
-        pattern of runtime block size selection (BLOCK_HEADDIM).
+        Hybrid strategy that balances compile time, register pressure, and correctness
+        for use with tl.static_range (compile-time loop unrolling).
 
         Args:
             C: Actual number of classes (before padding).
@@ -993,31 +1011,39 @@ if HAS_TRITON:
             TILE_C value to use for kernel launch.
 
         Strategy:
-            - C_PAD <= 8:  Use TILE_C=4  (forces 2 tiles, reduces hot-spot contention)
-            - C_PAD <= 16: Use TILE_C=8  (forces 2 tiles for C in [9, 16])
-            - C_PAD > 16:  Use TILE_C=16 (default, matches current behavior)
+            - Small C (≤16):    Use smaller tiles (4-8) for 2 iterations
+            - Medium C (32-64): Use TILE_C=16 for 2-4 iterations
+            - Large C (≥128):   Use TILE_C=32 for 4-8 iterations
 
-        Rationale:
-            At small C with fixed TILE_C=16, only one tile executes, creating
-            maximum atomic contention. By forcing multiple tiles, we achieve
-            spatial separation of atomic operations across the C dimension.
+        This balances:
+            - Compile time:     Bounded to ≤8 unrolled iterations (even at C=256)
+            - Register pressure: TILE_C ≤ 32 avoids spilling (~120 regs/thread)
+            - Correctness:      tl.static_range handles scalar accumulation correctly
 
         Example:
-            >>> _compute_tile_c(4)   # C_PAD=4  -> TILE_C=4  (2 tiles)
+            >>> _compute_tile_c(8)    # C_PAD=8   -> TILE_C=4  (2 iterations)
             4
-            >>> _compute_tile_c(12)  # C_PAD=16 -> TILE_C=8  (2 tiles)
-            8
-            >>> _compute_tile_c(32)  # C_PAD=32 -> TILE_C=16 (2 tiles)
+            >>> _compute_tile_c(32)   # C_PAD=32  -> TILE_C=16 (2 iterations)
             16
+            >>> _compute_tile_c(128)  # C_PAD=128 -> TILE_C=32 (4 iterations)
+            32
+            >>> _compute_tile_c(256)  # C_PAD=256 -> TILE_C=32 (8 iterations)
+            32
         """
         C_PAD = _next_power_of_2(C)
 
-        if C_PAD <= 8:
-            return 4
+        if C_PAD >= 256:
+            return 32  # 256/32 = 8 iterations (max acceptable)
+        elif C_PAD >= 128:
+            return 32  # 128/32 = 4 iterations
+        elif C_PAD >= 64:
+            return 16  # 64/16 = 4 iterations
+        elif C_PAD <= 8:
+            return 4   # 8/4 = 2 iterations (minimal)
         elif C_PAD <= 16:
-            return 8
-        else:
-            return 16
+            return 8   # 16/8 = 2 iterations
+        else:  # C_PAD == 32
+            return 16  # 32/16 = 2 iterations
 
     def launch_streaming_triton_backward(
         cum_scores: torch.Tensor,
@@ -1153,8 +1179,14 @@ if HAS_TRITON:
         # Ensure log normalization checkpoints are contiguous
         log_norm_checkpoints = log_norm_checkpoints.contiguous()
 
+        # Compute number of segments (one per checkpoint)
+        num_segments = num_checkpoints
+
         # Allocate working memory
-        alpha_buffer = torch.full((batch, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
+        # alpha_buffer must be segment-specific to prevent race conditions between segments.
+        # Without segment isolation, segment 1 (processed first in backward) writes to
+        # alpha_buffer[batch, 0, :], then segment 0 reads stale values instead of checkpoint.
+        alpha_buffer = torch.full((batch, num_segments, segment_size, C_PAD), NEG_INF, device=device, dtype=dtype)
         beta_ring = torch.full((batch, 2 * K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # NUMERICAL STABILITY: Selective precision for gradient tensors.
@@ -1174,7 +1206,6 @@ if HAS_TRITON:
         #
         # NUMERICAL STABILITY: Use float64 for accumulation across T.
         # PADDING: Use C_PAD to prevent OOB memory access from masked-out threads.
-        num_segments = num_checkpoints  # One segment per checkpoint
         if has_duration_transitions:
             # Duration-dependent: (batch, num_segments, K, C_PAD, C_PAD)
             grad_tr_workspace = torch.zeros(
@@ -1209,7 +1240,8 @@ if HAS_TRITON:
 
         stride_db_k, stride_db_c = duration_bias.stride()
         stride_ckpt_b, stride_ckpt_n, stride_ckpt_k, stride_ckpt_c = ring_ckpts_padded.stride()
-        stride_ab_b, stride_ab_t, stride_ab_c = alpha_buffer.stride()
+        # alpha_buffer now has segment dimension: (batch, num_segments, segment_size, C_PAD)
+        stride_ab_b, stride_ab_seg, stride_ab_t, stride_ab_c = alpha_buffer.stride()
         stride_br_b, stride_br_k, stride_br_c = beta_ring.stride()
         stride_gcs_b, stride_gcs_t, stride_gcs_c = grad_cum_scores.stride()
 
@@ -1282,6 +1314,7 @@ if HAS_TRITON:
                 stride_ckpt_k,
                 stride_ckpt_c,
                 stride_ab_b,
+                stride_ab_seg,
                 stride_ab_t,
                 stride_ab_c,
                 stride_br_b,
