@@ -3,7 +3,7 @@ triton
 pytest>=7.0
 pytest-benchmark
 pytest-cov
-black
+black>=24.0
 ruff
 flake8
 mypy

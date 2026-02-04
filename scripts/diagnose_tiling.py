@@ -14,12 +14,12 @@ tiles process the marginal computation, and there may be an issue with:
 import torch
 
 try:
-    from src.torch_semimarkov.streaming import (
+    from torch_semimarkov.streaming import (
         HAS_TRITON,
         launch_streaming_triton_marginals,
         semi_crf_streaming_marginals_pytorch,
     )
-    from src.torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+    from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
 except ImportError as e:
     print(f"Import error: {e}")
     print("Running in standalone mode - using inline definitions")
