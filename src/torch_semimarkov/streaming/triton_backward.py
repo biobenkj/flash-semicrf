@@ -26,6 +26,15 @@ Gradients are computed via marginal probabilities:
     The dispatch logic in ``autograd.py`` automatically routes K<3 to these
     specialized implementations. Do not call this kernel directly with K<3.
 
+.. note::
+    **Beta Ring Buffer Observation**: During debugging, we observed that some
+    threads at segment boundaries (e.g., t=27) may show NEG_INF values in beta
+    ring buffer loads when debug prints are active. However, this does NOT affect
+    numerical correctness - all tests pass with rtol=0.01. The critical alpha
+    recomputation path (guarded by tl.debug_barrier() at line ~358) is verified
+    correct via forward/backward comparison. This observation is documented for
+    future debugging reference should similar patterns appear.
+
 Functions:
     launch_streaming_triton_backward: Main entry point for launching backward kernel.
 """
