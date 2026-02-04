@@ -866,11 +866,13 @@ if HAS_TRITON:
                                     # ATOMIC OPTIMIZATION: Accumulate locally, write once after k-loop
                                     # Use broadcasting to scatter tile values into full C_PAD array
                                     # This reduces K×tiles atomics to 1 write (20-50× speedup at K=1000)
-                                    grad_cs_t_local = tl.where(
-                                        c_idx[:, None] == c_dst_idx_tile[None, :],
-                                        grad_cs_t_local - marginal_sum_src_tile_scaled[None, :],
-                                        grad_cs_t_local,
+                                    scatter_mask = c_idx[:, None] == c_dst_idx_tile[None, :]  # [C_PAD, TILE_C]
+                                    scatter_values = tl.where(
+                                        scatter_mask,
+                                        marginal_sum_src_tile_scaled[None, :],  # Broadcast to [C_PAD, TILE_C]
+                                        0.0,
                                     )
+                                    grad_cs_t_local -= tl.sum(scatter_values, axis=1)  # Sum to [C_PAD]
 
                                     # grad_transition: marginal_T_tile = (C_PAD, TILE_C)
                                     # Duration k uses index k-1 (same convention as forward pass)
@@ -898,11 +900,13 @@ if HAS_TRITON:
                                     # ATOMIC OPTIMIZATION: Accumulate locally across tiles, write once per k
                                     # Use broadcasting to scatter tile values into full C_PAD array
                                     # This reduces tiles atomics to 1 write per k (2-8× speedup per k)
-                                    grad_db_k_local = tl.where(
-                                        c_idx[:, None] == c_dst_idx_tile[None, :],
-                                        grad_db_k_local + marginal_sum_src_tile[None, :],
-                                        grad_db_k_local,
+                                    scatter_mask_db = c_idx[:, None] == c_dst_idx_tile[None, :]  # [C_PAD, TILE_C]
+                                    scatter_values_db = tl.where(
+                                        scatter_mask_db,
+                                        marginal_sum_src_tile[None, :],  # Broadcast to [C_PAD, TILE_C]
+                                        0.0,
                                     )
+                                    grad_db_k_local += tl.sum(scatter_values_db, axis=1)  # Sum to [C_PAD]
 
                                     # grad_proj_start[t] and grad_proj_end[end_pos-1]
                                     if HAS_BOUNDARIES:
