@@ -29,17 +29,17 @@ class TestSemiringAxioms:
 
     @pytest.mark.parametrize("semiring", [LogSemiring, MaxSemiring, StdSemiring])
     def test_sum_associativity(self, semiring):
-        """(a⊕b)⊕c == a⊕(b⊕c) - associativity of addition."""
+        """(a(+)b)(+)c == a(+)(b(+)c) - associativity of addition."""
         torch.manual_seed(42)
         a = torch.randn(3, 4)
         b = torch.randn(3, 4)
         c = torch.randn(3, 4)
 
-        # (a⊕b)⊕c
+        # (a(+)b)(+)c
         ab = semiring.plus(a, b)
         ab_c = semiring.plus(ab, c)
 
-        # a⊕(b⊕c)
+        # a(+)(b(+)c)
         bc = semiring.plus(b, c)
         a_bc = semiring.plus(a, bc)
 
@@ -49,7 +49,7 @@ class TestSemiringAxioms:
 
     @pytest.mark.parametrize("semiring", [LogSemiring, MaxSemiring, StdSemiring])
     def test_sum_commutativity(self, semiring):
-        """a⊕b == b⊕a - commutativity of addition."""
+        """a(+)b == b(+)a - commutativity of addition."""
         torch.manual_seed(43)
         a = torch.randn(3, 4)
         b = torch.randn(3, 4)
@@ -61,7 +61,7 @@ class TestSemiringAxioms:
 
     @pytest.mark.parametrize("semiring", [LogSemiring, MaxSemiring, StdSemiring])
     def test_additive_identity(self, semiring):
-        """a⊕zero == a - zero is additive identity."""
+        """a(+)zero == a - zero is additive identity."""
         torch.manual_seed(44)
         a = torch.randn(3, 4)
         zero = torch.full_like(a, semiring.zero)
@@ -74,7 +74,7 @@ class TestSemiringAxioms:
 
     @pytest.mark.parametrize("semiring", [LogSemiring, MaxSemiring, StdSemiring])
     def test_multiplicative_identity(self, semiring):
-        """a⊗one == a - one is multiplicative identity."""
+        """a(*)one == a - one is multiplicative identity."""
         torch.manual_seed(45)
         a = torch.randn(3, 4)
         one = torch.full_like(a, semiring.one)
@@ -87,17 +87,17 @@ class TestSemiringAxioms:
 
     @pytest.mark.parametrize("semiring", [LogSemiring, MaxSemiring, StdSemiring])
     def test_distributivity(self, semiring):
-        """a⊗(b⊕c) == (a⊗b)⊕(a⊗c) - multiplication distributes over addition."""
+        """a(*)(b(+)c) == (a(*)b)(+)(a(*)c) - multiplication distributes over addition."""
         torch.manual_seed(46)
         a = torch.randn(3, 4)
         b = torch.randn(3, 4)
         c = torch.randn(3, 4)
 
-        # a⊗(b⊕c)
+        # a(*)(b(+)c)
         bc_sum = semiring.plus(b, c)
         left = semiring.mul(a, bc_sum)
 
-        # (a⊗b)⊕(a⊗c)
+        # (a(*)b)(+)(a(*)c)
         ab = semiring.mul(a, b)
         ac = semiring.mul(a, c)
         right = semiring.plus(ab, ac)

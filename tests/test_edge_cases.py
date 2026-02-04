@@ -167,7 +167,7 @@ class TestMinimalSequences:
     def test_t1_partition_includes_duration_bias(self):
         """T=1 partition includes duration_bias[0] for duration=1 (0-based indexing)."""
         # This verifies that duration k uses index k-1 (0-based indexing)
-        # Duration 1 → duration_bias[0], Duration 2 → duration_bias[1], etc.
+        # Duration 1 -> duration_bias[0], Duration 2 -> duration_bias[1], etc.
         crf = SemiMarkovCRFHead(num_classes=2, max_duration=5)
 
         # Set known values

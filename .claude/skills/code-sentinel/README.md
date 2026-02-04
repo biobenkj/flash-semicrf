@@ -107,7 +107,7 @@ Assumptions are verifiable claims embedded in trace documents. Two types:
 ├── verify-assumptions.py       # Assumption verification
 ├── .sentinel-meta.yaml         # Machine-readable sentinel state
 ├── anchors/
-│   ├── anchors.yaml           # Pattern → line number mappings
+│   ├── anchors.yaml           # Pattern -> line number mappings
 │   ├── verify-all.py          # Batch anchor verification
 │   └── verify-anchor.sh       # Single anchor verification
 ├── traces/
@@ -144,8 +144,8 @@ Code Sentinel Status
 Last global verification: 2026-01-28T00:00:00Z
 
 Sentinels:
-  ✓ triton-forward-k3plus: VERIFIED
-  ✓ dispatch-overview: VERIFIED
+  [PASS] triton-forward-k3plus: VERIFIED
+  [PASS] dispatch-overview: VERIFIED
   ...
 ```
 
@@ -235,7 +235,7 @@ Run full verification for a specific trace or all traces.
 
 Output on success:
 ```
-Grounded: triton-forward-k3plus @ 40fe66b ✓
+Grounded: triton-forward-k3plus @ 40fe66b [PASS]
 ```
 
 Output on failure:
@@ -244,10 +244,10 @@ Grounded: triton-forward-k3plus @ 40fe66b
   Commit: STALE (COMMITTED_CHANGES)
     Verified: 40fe66b | Current: abc1234
   Anchors: 5/7 verified, 2 failed
-    ✗ RING_BUFFER_WRITE: ANCHOR_DRIFT: Expected ~320, found 345 (drift 25 > 20)
-  Assumptions: A1 ✓, A2 ✗, A3 ✓
+    [FAIL] RING_BUFFER_WRITE: ANCHOR_DRIFT: Expected ~320, found 345 (drift 25 > 20)
+  Assumptions: A1 [PASS], A2 [FAIL], A3 [PASS]
 
-⚠️  Cannot provide advice until sentinel is updated.
+[WARN]  Cannot provide advice until sentinel is updated.
 ```
 
 ### `sentinel.py pipeline`
@@ -351,19 +351,19 @@ When loading a sentinel for debugging assistance:
 This performs:
 - Commit staleness check (verified hash vs current HEAD)
 - Uncommitted changes detection
-- Anchor verification (pattern → line number)
+- Anchor verification (pattern -> line number)
 - Assumption verification (mechanical checks)
 
 ### Step 2: Interpret Output
 
 **On success:** Proceed with debugging
 ```
-Grounded: triton-forward-k3plus @ 40fe66b ✓
+Grounded: triton-forward-k3plus @ 40fe66b [PASS]
 ```
 
 **On failure:** Remediate before advising
 ```
-⚠️  Cannot provide advice until sentinel is updated.
+[WARN]  Cannot provide advice until sentinel is updated.
 ```
 
 ### Step 3: Remediate if Needed

@@ -103,6 +103,6 @@ try:
         atol=1e-5,
         msg="Batch=1 marginals don't match",
     )
-    print("\n✅ TEST PASSED")
+    print("\n[PASS] TEST PASSED")
 except AssertionError as e:
-    print(f"\n❌ TEST FAILED: {e}")
+    print(f"\n[FAIL] TEST FAILED: {e}")

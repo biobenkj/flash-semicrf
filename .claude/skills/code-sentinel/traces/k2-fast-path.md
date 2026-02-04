@@ -143,8 +143,8 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 
 | Path | Memory | Why |
 |------|--------|-----|
-| K>=3 ring buffer | O(batch × K × C) | Ring buffer + checkpoints |
-| K=2 explicit | O(batch × C × 2) | Two explicit alpha tensors |
+| K>=3 ring buffer | O(batch * K * C) | Ring buffer + checkpoints |
+| K=2 explicit | O(batch * C * 2) | Two explicit alpha tensors |
 
 ## Critical Invariants
 

@@ -272,17 +272,17 @@ The large max relative error (~70x at T=10k) on grad_cum_scores is **NOT a bug**
 Forward partition comparison:
   Triton:  [14132.95, 14130.20]
   PyTorch: [14132.95, 14130.21]
-  Rel diff: 6.22e-07  ✓
+  Rel diff: 6.22e-07  [PASS]
 
 Backward gradient comparison:
   grad_cum_scores:
     Max abs diff: 8.81e-03
     Max rel diff: 7.06e+01  (expected - near-zero positions)
-    Mean abs diff: 2.60e-04  ✓
+    Mean abs diff: 2.60e-04  [PASS]
   grad_transition:
-    Max rel diff: 6.71e-03  ✓
+    Max rel diff: 6.71e-03  [PASS]
   grad_duration_bias:
-    Max rel diff: 6.66e-03  ✓
+    Max rel diff: 6.66e-03  [PASS]
 
 PASS: All criteria met
 ```

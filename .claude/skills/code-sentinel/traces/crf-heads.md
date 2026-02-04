@@ -53,10 +53,10 @@ These require human/agent judgment when loading the trace.
    - Detects gradient corruption from corrupted model parameters
 
 4. **Backend selection** (lines 322-334)
-   - `auto` → streaming vs exact based on edge tensor size
-   - `streaming` → force streaming backend
-   - `exact` → force exact backend via `SemiMarkov.logpartition`
-   - `binary_tree_sharded` → memory-efficient reference implementation
+   - `auto` -> streaming vs exact based on edge tensor size
+   - `streaming` -> force streaming backend
+   - `exact` -> force exact backend via `SemiMarkov.logpartition`
+   - `binary_tree_sharded` -> memory-efficient reference implementation
 
 5. **Cumulative scores** (lines 340-346)
    ```python
@@ -70,9 +70,9 @@ These require human/agent judgment when loading the trace.
    - Detects extreme input values causing overflow
 
 7. **Partition computation** (lines 355-372)
-   - streaming → `semi_crf_streaming_forward()`
-   - exact → `_forward_exact()` via `SemiMarkov.logpartition`
-   - binary_tree_sharded → `_forward_binary_tree_sharded()`
+   - streaming -> `semi_crf_streaming_forward()`
+   - exact -> `_forward_exact()` via `SemiMarkov.logpartition`
+   - binary_tree_sharded -> `_forward_binary_tree_sharded()`
 
 ## Backend Selection (_select_backend)
 
@@ -98,7 +98,7 @@ def _should_use_streaming(self, T: int) -> bool:
 
 1. Validate labels via `validate_labels()`
 2. Call `forward()` to get partition and cum_scores
-3. Score gold segmentation via `_score_gold()` → `score_gold_vectorized()`
+3. Score gold segmentation via `_score_gold()` -> `score_gold_vectorized()`
 4. Return `partition - gold_score` with optional reduction
 
 ## decode() vs decode_with_traceback()

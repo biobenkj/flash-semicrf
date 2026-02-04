@@ -56,7 +56,7 @@ except ImportError:
 
 if HAS_TRITON:
     # NOTE: @triton.autotune removed - corrupts gradient buffers during benchmarking.
-    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
+    # See docs/debugging/DEBUGGING_NAN.md "Autotuning Limitations" for details.
     @triton.jit
     def semi_crf_streaming_backward_kernel(
         # Inputs (from forward)
@@ -178,7 +178,7 @@ if HAS_TRITON:
         -------------------
         - **Float64 accumulation**: Gradient tensors use float64 to prevent
           non-determinism from atomic_add floating-point non-associativity.
-          Error scales as O(sqrt(T×K×C)) per operation; float64 reduces this
+          Error scales as O(sqrt(T*K*C)) per operation; float64 reduces this
           from ~1e-3 (float32) to ~1e-10 (negligible).
 
         - **NEG_INF guards**: When all logsumexp inputs are NEG_INF (-1e9),
@@ -193,12 +193,12 @@ if HAS_TRITON:
 
         Loop Tiling (Register Pressure Reduction)
         -----------------------------------------
-        The marginal computation requires a (C_PAD × C_PAD) matrix, which at
+        The marginal computation requires a (C_PAD * C_PAD) matrix, which at
         C_PAD=64 demands ~384 registers/thread. With num_warps=4+, this exceeds
         available registers and causes spilling to slow local memory.
 
         **Solution**: Process C_PAD in tiles of TILE_C (typically 16 or 32):
-            - Load (TILE_C × C_PAD) tile of marginal matrix
+            - Load (TILE_C * C_PAD) tile of marginal matrix
             - Accumulate gradients from tile
             - Use online logsumexp for beta update across tiles (Flash Attention pattern)
 
@@ -535,7 +535,7 @@ if HAS_TRITON:
                         # === Gradient accumulators (atomic optimization) ===
                         # Accumulate grad_cum_scores[t] across all k and tiles, write once
                         # Register cost: C_PAD float64 = 512 bytes for C=64 (minimal)
-                        # Speedup: K×tiles atomics → 1 write (20-50× reduction at K=1000)
+                        # Speedup: K*tiles atomics -> 1 write (20-50* reduction at K=1000)
                         grad_cs_t_local = tl.zeros([C_PAD], dtype=tl.float64)
 
                         # Loop over valid segment durations k = 1, 2, ..., K
@@ -562,7 +562,7 @@ if HAS_TRITON:
 
                                 # grad_duration_bias accumulator for this k (accumulate across tiles)
                                 # Register cost: C_PAD float64 = 512 bytes for C=64 (minimal)
-                                # Speedup: tiles atomics → 1 write per k (2-8× reduction per k)
+                                # Speedup: tiles atomics -> 1 write per k (2-8* reduction per k)
                                 grad_db_k_local = tl.zeros([C_PAD], dtype=tl.float64)
 
                                 # Clamp alpha_t once per k (reused across tiles)
@@ -708,7 +708,7 @@ if HAS_TRITON:
 
                                 # CRITICAL: Bridge normalized alpha and full-scale log_Z via log normalization
                                 #   Forward pass applies incremental normalization: alpha[t] -= log_norm[t]
-                                #   This keeps alpha ~0 at extreme T (e.g., alpha=-125k → 0 at T=50k midpoint)
+                                #   This keeps alpha ~0 at extreme T (e.g., alpha=-125k -> 0 at T=50k midpoint)
                                 #   log_norm_at_ckpt accumulated all shifts up to seg_start (~125k at midpoint)
                                 #   Must add back to compute correct marginal: exp(alpha + edge + beta - log_Z)
                                 #   where log_Z is at full scale (~250k at T=100k)
@@ -822,7 +822,7 @@ if HAS_TRITON:
                                     #   Pass 1 (lines 571-701): Compute global_max and scale across all tiles
                                     #   Pass 2 (lines 720-1037): Use global values for consistent marginal computation
                                     # This fixed a per-tile normalization bug that caused 10-400% gradient errors
-                                    # when multiple tiles were active (e.g., C=32 with TILE_C=16 → 2 tiles).
+                                    # when multiple tiles were active (e.g., C=32 with TILE_C=16 -> 2 tiles).
                                     beta_tile_clamped = tl.minimum(tl.maximum(beta_tile, -1e6), 1e6)
                                     edge_tile_clamped = tl.minimum(tl.maximum(edge_tile, -1e6), 1e6)
 
@@ -874,11 +874,11 @@ if HAS_TRITON:
                                         mask=c_dst_mask_tile,
                                     )
                                     # grad_cum_scores[t]: -marginal (same position for all k, accumulate locally)
-                                    # ATOMIC OPTIMIZATION: Scatter-sum pattern to accumulate across K×tiles iterations
+                                    # ATOMIC OPTIMIZATION: Scatter-sum pattern to accumulate across K*tiles iterations
                                     #   1. Create [C_PAD, TILE_C] mask where indices match
                                     #   2. Broadcast tile values [TILE_C] to masked positions
                                     #   3. Sum along axis=1 to scatter into [C_PAD] accumulator
-                                    # Reduces K×tiles atomics → 1 write (e.g., 1000×8=8000 → 1 at K=1000, C=32)
+                                    # Reduces K*tiles atomics -> 1 write (e.g., 1000*8=8000 -> 1 at K=1000, C=32)
                                     # Final write happens after k-loop at line ~1024
                                     scatter_mask = (
                                         c_idx[:, None] == c_dst_idx_tile[None, :]
@@ -918,7 +918,7 @@ if HAS_TRITON:
 
                                     # grad_duration_bias: (unscaled, accumulate locally across tiles)
                                     # ATOMIC OPTIMIZATION: Same scatter-sum pattern as grad_cum_scores above
-                                    # Reduces tiles atomics → 1 write per k (e.g., 8 tiles → 1 at C=32, TILE_C=4)
+                                    # Reduces tiles atomics -> 1 write per k (e.g., 8 tiles -> 1 at C=32, TILE_C=4)
                                     # Final write happens after tile loop at line ~989
                                     scatter_mask_db = (
                                         c_idx[:, None] == c_dst_idx_tile[None, :]
@@ -1046,7 +1046,7 @@ if HAS_TRITON:
                                 )
 
                         # === After all k iterations: write accumulated grad_cum_scores[t] ===
-                        # Single write instead of K×tiles atomics (20-50× reduction at K=1000)
+                        # Single write instead of K*tiles atomics (20-50* reduction at K=1000)
                         tl.atomic_add(
                             grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
                             grad_cs_t_local,
@@ -1264,14 +1264,14 @@ if HAS_TRITON:
         beta_ring = torch.full((batch, 2 * K, C_PAD), NEG_INF, device=device, dtype=dtype)
 
         # NUMERICAL STABILITY: Selective precision for gradient tensors.
-        # - grad_cum_scores: O(B×T×C) but per-position (no cross-T accumulation) → float32 OK
-        # - grad_transition, grad_duration_bias: small but accumulated across all T → need float64
+        # - grad_cum_scores: O(B*T*C) but per-position (no cross-T accumulation) -> float32 OK
+        # - grad_transition, grad_duration_bias: small but accumulated across all T -> need float64
         # The kernel-internal accumulators still use tl.float64 for log-sum-exp safety.
 
         # Allocate gradient outputs with C_PAD
-        # grad_cum_scores is per-position, doesn't accumulate across T → float32 sufficient
+        # grad_cum_scores is per-position, doesn't accumulate across T -> float32 sufficient
         grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=torch.float32)
-        # grad_duration_bias accumulates across all T positions → needs float64
+        # grad_duration_bias accumulates across all T positions -> needs float64
         grad_duration_bias = torch.zeros(K, C, device=device, dtype=torch.float64)
 
         # Allocate per-batch-per-segment workspace buffers for deterministic gradients.
@@ -1418,10 +1418,10 @@ if HAS_TRITON:
         # Compute weighted sum of per-batch gradients for shared parameters.
         #
         # Correct gradient semantics for shared parameters:
-        #   grad_θ = Σ_b[grad_output[b] × Σ_{t,k}(marginal[b,t,k])]
+        #   grad_θ = Σ_b[grad_output[b] * Σ_{t,k}(marginal[b,t,k])]
         #
         # NOT the buggy formula:
-        #   grad_θ = Σ_{b,t,k}(marginal[b,t,k]) × Σ_b(grad_output[b])  # WRONG!
+        #   grad_θ = Σ_{b,t,k}(marginal[b,t,k]) * Σ_b(grad_output[b])  # WRONG!
         #
         # The difference matters when grad_output varies across batch elements
         # (e.g., masked sequences, weighted losses). With uniform grad_output=[1,1,...],

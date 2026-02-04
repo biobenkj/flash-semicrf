@@ -79,7 +79,7 @@ def _next_power_of_2(n: int) -> int:
 
 if HAS_TRITON:
     # NOTE: @triton.autotune removed - corrupts ring buffer during multi-config benchmarking.
-    # See docs/DEBUGGING_NAN.md "Autotuning Limitations" for details.
+    # See docs/debugging/DEBUGGING_NAN.md "Autotuning Limitations" for details.
     @triton.jit
     def semi_crf_streaming_scan_kernel(
         # Inputs
@@ -1024,7 +1024,7 @@ if HAS_TRITON:
 
         # Log normalization checkpoint storage for numerical stability at extreme T
         # Stores cumulative log normalization factor at each checkpoint boundary
-        # Memory cost: negligible (14 × batch × 4 bytes at T=100k)
+        # Memory cost: negligible (14 * batch * 4 bytes at T=100k)
         log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
 
         # Get strides

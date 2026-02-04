@@ -52,11 +52,11 @@ graph TD
 
 | Condition | Algorithm | Method | Complexity | Memory |
 |-----------|-----------|--------|------------|--------|
-| `use_banded=True` | Banded binary tree | `_dp_banded` | O(N log N × bw × KC) | O(N × (KC)²) |
-| `K*C <= 200` (auto) | Binary tree | `_dp_binary_tree` | O(N log N × (KC)³) | O(N × (KC)²) |
-| `K*C > 200`, vectorized | Vectorized scan | `_dp_standard_vectorized` | O(N × K × C²) | O(N × K × C) |
-| `K*C > 200`, default | Ring buffer scan | `_dp_scan_streaming` | O(N × K × C²) | O(K × C) |
-| (legacy) | Standard scan | `_dp_standard` | O(N × K × C²) | O(N × K × C) |
+| `use_banded=True` | Banded binary tree | `_dp_banded` | O(N log N * bw * KC) | O(N * (KC)²) |
+| `K*C <= 200` (auto) | Binary tree | `_dp_binary_tree` | O(N log N * (KC)³) | O(N * (KC)²) |
+| `K*C > 200`, vectorized | Vectorized scan | `_dp_standard_vectorized` | O(N * K * C²) | O(N * K * C) |
+| `K*C > 200`, default | Ring buffer scan | `_dp_scan_streaming` | O(N * K * C²) | O(K * C) |
+| (legacy) | Standard scan | `_dp_standard` | O(N * K * C²) | O(N * K * C) |
 
 **Auto-selection threshold:** `semimarkov.py:62-65`
 ```python
@@ -116,7 +116,7 @@ f2 = torch.arange(0, len(f1))    # duration indices [0, 1, ..., K-1]
 
 **Transition semantics:** Destination-first in last two dimensions
 ```python
-edge[..., c_dst, c_src] = score for c_src → c_dst transition
+edge[..., c_dst, c_src] = score for c_src -> c_dst transition
 ```
 
 This matches the streaming API's `edge_block[c_dst, c_src]` convention.
@@ -127,7 +127,7 @@ This matches the streaming API's `edge_block[c_dst, c_src]` convention.
 
 **Location:** `semimarkov.py:85-148`
 
-Computes partition via parallel prefix (binary tree reduction) over (K×C, K×C) state matrices.
+Computes partition via parallel prefix (binary tree reduction) over (K*C, K*C) state matrices.
 
 **Key steps:**
 1. Initialize chart with identity elements on diagonal
@@ -267,7 +267,7 @@ def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
 | Issue | Severity | Algorithm | Notes |
 |-------|----------|-----------|-------|
 | O((KC)³) per matmul | Performance | Binary tree | Use linear scan for large state spaces |
-| O(N×K×C) memory | Memory | Standard, Vectorized | Use ring buffer scan for memory efficiency |
+| O(N*K*C) memory | Memory | Standard, Vectorized | Use ring buffer scan for memory efficiency |
 | Banded permutation overhead | Performance | Banded | May not be worthwhile for small spans |
 
 ## Version History

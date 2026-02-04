@@ -203,7 +203,7 @@ def main():
                 if max_diff > 0:
                     bad_configs.append((T, C, K, C_PAD, interval, num_ckpts, max_diff))
                     print(
-                        f"  ❌ T={T:3d}, C={C:2d}, K={K:2d}, C_PAD={C_PAD:2d}, interval={interval:2d}, ckpts={num_ckpts} : diff={max_diff:.6f}"
+                        f"  [FAIL] T={T:3d}, C={C:2d}, K={K:2d}, C_PAD={C_PAD:2d}, interval={interval:2d}, ckpts={num_ckpts} : diff={max_diff:.6f}"
                     )
 
     print("\n" + "=" * 70)
@@ -232,7 +232,7 @@ def main():
         intervals = {c[4] for c in bad_configs}
         print(f"  Intervals in bad configs: {sorted(intervals)}")
     else:
-        print("\n✓ All tested FORWARD configurations are deterministic!")
+        print("\n[PASS] All tested FORWARD configurations are deterministic!")
 
     # ========== BACKWARD PASS TESTING ==========
     print("\n" + "=" * 70)
@@ -260,7 +260,7 @@ def main():
                 if is_bad:
                     bad_backward_configs.append((T, C, K, C_PAD, result))
                     print(
-                        f"  ❌ T={T:3d}, C={C:2d}, K={K:2d}, C_PAD={C_PAD:2d} : "
+                        f"  [FAIL] T={T:3d}, C={C:2d}, K={K:2d}, C_PAD={C_PAD:2d} : "
                         f"NaN={result['nan_count']}, diff_cs={result['max_diff_cs']:.6f}, "
                         f"diff_tr={result['max_diff_tr']:.6f}, diff_db={result['max_diff_db']:.6f}"
                     )
@@ -274,7 +274,7 @@ def main():
         for T, C, K, C_PAD, result in bad_backward_configs:
             print(f"  T={T}, C={C}, K={K}, C_PAD={C_PAD}, NaN runs={result['nan_count']}/15")
     else:
-        print("\n✓ All tested BACKWARD configurations are deterministic and NaN-free!")
+        print("\n[PASS] All tested BACKWARD configurations are deterministic and NaN-free!")
 
 
 if __name__ == "__main__":

@@ -346,7 +346,7 @@ class TestLogsumexpStability:
     def test_uniform_scores(self, model):
         """Test with uniform scores (high entropy case)."""
         batch, T = 2, 100
-        # All scores equal → logsumexp over many equal values
+        # All scores equal -> logsumexp over many equal values
         hidden = torch.ones(batch, T, 32)
         lengths = torch.full((batch,), T)
         labels = torch.randint(0, 4, (batch, T))
@@ -548,7 +548,7 @@ class TestEdgeCases:
         batch, T = 2, 200
         hidden = torch.randn(batch, T, 32)
         lengths = torch.full((batch,), T)
-        # Alternate labels every 2 positions → many boundaries
+        # Alternate labels every 2 positions -> many boundaries
         labels = torch.zeros(batch, T, dtype=torch.long)
         for i in range(T):
             labels[:, i] = (i // 2) % 4

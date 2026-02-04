@@ -492,8 +492,8 @@ def run_equivalence_check(device, dtype, configs, backends, verbose=True):
             v_diff = (ref_v - v).abs().max().item()
             g_diff = (ref_grad - grad).abs().max().item()
 
-            status = "✓" if v_diff < 1e-3 and g_diff < 1e-3 else "✗"
-            if status == "✗":
+            status = "[PASS]" if v_diff < 1e-3 and g_diff < 1e-3 else "[FAIL]"
+            if status == "[FAIL]":
                 all_pass = False
 
             if verbose:
@@ -570,9 +570,9 @@ Examples:
                 configs.append({"T": T, "K": K, "C": C, "B": B, "name": "Custom"})
 
     print("\n")
-    print("╔" + "=" * 78 + "╗")
-    print("║" + " " * 15 + "SEMI-MARKOV BACKEND EQUIVALENCE TEST" + " " * 26 + "║")
-    print("╚" + "=" * 78 + "╝")
+    print("+" + "=" * 78 + "+")
+    print("|" + " " * 15 + "SEMI-MARKOV BACKEND EQUIVALENCE TEST" + " " * 26 + "|")
+    print("+" + "=" * 78 + "+")
     print(f"\nDevice: {device}")
     print(f"Dtype: {dtype}")
     print(f"Backends: {', '.join(backends)}")
@@ -581,9 +581,9 @@ Examples:
 
     print("\n" + "=" * 80)
     if all_pass:
-        print("✓ ALL BACKENDS PRODUCE EQUIVALENT RESULTS")
+        print("[PASS] ALL BACKENDS PRODUCE EQUIVALENT RESULTS")
     else:
-        print("✗ SOME BACKENDS DIFFER - CHECK OUTPUT ABOVE")
+        print("[FAIL] SOME BACKENDS DIFFER - CHECK OUTPUT ABOVE")
     print("=" * 80)
 
     return 0 if all_pass else 1

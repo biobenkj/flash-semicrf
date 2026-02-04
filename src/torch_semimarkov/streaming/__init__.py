@@ -30,7 +30,7 @@ eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
     +-----------------------+------------------+-------------------+
 
     For the T=400K case, the edge tensor cannot fit in memory. This module
-    computes edges on-the-fly from O(T×C) cumulative scores instead.
+    computes edges on-the-fly from O(TxC) cumulative scores instead.
 
     **Performance comparison (forward-only, NVIDIA L40S):**
 
@@ -39,17 +39,17 @@ eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
     +-----------------------+---------------------+---------------------+-------------------+
     | Configuration         | triton_scan         | streaming           | Streaming wins by |
     +=======================+=====================+=====================+===================+
-    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           | 3.35× faster      |
+    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           | 3.35x faster      |
     +-----------------------+---------------------+---------------------+-------------------+
-    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          | 1.48× faster      |
+    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          | 1.48x faster      |
     +-----------------------+---------------------+---------------------+-------------------+
 
     Why streaming is faster:
 
-    - **Memory bandwidth**: Loading O(T×K×C²) edges from memory is slower than
-      computing O(T×C) edge blocks on-the-fly from cumulative scores
+    - **Memory bandwidth**: Loading O(TxKxC²) edges from memory is slower than
+      computing O(TxC) edge blocks on-the-fly from cumulative scores
     - **Cache efficiency**: Streaming keeps working set in L1/L2 cache
-    - **Linear batch scaling**: Memory grows as O(batch×T×C), not O(batch×T×K×C²)
+    - **Linear batch scaling**: Memory grows as O(batchxTxC), not O(batchxTxKxC²)
 
     **Training advantages:**
 
@@ -72,8 +72,8 @@ This module takes **cumulative scores** and computes edges on-the-fly::
 
 Memory Complexity
 -----------------
-- Pre-computed edge API (triton_scan): O(T × K × C²) - 2.76 TB for T=400K, K=3K, C=24
-- Streaming API (this module): O(T × C + K × C + C²) - ~50 MB for same dimensions
+- Pre-computed edge API (triton_scan): O(T x K x C²) - 2.76 TB for T=400K, K=3K, C=24
+- Streaming API (this module): O(T x C + K x C + C²) - ~50 MB for same dimensions
 
 Streaming Edge Computation
 --------------------------

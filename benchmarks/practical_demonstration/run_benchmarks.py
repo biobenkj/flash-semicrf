@@ -183,7 +183,7 @@ def plot_comparison_bar(
             alpha=0.7,
         )
 
-        ax2.set_ylabel("Phone Error Rate (↓)", fontsize=12)
+        ax2.set_ylabel("Phone Error Rate (lower better)", fontsize=12)
         ax2.set_ylim(0, 1.0)
         ax.set_xticks(list(x) + [per_x])
         ax.set_xticklabels(labels + ["PER\n(lower=better)"], fontsize=11)
@@ -374,7 +374,7 @@ def generate_comparison_table(results: dict[str, Any], task: str) -> str:
         ]
     else:
         metrics = [
-            ("phone_error_rate", "Phone Error Rate ↓"),
+            ("phone_error_rate", "Phone Error Rate (lower)"),
             ("boundary_f1", "Boundary F1"),
             ("segment_f1", "Segment F1"),
         ]

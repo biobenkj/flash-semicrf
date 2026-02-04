@@ -12,10 +12,10 @@ This addresses reviewer feedback by showing:
 4. Memory/throughput validation
 
 Four-way model comparison:
-1. Mamba → softmax: Per-position classifier (baseline)
-2. Mamba → linear CRF (K=1): No duration modeling
-3. Mamba → Semi-CRF (K=1000, learned): Full duration modeling
-4. Mamba → Semi-CRF (K=1000, uniform): Ablation isolating duration contribution
+1. Mamba -> softmax: Per-position classifier (baseline)
+2. Mamba -> linear CRF (K=1): No duration modeling
+3. Mamba -> Semi-CRF (K=1000, learned): Full duration modeling
+4. Mamba -> Semi-CRF (K=1000, uniform): Ablation isolating duration contribution
 
 Usage:
     # Generate synthetic data
@@ -517,7 +517,7 @@ def create_encoder(
 
 class SoftmaxModel(nn.Module):
     """
-    Mamba/BiLSTM → per-position softmax baseline.
+    Mamba/BiLSTM -> per-position softmax baseline.
 
     No CRF structure - just position-wise classification.
     """
@@ -573,7 +573,7 @@ class SoftmaxModel(nn.Module):
 
 class PytorchCRFModel(nn.Module):
     """
-    Mamba/BiLSTM → external pytorch-crf baseline.
+    Mamba/BiLSTM -> external pytorch-crf baseline.
 
     Uses the torchcrf library (pip install pytorch-crf) for comparison.
     This is a linear CRF without duration modeling.
@@ -635,7 +635,7 @@ class PytorchCRFModel(nn.Module):
 
 class SemiCRFModel(nn.Module):
     """
-    Mamba/BiLSTM → Semi-CRF model.
+    Mamba/BiLSTM -> Semi-CRF model.
 
     Supports both linear CRF (K=1) and semi-CRF (K>1) with learned
     or uniform duration distributions.

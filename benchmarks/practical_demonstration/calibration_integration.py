@@ -375,17 +375,17 @@ UNCERTAINTY CALIBRATION COMPARISON
 
 Metric                                      Semi-CRF   Linear CRF        Δ
 ----------------------------------------------------------------------
-Expected Calibration Error (↓)                0.0312       0.0847   -0.0535 ✓
-Maximum Calibration Error (↓)                 0.0891       0.1523   -0.0632 ✓
-Brier Score (↓)                               0.0234       0.0312   -0.0078 ✓
-Selective Prediction AUC (↑)                  0.8934       0.8456   +0.0478 ✓
-Uncertainty-Error Correlation (↑)             0.4521       0.2134   +0.2387 ✓
+Expected Calibration Error (lower better)                0.0312       0.0847   -0.0535 [PASS]
+Maximum Calibration Error (lower better)                 0.0891       0.1523   -0.0632 [PASS]
+Brier Score (lower better)                               0.0234       0.0312   -0.0078 [PASS]
+Selective Prediction AUC (higher better)                  0.8934       0.8456   +0.0478 [PASS]
+Uncertainty-Error Correlation (higher better)             0.4521       0.2134   +0.2387 [PASS]
 
 Confidence Interval Coverage (closer to nominal is better):
 ----------------------------------------------------------------------
-  50% CI coverage (nominal=0.50): Semi-CRF=0.512 (width=8.3), Linear CRF=0.387 (width=12.1) ✓
-  90% CI coverage (nominal=0.90): Semi-CRF=0.891 (width=23.4), Linear CRF=0.723 (width=31.2) ✓
-  95% CI coverage (nominal=0.95): Semi-CRF=0.942 (width=31.2), Linear CRF=0.812 (width=42.5) ✓
+  50% CI coverage (nominal=0.50): Semi-CRF=0.512 (width=8.3), Linear CRF=0.387 (width=12.1) [PASS]
+  90% CI coverage (nominal=0.90): Semi-CRF=0.891 (width=23.4), Linear CRF=0.723 (width=31.2) [PASS]
+  95% CI coverage (nominal=0.95): Semi-CRF=0.942 (width=31.2), Linear CRF=0.812 (width=42.5) [PASS]
 
 ======================================================================
 

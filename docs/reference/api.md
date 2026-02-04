@@ -1,6 +1,6 @@
 # API reference
 
-For practical usage examples showing how to integrate these APIs with upstream encoders, see the [Integration guide](workflow_integration.md).
+For practical usage examples showing how to integrate these APIs with upstream encoders, see the [Integration guide](../guides/workflow_integration.md).
 
 ## SemiMarkovCRFHead (Recommended)
 
@@ -19,7 +19,6 @@ class SemiMarkovCRFHead(nn.Module):
         init_scale: float = 0.1,       # Parameter initialization scale
         duration_distribution: str = None,  # "learned", "geometric", "poisson", etc.
         edge_memory_threshold: float = 8e9,  # Memory threshold for backend selection (8GB)
-        accum_dtype: torch.dtype = torch.float64,  # Gradient accumulation precision
         num_warps: int = 4,            # Triton kernel parallelism (2-8 recommended)
     ):
         """
@@ -33,8 +32,6 @@ class SemiMarkovCRFHead(nn.Module):
 
         Note:
             For T > 100K, use float32 precision for numerical stability.
-            Use accum_dtype=torch.float64 (default) for batch >= 128.
-            Use accum_dtype=torch.float32 for lower memory at batch <= 64.
         """
 
     def forward(
@@ -335,10 +332,9 @@ def semi_crf_streaming_forward(
     transition,       # (C, C) or (K, C, C) transition matrix
     duration_bias,    # (K, C) duration bias
     lengths,          # (batch,) sequence lengths
-    max_duration,     # K
+    K,                # max segment duration
     semiring="log",   # "log" (partition) or "max" (Viterbi)
     use_triton=True,  # Use Triton kernel if available
-    accum_dtype=torch.float64,  # Gradient accumulation precision
     num_warps=4,      # Triton kernel parallelism (2-8 recommended)
 ) -> Tensor:
     """
@@ -348,9 +344,6 @@ def semi_crf_streaming_forward(
     - T=400K, K=3K, C=24: 38 MB vs 2.76 TB
 
     Args:
-        accum_dtype: Dtype for gradient accumulation in backward pass.
-            Use torch.float64 (default) for numerical stability at batch >= 128.
-            Use torch.float32 for lower memory at batch <= 64.
         num_warps: Number of warps per block for Triton kernels.
             Higher values increase parallelism but also register pressure.
             Recommended range: 2-8. Default: 4
@@ -562,11 +555,13 @@ class SemiMarkov(semiring):
 
 ```python
 from torch_semimarkov.semirings import (
-    LogSemiring,      # Standard log-space (sum-product)
-    MaxSemiring,      # Viterbi decoding (max-product)
-    StdSemiring,      # Standard arithmetic
-    KMaxSemiring,     # Top-k paths
-    EntropySemiring,  # Entropy computation
+    LogSemiring,           # Standard log-space (sum-product)
+    MaxSemiring,           # Viterbi decoding (max-product)
+    StdSemiring,           # Standard arithmetic
+    KMaxSemiring,          # Top-k paths
+    EntropySemiring,       # Entropy computation
+    KLDivergenceSemiring,  # KL divergence D_KL(P || Q)
+    CrossEntropySemiring,  # Cross-entropy H(P, Q)
 )
 
 from torch_semimarkov.semirings.checkpoint import (
@@ -580,7 +575,7 @@ from torch_semimarkov.semirings.checkpoint import (
 Direct access to the Triton kernel for **inference only** when you have pre-computed edge tensors.
 
 > **Note:** Even for inference, the streaming API is typically faster because computing
-> edges on-the-fly from O(T×C) data is faster than loading O(T×K×C²) pre-computed edges.
+> edges on-the-fly from O(TxC) data is faster than loading O(TxKxC²) pre-computed edges.
 > Use this API only when edge tensors are pre-computed from an external source.
 
 ```python
@@ -611,8 +606,8 @@ Even when the edge tensor fits in memory, streaming is faster:
 
 | Configuration | triton_scan | streaming | Streaming Advantage |
 |---------------|-------------|-----------|---------------------|
-| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35× faster, 2,393× less memory |
-| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48× faster, 11,795× less memory |
+| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35x faster, 2,393x less memory |
+| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48x faster, 11,795x less memory |
 
 **Routing behavior:**
 
@@ -626,7 +621,7 @@ Even when the edge tensor fits in memory, streaming is faster:
 >
 > The `torch.compile` path for backward passes has critical limitations at production scales:
 > - **RecursionError**: Sequences longer than T≈1000 exceed Python's recursion limit in inductor
-> - **OOM during backward**: Compiled graphs require 2×+ memory for gradient buffers
+> - **OOM during backward**: Compiled graphs require 2x+ memory for gradient buffers
 > - **Compilation time**: 20+ minutes for T=1000, essentially unusable
 >
 > For training, use `SemiMarkovCRFHead` or `semi_crf_streaming_forward`, which have
@@ -842,8 +837,8 @@ perm = snake_ordering(10, 3)
 ## See Also
 
 - [Backends and Triton kernel](backends.md) - Detailed kernel behavior and backend selection
-- [Integration guide](workflow_integration.md) - End-to-end training examples with BERT, Mamba, CNNs
-- [Streaming internals](streaming_internals.md) - Low-level algorithm details and numerical stability
-- [Uncertainty and focused learning](uncertainty_and_focused_learning.md) - Boundary confidence and active learning
-- [Parameter guide: T, K, C](parameter_guide.md) - Understanding sequence length, duration, and state dimensions
-- [Semirings guide](semirings.md) - Mathematical context for semiring operations
+- [Integration guide](../guides/workflow_integration.md) - End-to-end training examples with BERT, Mamba, CNNs
+- [Streaming internals](../internals/streaming_internals.md) - Low-level algorithm details and numerical stability
+- [Uncertainty and focused learning](../guides/uncertainty_and_focused_learning.md) - Boundary confidence and active learning
+- [Parameter guide: T, K, C](../guides/parameter_guide.md) - Understanding sequence length, duration, and state dimensions
+- [Semirings guide](../guides/semirings.md) - Mathematical context for semiring operations

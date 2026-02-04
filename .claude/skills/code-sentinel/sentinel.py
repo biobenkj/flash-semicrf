@@ -612,7 +612,7 @@ def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
     for trace_name, trace_meta in meta.get("sentinels", {}).items():
         status = trace_meta.get("status", "UNKNOWN")
-        symbol = "✓" if status == "VERIFIED" else "⚠" if status == "STALE" else "✗"
+        symbol = "[PASS]" if status == "VERIFIED" else "[WARN]" if status == "STALE" else "[FAIL]"
         print(f"  {symbol} {trace_name}: {status}")
 
     return EXIT_SUCCESS
@@ -792,11 +792,11 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         errors = sentinel.check_consistency()
         if errors:
             for err in errors:
-                print(f"  ✗ {err}")
+                print(f"  [FAIL] {err}")
             print(f"\nConsistency: {len(errors)} errors found\n")
             exit_code = EXIT_CONSISTENCY_FAILED
         else:
-            print("  ✓ All metadata consistent\n")
+            print("  [PASS] All metadata consistent\n")
 
     # Verify each trace
     for trace_name in traces_to_verify:
@@ -819,7 +819,7 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 def _print_verification_result(result: TraceVerification) -> None:
     """Print formatted verification result."""
     if result.overall_status == Status.VERIFIED:
-        print(f"Grounded: {result.name} @ {result.verified_commit} ✓")
+        print(f"Grounded: {result.name} @ {result.verified_commit} [PASS]")
     else:
         print(f"Grounded: {result.name} @ {result.verified_commit}")
 
@@ -841,19 +841,19 @@ def _print_verification_result(result: TraceVerification) -> None:
         if drifted:
             print(f"  Anchors: {verified}/{total} verified, {len(drifted)} failed")
             for a in drifted:
-                print(f"    ✗ {a.name}: {a.message}")
+                print(f"    [FAIL] {a.name}: {a.message}")
 
         # Assumptions summary
         if result.assumptions:
             failed = [a for a in result.assumptions if not a.passed]
-            summary = ", ".join(f"{a.id} {'✓' if a.passed else '✗'}" for a in result.assumptions)
+            summary = ", ".join(f"{a.id} {'[PASS]' if a.passed else '[FAIL]'}" for a in result.assumptions)
             print(f"  Assumptions: {summary}")
             if failed:
                 for a in failed:
-                    print(f"    ✗ {a.id}: {a.message}")
+                    print(f"    [FAIL] {a.id}: {a.message}")
 
         print()
-        print("⚠️  Cannot provide advice until sentinel is updated.")
+        print("[WARN] Cannot provide advice until sentinel is updated.")
     print()
 
 
@@ -884,10 +884,10 @@ def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     errors = sentinel.check_consistency()
     if errors:
         for err in errors:
-            print(f"  ✗ {err}")
+            print(f"  [FAIL] {err}")
         exit_code = EXIT_CONSISTENCY_FAILED
     else:
-        print("  ✓ All metadata consistent")
+        print("  [PASS] All metadata consistent")
     print()
 
     # Step 3: Verify all traces
@@ -895,7 +895,7 @@ def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     for trace_name in meta.get("sentinels", {}).keys():
         result = sentinel.verify_trace(trace_name)
 
-        status_symbol = "✓" if result.overall_status == Status.VERIFIED else "✗"
+        status_symbol = "[PASS]" if result.overall_status == Status.VERIFIED else "[FAIL]"
         anchor_status = (
             f"{sum(1 for a in result.anchors if a.status == 'VERIFIED')}/{len(result.anchors)}"
         )
@@ -941,7 +941,7 @@ def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     # Summary
     print("=" * 60)
     if exit_code == EXIT_SUCCESS:
-        print("Pipeline: PASSED ✓")
+        print("Pipeline: PASSED [PASS]")
     else:
         print(f"Pipeline: FAILED (exit code {exit_code})")
     print("=" * 60)
@@ -1007,12 +1007,12 @@ def cmd_retrace(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         if modified:
             print("\nModified anchors (manual review required):")
             for impact in modified:
-                print(f"  ✗ {impact.anchor_name}: {impact.suggestion}")
+                print(f"  [FAIL] {impact.anchor_name}: {impact.suggestion}")
 
         if deleted:
             print("\nDeleted anchors (pattern not found):")
             for impact in deleted:
-                print(f"  ✗ {impact.anchor_name}: {impact.suggestion}")
+                print(f"  [FAIL] {impact.anchor_name}: {impact.suggestion}")
 
         # Apply if requested
         if args.apply and shifted:
@@ -1038,7 +1038,7 @@ def cmd_retrace(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             print(f"\nRun with --apply to update {len(shifted)} shifted anchor(s)")
 
         if modified or deleted:
-            print("\n⚠️  Some anchors require manual attention")
+            print("\n[WARN] Some anchors require manual attention")
             return EXIT_ANCHOR_DRIFT
 
         return EXIT_SUCCESS
@@ -1191,14 +1191,14 @@ def cmd_report(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print("## Summary")
         print()
         all_verified = all(t["status"] == "VERIFIED" for t in report["traces"].values())
-        print(f"Overall Status: {'✓ VERIFIED' if all_verified else '✗ DEGRADED'}")
+        print(f"Overall Status: {'[PASS] VERIFIED' if all_verified else '[FAIL] DEGRADED'}")
         print()
         print("## Traces")
         print()
         print("| Trace | Status | Commit | Anchors | Assumptions |")
         print("|-------|--------|--------|---------|-------------|")
         for name, data in report["traces"].items():
-            status = "✓" if data["status"] == "VERIFIED" else "✗"
+            status = "[PASS]" if data["status"] == "VERIFIED" else "[FAIL]"
             anchors = f"{data['anchors']['verified']}/{data['anchors']['total']}"
             assumptions = f"{data['assumptions']['passed']}/{data['assumptions']['total']}"
             print(
@@ -1423,10 +1423,10 @@ def cmd_coverage(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     # Check threshold
     if args.threshold:
         if overall_pct < args.threshold:
-            print(f"\n✗ Coverage {overall_pct:.1f}% below threshold {args.threshold}%")
+            print(f"\n[FAIL] Coverage {overall_pct:.1f}% below threshold {args.threshold}%")
             return EXIT_GENERAL_ERROR
         else:
-            print(f"\n✓ Coverage {overall_pct:.1f}% meets threshold {args.threshold}%")
+            print(f"\n[PASS] Coverage {overall_pct:.1f}% meets threshold {args.threshold}%")
 
     return EXIT_SUCCESS
 
@@ -1435,7 +1435,7 @@ def _progress_bar(percentage: float, width: int = 10) -> str:
     """Generate a text progress bar."""
     filled = int(percentage / 100 * width)
     empty = width - filled
-    return "█" * filled + "░" * empty
+    return "#" * filled + "-" * empty
 
 
 def cmd_sync_docs(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
@@ -1625,7 +1625,7 @@ def cmd_context(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
         print("Anchors:")
         for anchor in result.anchors:
-            status_sym = "✓" if anchor.status == "VERIFIED" else "✗"
+            status_sym = "[PASS]" if anchor.status == "VERIFIED" else "[FAIL]"
             print(
                 f"  {status_sym} {anchor.name}: line {anchor.actual_line or anchor.expected_line}"
             )
@@ -1633,14 +1633,14 @@ def cmd_context(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print()
         print("Assumptions:")
         for assumption in result.assumptions:
-            status_sym = "✓" if assumption.passed else "✗"
+            status_sym = "[PASS]" if assumption.passed else "[FAIL]"
             print(f"  {status_sym} {assumption.id}: {assumption.description}")
 
         if critical_invariants:
             print()
             print("Critical Invariants:")
             for inv in critical_invariants:
-                print(f"  • {inv}")
+                print(f"  - {inv}")
 
         deps = trace_meta.get("depends_on", [])
         if deps:

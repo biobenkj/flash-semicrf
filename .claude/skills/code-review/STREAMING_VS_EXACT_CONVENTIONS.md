@@ -31,7 +31,7 @@ log_Z, _, _ = model.logpartition(edge, lengths=lengths)
 ```
 
 - **Input**: Edge tensor of shape `(batch, N-1, K, C, C)`
-- **Memory**: O(T × K × C²) — prohibitive for genome-scale
+- **Memory**: O(T * K * C²) — prohibitive for genome-scale
 - **Semiring support**: Full (Log, Max, Entropy, KMax, etc.)
 - **Use case**: Short sequences (T < 50K), research/flexibility
 
@@ -54,7 +54,7 @@ partition = semi_crf_streaming_forward(
 ```
 
 - **Input**: Cumulative scores, NOT edge tensor
-- **Memory**: O(K × C) ring buffer — genome-scale friendly
+- **Memory**: O(K * C) ring buffer — genome-scale friendly
 - **Semiring support**: Limited (Log, Max only)
 - **Use case**: Long sequences (T > 10K), production
 
@@ -85,7 +85,7 @@ partition = semi_crf_streaming_forward(
 
 ## Sequence Length Convention
 
-⚠️ **CRITICAL: This is the #1 source of bugs**
+[WARN] **CRITICAL: This is the #1 source of bugs**
 
 ### Streaming API
 
@@ -139,10 +139,10 @@ result = model.logpartition(edge, lengths=lengths + 1)  # <-- CRITICAL
 ### Shape: `duration_bias[K, C]`
 
 The duration bias tensor has shape `(K, C)` where:
-- Index 0 → duration 1
-- Index 1 → duration 2
+- Index 0 -> duration 1
+- Index 1 -> duration 2
 - ...
-- Index K-1 → duration K (or clamped for K=1)
+- Index K-1 -> duration K (or clamped for K=1)
 
 ### Duration Mapping in Code
 
@@ -374,13 +374,13 @@ cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)
 
 ### 1. Length Off-by-One with SemiMarkov
 
-❌ **Wrong**:
+[WRONG] **Wrong**:
 ```python
 edge = build_edge_tensor(...)  # shape (batch, T, K, C, C)
 model.logpartition(edge, lengths=lengths)  # BUG: will fail assertion
 ```
 
-✅ **Correct**:
+[CORRECT] **Correct**:
 ```python
 edge = build_edge_tensor(...)  # shape (batch, T, K, C, C)
 model.logpartition(edge, lengths=lengths + 1)  # Pass lengths + 1
@@ -388,19 +388,19 @@ model.logpartition(edge, lengths=lengths + 1)  # Pass lengths + 1
 
 ### 2. Edge Tensor Shape Mismatch
 
-❌ **Wrong**: Building `(batch, T-1, K, C, C)` to "match SemiMarkov convention"
+[WRONG] **Wrong**: Building `(batch, T-1, K, C, C)` to "match SemiMarkov convention"
 
-✅ **Correct**: Build `(batch, T, K, C, C)` and pass `lengths + 1` to SemiMarkov
+[CORRECT] **Correct**: Build `(batch, T, K, C, C)` and pass `lengths + 1` to SemiMarkov
 
 ### 3. Duration Index vs Actual Duration
 
-❌ **Wrong**:
+[WRONG] **Wrong**:
 ```python
 # Accessing duration_bias[k] for duration k
 duration_bias[k]  # Off by one!
 ```
 
-✅ **Correct**:
+[CORRECT] **Correct**:
 ```python
 # For actual duration k (1-indexed), use index min(k, K-1)
 dur_idx = min(k, K - 1)
@@ -420,9 +420,9 @@ for k in range(1, max(K, 2)):  # Ensures at least one iteration
 
 The streaming API may zero-center scores. If using exact backend for comparison:
 
-❌ **Wrong**: Using raw scores in exact backend, zero-centered in streaming
+[WRONG] **Wrong**: Using raw scores in exact backend, zero-centered in streaming
 
-✅ **Correct**: Apply same preprocessing in both paths
+[CORRECT] **Correct**: Apply same preprocessing in both paths
 ```python
 scores_centered = scores - scores.mean(dim=1, keepdim=True)
 # Use scores_centered for both streaming and exact
@@ -443,7 +443,7 @@ When using `model.marginals(edge, lengths=lengths+1)`:
 | Main loop | `t = 1..T` | `n = 1..N-1` |
 | Edge positions | Computed on-the-fly | `N-1 = T` positions |
 | Lengths param | Actual lengths | `lengths + 1` |
-| Memory | O(KC) | O(T×K×C²) |
+| Memory | O(KC) | O(T*K*C²) |
 | Duration loop | `k = 1..min(K-1,t)` | `k = 1..min(K-1,n)` |
 | dur_idx | `min(k, K-1)` | `min(k, K-1)` |
 | Ring buffer idx | `t % K` | `n % K` |

@@ -5,7 +5,7 @@
 
 ## Summary
 
-The K=1 fast path handles linear CRF (segment length = 1 only). No ring buffer needed - O(batch×C) memory. This is a specialized optimization for the common case where segments have unit length.
+The K=1 fast path handles linear CRF (segment length = 1 only). No ring buffer needed - O(batch*C) memory. This is a specialized optimization for the common case where segments have unit length.
 
 ## Shape Legend
 
@@ -127,8 +127,8 @@ if grad_duration_bias is not None:
 
 | Path | Memory | Why |
 |------|--------|-----|
-| K>=3 ring buffer | O(batch × K × C) | Ring buffer + checkpoints |
-| K=1 fast path | O(batch × C) | Only current alpha |
+| K>=3 ring buffer | O(batch * K * C) | Ring buffer + checkpoints |
+| K=1 fast path | O(batch * C) | Only current alpha |
 
 ## Critical Invariants
 

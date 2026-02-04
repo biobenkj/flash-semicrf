@@ -203,7 +203,7 @@ At checkpoint boundaries, alpha values are normalized to prevent unbounded growt
 4. **Checkpoint**: Normalized state saved for backward (only for active)
 5. **Final correction**: Partition = logsumexp(final_alpha) + accum_log_norm
 
-This prevents the ~2.5×T log-sum growth that causes overflow at T>100K.
+This prevents the ~2.5*T log-sum growth that causes overflow at T>100K.
 
 ## Differences from Triton
 

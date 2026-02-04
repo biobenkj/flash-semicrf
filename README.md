@@ -20,7 +20,7 @@ Semi-Markov CRFs are powerful models for sequences with natural segment structur
 
 Existing implementations navigate this through various tradeoffs—bounding $K$, chunked processing, or filtering heuristics. This package takes a different approach:
 
-Streaming the linear scan reduces DP working memory to $O(KC)$, avoiding the $O(TKC^2)$ edge tensor (see [streaming internals](docs/streaming_internals.md) for details).
+Streaming the linear scan reduces DP working memory to $O(KC)$, avoiding the $O(TKC^2)$ edge tensor (see [streaming internals](docs/internals/streaming_internals.md) for details).
 
 This makes Semi-Markov CRF inference practical for long sequences—chromosome-scale genomics, multi-hour clinical recordings, or large document collections—without architectural compromises.
 
@@ -28,7 +28,7 @@ This makes Semi-Markov CRF inference practical for long sequences—chromosome-s
 
 - **Streaming Semi-CRF inference** with $O(KC)$ memory via ring buffer and on-the-fly edge computation
   - PyTorch reference implementation (CPU/GPU, always available)
-  - Triton fused kernel (GPU, 2-5× faster when available)
+  - Triton fused kernel (GPU, 2-5x faster when available)
 
 ## Why Semi-CRFs?
 
@@ -109,7 +109,7 @@ viterbi_score = crf.decode(hidden_states, lengths)
 
 Works with PyTorch Lightning and DDP out of the box—see [examples/lightning_integration.py](examples/lightning_integration.py).
 
-For the low-level API with explicit edge tensors and semiring control, see the [API reference](docs/api.md).
+For the low-level API with explicit edge tensors and semiring control, see the [API reference](docs/reference/api.md).
 
 ## Tensor Conventions
 
@@ -147,7 +147,7 @@ When Triton is installed, torch-semimarkov uses custom GPU kernels with fused ed
 
 **How it works:**
 
-The streaming API computes edge potentials on-the-fly from cumulative scores rather than materializing the full `O(T × K × C²)` edge tensor. The Triton kernel fuses this edge computation with the DP scan:
+The streaming API computes edge potentials on-the-fly from cumulative scores rather than materializing the full `O(T x K x C²)` edge tensor. The Triton kernel fuses this edge computation with the DP scan:
 
 ```
 # Edge computed on-the-fly (never materialized):
@@ -179,17 +179,17 @@ partition = semi_crf_streaming_forward(
 )
 ```
 
-For performance characteristics, see [Benchmarking](docs/benchmarks.md).
+For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md).
 
 ## Documentation
 
-- [Integration guide](docs/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
-- [Parameter guide: T, K, C](docs/parameter_guide.md) — understanding sequence length, duration, and state dimensions
-- [Semirings guide](docs/semirings.md) — context and intuition for semirings used in torch-semimarkov
-- [Uncertainty and focused learning](docs/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
-- [Backends and Triton kernel](docs/backends.md) — algorithm selection and GPU acceleration
-- [API reference](docs/api.md) — detailed API documentation
-- [Benchmarking](docs/benchmarks.md) — performance measurement
+- [Integration guide](docs/guides/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
+- [Parameter guide: T, K, C](docs/guides/parameter_guide.md) — understanding sequence length, duration, and state dimensions
+- [Semirings guide](docs/guides/semirings.md) — context and intuition for semirings used in torch-semimarkov
+- [Uncertainty and focused learning](docs/guides/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
+- [Backends and Triton kernel](docs/reference/backends.md) — algorithm selection and GPU acceleration
+- [API reference](docs/reference/api.md) — detailed API documentation
+- [Benchmarking](docs/reference/benchmarks.md) — performance measurement
 - [AI disclosure](docs/disclosure.md)
 
 ## Testing
@@ -207,7 +207,7 @@ Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.
 |-----------|--------|
 | **Streaming Algorithm** | O(KC) memory, ring buffer + prefix-sum edges |
 | **PyTorch Backend** | Reference implementation, CPU/GPU |
-| **Triton Backend** | Fused GPU kernel, Log/Max semirings, 2-5× faster |
+| **Triton Backend** | Fused GPU kernel, Log/Max semirings, 2-5x faster |
 | **Semirings** | Log, Max, Std, KMax, Entropy, CrossEntropy, KLDivergence |
 
 ## Acknowledgments

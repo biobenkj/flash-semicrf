@@ -175,7 +175,7 @@ correct_code()
 ### Memory Issues
 
 ```python
-# BAD: Materializes O(T×K×C²) tensor
+# BAD: Materializes O(T*K*C²) tensor
 edge = torch.zeros(batch, T, K, C, C)
 for t in range(T):
     for k in range(K):

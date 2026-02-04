@@ -91,7 +91,7 @@ time from hours to minutes while maintaining good coverage of the parameter spac
 ### How Compile-Friendly Sampling Works
 
 1. **Shape Bucketing**: Configurations are grouped into canonical shapes based on T (sequence length)
-   and K×C (state-space size) buckets
+   and KxC (state-space size) buckets
 2. **Pre-compilation**: All canonical shapes are compiled once before timing begins
 3. **Persistent Cache**: Compiled kernels are cached in `--output-dir/.torch_compile_cache/`
 4. **Representative Sampling**: A subset of actual configs are benchmarked per canonical shape
@@ -101,7 +101,7 @@ time from hours to minutes while maintaining good coverage of the parameter spac
 | Dimension | Buckets |
 |-----------|---------|
 | T (sequence) | 64, 128, 256, 512, 1024, 2048 |
-| K×C (states) | 12, 24, 48, 72, 96, 144, 192, 288 |
+| KxC (states) | 12, 24, 48, 72, 96, 144, 192, 288 |
 
 ## Full Benchmark Suite
 
@@ -226,8 +226,8 @@ python benchmarks/analyze_benchmarks.py \
 | `semiring_overhead_*.pdf` | Overhead of Max/Entropy vs Log |
 | `time_ratio_baseline_*.pdf` | Time ratio vs baseline backend |
 | `memory_ratio_baseline_*.pdf` | Memory ratio vs baseline backend |
-| `time_ratio_heatmap_*.pdf` | Heatmap of time ratios (backend × KC) |
-| `memory_ratio_heatmap_*.pdf` | Heatmap of memory ratios (backend × KC) |
+| `time_ratio_heatmap_*.pdf` | Heatmap of time ratios (backend x KC) |
+| `memory_ratio_heatmap_*.pdf` | Heatmap of memory ratios (backend x KC) |
 
 ### Generated Tables
 

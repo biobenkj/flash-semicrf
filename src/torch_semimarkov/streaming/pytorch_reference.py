@@ -35,7 +35,7 @@ def linear_crf_forward_pytorch(
     implementation eliminates all K-related overhead (ring buffers, duration
     loops, checkpointing) for maximum performance.
 
-    Complexity: O(T × C²) time, O(batch × C) memory.
+    Complexity: O(T * C²) time, O(batch * C) memory.
 
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
@@ -284,7 +284,7 @@ def semi_crf_k2_forward_pytorch(
     explicit 2-step history instead of a ring buffer, eliminating modular
     arithmetic and checkpoint overhead.
 
-    Complexity: O(T × C²) time, O(batch × C) memory.
+    Complexity: O(T * C²) time, O(batch * C) memory.
 
     Args:
         cum_scores: Cumulative projected scores of shape (batch, T+1, C).
@@ -940,7 +940,7 @@ def semi_crf_streaming_backward_pytorch(
     # Initialize gradient accumulators
     # Note: grad_transition and grad_duration_bias are per-batch to allow proper
     # weighting by grad_output in the autograd wrapper. The caller (autograd.py)
-    # will apply einsum to compute: grad = Σ_b[grad_output[b] × grad_per_batch[b]]
+    # will apply einsum to compute: grad = Σ_b[grad_output[b] * grad_per_batch[b]]
     grad_cum_scores = torch.zeros_like(cum_scores)
     if transition.ndim == 2:
         grad_transition = torch.zeros(batch, C, C, device=device, dtype=dtype)
@@ -1108,7 +1108,7 @@ def semi_crf_streaming_backward_pytorch(
                 #   log_Z ≈ 250,000               (true partition)
                 #
                 #   local_ref ≈ 0 + 0 + 125k = 125k
-                #   log_scale = 125k + 125k - 250k ≈ 0  ✓ (scale ≈ 1)
+                #   log_scale = 125k + 125k - 250k ~ 0  [OK] (scale ~ 1)
                 log_scale = local_ref_safe + log_norm_at_ckpt - log_Z
 
                 # Step 7: Defensive clamping (scale should be <= 1 for valid marginals)

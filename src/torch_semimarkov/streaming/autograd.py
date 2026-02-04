@@ -132,7 +132,7 @@ class SemiCRFStreaming(torch.autograd.Function):
         #
         # Shared parameters (transition, duration_bias):
         #   These now come as per-batch tensors: (batch, C, C) or (batch, K, C, C)
-        #   We apply weighted sum: grad = Σ_b[grad_output[b] × grad_per_batch[b]]
+        #   We apply weighted sum: grad = Σ_b[grad_output[b] * grad_per_batch[b]]
         #   Using einsum for memory efficiency (avoids large intermediate tensor)
         batch = grad_output.shape[0]
         scale = grad_output.view(batch, 1, 1)
@@ -306,7 +306,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
 
 
 class LinearCRFStreaming(torch.autograd.Function):
-    r"""Optimized K=1 (linear CRF) autograd function. O(batch×C) memory."""
+    r"""Optimized K=1 (linear CRF) autograd function. O(batch*C) memory."""
 
     @staticmethod
     def forward(
@@ -398,7 +398,7 @@ class LinearCRFStreaming(torch.autograd.Function):
 
 
 class SemiCRFK2Streaming(torch.autograd.Function):
-    r"""Optimized K=2 semi-CRF autograd function. O(batch×C) memory."""
+    r"""Optimized K=2 semi-CRF autograd function. O(batch*C) memory."""
 
     @staticmethod
     def forward(
@@ -496,11 +496,11 @@ def semi_crf_streaming_forward(
 ) -> torch.Tensor:
     r"""Compute Semi-CRF partition function with streaming edge computation.
 
-    O(KC) memory (ring buffer), O(T×K×C²) compute. Automatically dispatches to
+    O(KC) memory (ring buffer), O(T*K*C²) compute. Automatically dispatches to
     optimized implementations based on K:
 
-    - **K=1**: Linear CRF fast path. O(batch×C) memory, no ring buffer.
-    - **K=2**: Specialized 2-step path. O(batch×C) memory, explicit history.
+    - **K=1**: Linear CRF fast path. O(batch*C) memory, no ring buffer.
+    - **K=2**: Specialized 2-step path. O(batch*C) memory, explicit history.
     - **K≥3**: Triton streaming kernel on GPU, PyTorch fallback on CPU.
 
     .. warning::
@@ -518,7 +518,7 @@ def semi_crf_streaming_forward(
         transition (Tensor): Label transition scores of shape :math:`(C, C)` for
             static transitions, or :math:`(K, C, C)` for duration-dependent
             transitions. ``transition[c_src, c_dest]`` is the score for
-            c_src → c_dest.
+            c_src -> c_dest.
         duration_bias (Tensor): Duration-specific label bias of shape :math:`(K, C)`.
             Required to compensate for sum-pooling length bias.
         lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.

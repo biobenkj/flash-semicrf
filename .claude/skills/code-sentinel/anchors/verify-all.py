@@ -80,10 +80,10 @@ def main() -> int:
         errors = check_consistency()
         if errors:
             for err in errors:
-                print(f"  ✗ {err}")
+                print(f"  [FAIL] {err}")
             print(f"\nConsistency: {len(errors)} errors found")
         else:
-            print("  ✓ All metadata consistent")
+            print("  [PASS] All metadata consistent")
         print()
 
     # Anchor verification
@@ -114,7 +114,7 @@ def main() -> int:
                 spec.get("drift_tolerance", 20),
                 spec.get("after"),
             )
-            status = "✓" if code == 0 else "✗"
+            status = "[PASS]" if code == 0 else "[FAIL]"
             print(f"  {status} {anchor_name}: {msg}")
             if code == 0:
                 verified += 1

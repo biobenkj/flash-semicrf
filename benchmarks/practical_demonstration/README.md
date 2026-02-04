@@ -63,10 +63,10 @@ Both benchmarks use the **same encoder** with two CRF heads:
 
 ```
 Encoder (BiLSTM or Mamba)
-    │
-    ├── Linear CRF (K=1)    ← This is just a special case!
-    │
-    └── Semi-CRF (K=500 or K=30)
+    |
+    +-- Linear CRF (K=1)    <-- This is just a special case!
+    |
+    +-- Semi-CRF (K=500 or K=30)
 ```
 
 **Key insight:** `torch-semimarkov` with `max_duration=1` degenerates to a standard linear CRF. This enables truly apples-to-apples comparison using identical code paths.
@@ -300,8 +300,8 @@ COMPARISON: Linear CRF vs Semi-CRF
 Metric                        Linear CRF        Semi-CRF            Δ
 ----------------------------------------------------------------------
 position_f1_macro                 0.8234          0.8251       +0.0017
-boundary_f1                       0.6123          0.6847       +0.0724  ← Key metric
-segment_f1                        0.4521          0.5234       +0.0713  ← Key metric
+boundary_f1                       0.6123          0.6847       +0.0724  <-- Key metric
+segment_f1                        0.4521          0.5234       +0.0713  <-- Key metric
 
 Boundary F1 at different tolerances:
   tol=0                           0.6123          0.6847       +0.0724
@@ -309,11 +309,11 @@ Boundary F1 at different tolerances:
   tol=2                           0.7891          0.8312       +0.0421
 
 Duration KL divergence (lower is better):
-  intergenic                      0.8234          0.3421       ← Semi-CRF wins
-  5UTR                            0.5123          0.2134       ← Semi-CRF wins
-  CDS                             0.4521          0.1823       ← Semi-CRF wins
-  3UTR                            0.5891          0.2512       ← Semi-CRF wins
-  intron                          0.7234          0.2891       ← Semi-CRF wins
+  intergenic                      0.8234          0.3421       <-- Semi-CRF wins
+  5UTR                            0.5123          0.2134       <-- Semi-CRF wins
+  CDS                             0.4521          0.1823       <-- Semi-CRF wins
+  3UTR                            0.5891          0.2512       <-- Semi-CRF wins
+  intron                          0.7234          0.2891       <-- Semi-CRF wins
 ```
 
 ## Why This Matters for the Paper

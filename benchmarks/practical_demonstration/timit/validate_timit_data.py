@@ -111,47 +111,47 @@ def validate_timit_data(data_dir: Path, split: str = "train"):
         f"  Sequence lengths: min={min(all_lengths)}, max={max(all_lengths)}, mean={np.mean(all_lengths):.1f}"
     )
 
-    print("\n📈 Feature Statistics (Global):")
+    print("\n[INFO] Feature Statistics (Global):")
     print(f"  Mean: {global_mean:.4f} (ideal: ~0)")
     print(f"  Std:  {global_std:.4f} (ideal: ~1)")
     print(f"  Min:  {global_min:.4f}")
     print(f"  Max:  {global_max:.4f}")
 
-    print("\n📈 Feature Statistics (Per-Dimension):")
+    print("\n[INFO] Feature Statistics (Per-Dimension):")
     print(f"  Mean range: [{feature_means.min():.4f}, {feature_means.max():.4f}]")
     print(f"  Std range:  [{feature_stds.min():.4f}, {feature_stds.max():.4f}]")
 
     # Normalization assessment
-    print("\n🔍 Normalization Check:")
+    print("\n[CHECK] Normalization Check:")
     if abs(global_mean) < 0.1 and 0.5 < global_std < 2.0:
-        print("  ✅ Features appear normalized (mean≈0, std≈1)")
+        print("  [PASS] Features appear normalized (mean≈0, std≈1)")
     else:
-        print("  ⚠️  Features may need normalization!")
+        print("  [WARN]  Features may need normalization!")
         print("     Consider: features = (features - mean) / std")
 
     # NaN/Inf check
-    print("\n🚨 NaN/Inf Check:")
+    print("\n[ALERT] NaN/Inf Check:")
     if nan_count == 0 and inf_count == 0:
-        print("  ✅ No NaN or Inf values found")
+        print("  [PASS] No NaN or Inf values found")
     else:
-        print(f"  ❌ Found {nan_count} utterances with NaN")
-        print(f"  ❌ Found {inf_count} utterances with Inf")
+        print(f"  [FAIL] Found {nan_count} utterances with NaN")
+        print(f"  [FAIL] Found {inf_count} utterances with Inf")
 
     # Label distribution
-    print("\n🏷️  Label Distribution:")
+    print("\n[LABEL]  Label Distribution:")
     print(f"  Unique labels: {len(label_counts)}")
     print(f"  Most common: {sorted(label_counts.items(), key=lambda x: -x[1])[:5]}")
     print(f"  Least common: {sorted(label_counts.items(), key=lambda x: x[1])[:5]}")
 
     # Issues summary
     if issues:
-        print(f"\n❌ Issues Found ({len(issues)}):")
+        print(f"\n[FAIL] Issues Found ({len(issues)}):")
         for issue in issues[:10]:
             print(f"  - {issue}")
         if len(issues) > 10:
             print(f"  ... and {len(issues) - 10} more")
     else:
-        print("\n✅ No data quality issues found!")
+        print("\n[PASS] No data quality issues found!")
 
     return {
         "utterance_count": utterance_count,
@@ -182,7 +182,7 @@ if __name__ == "__main__":
             results = validate_timit_data(args.data_dir, split)
             all_results[split] = results
         except FileNotFoundError as e:
-            print(f"⚠️  Skipping {split}: {e}")
+            print(f"[WARN]  Skipping {split}: {e}")
 
     # Summary
     print(f"\n{'='*60}")
@@ -192,17 +192,17 @@ if __name__ == "__main__":
     has_issues = False
     for split, results in all_results.items():
         if results["nan_count"] > 0 or results["inf_count"] > 0:
-            print(f"❌ {split}: Contains NaN/Inf - FIX REQUIRED")
+            print(f"[FAIL] {split}: Contains NaN/Inf - FIX REQUIRED")
             has_issues = True
         elif results["needs_normalization"]:
-            print(f"⚠️  {split}: Needs normalization - RECOMMENDED")
+            print(f"[WARN]  {split}: Needs normalization - RECOMMENDED")
             has_issues = True
         else:
-            print(f"✅ {split}: Data quality OK")
+            print(f"[PASS] {split}: Data quality OK")
 
     if has_issues:
-        print("\n⚠️  Address issues above before training!")
+        print("\n[WARN]  Address issues above before training!")
         exit(1)
     else:
-        print("\n✅ All data validation checks passed!")
+        print("\n[PASS] All data validation checks passed!")
         exit(0)

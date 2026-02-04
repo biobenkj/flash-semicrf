@@ -133,7 +133,7 @@ if error_indices:
     print(f"  Segment 0 (t=0-{interval-1}): {len(seg0_errors)} errors")
     print(f"  Segment 1 (t={interval}-{T-1}): {len(seg1_errors)} errors")
 else:
-    print("✓ All positions match within threshold!")
+    print("[PASS] All positions match within threshold!")
     print()
     print("SUCCESS: Triton matches PyTorch reference")
 

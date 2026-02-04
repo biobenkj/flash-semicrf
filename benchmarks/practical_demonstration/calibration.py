@@ -768,39 +768,39 @@ def print_calibration_comparison(
 
     # ECE (lower is better)
     delta = semicrf_results.ece - linear_results.ece
-    better = "✓" if delta < 0 else ""
+    better = "[PASS]" if delta < 0 else ""
     print(
-        f"{'Expected Calibration Error (↓)':<40} {semicrf_results.ece:>12.4f} {linear_results.ece:>12.4f} {delta:>+8.4f} {better}"
+        f"{'Expected Calibration Error (lower better)':<40} {semicrf_results.ece:>12.4f} {linear_results.ece:>12.4f} {delta:>+8.4f} {better}"
     )
 
     # MCE (lower is better)
     delta = semicrf_results.mce - linear_results.mce
-    better = "✓" if delta < 0 else ""
+    better = "[PASS]" if delta < 0 else ""
     print(
-        f"{'Maximum Calibration Error (↓)':<40} {semicrf_results.mce:>12.4f} {linear_results.mce:>12.4f} {delta:>+8.4f} {better}"
+        f"{'Maximum Calibration Error (lower better)':<40} {semicrf_results.mce:>12.4f} {linear_results.mce:>12.4f} {delta:>+8.4f} {better}"
     )
 
     # Brier score (lower is better)
     delta = semicrf_results.brier_score - linear_results.brier_score
-    better = "✓" if delta < 0 else ""
+    better = "[PASS]" if delta < 0 else ""
     print(
-        f"{'Brier Score (↓)':<40} {semicrf_results.brier_score:>12.4f} {linear_results.brier_score:>12.4f} {delta:>+8.4f} {better}"
+        f"{'Brier Score (lower better)':<40} {semicrf_results.brier_score:>12.4f} {linear_results.brier_score:>12.4f} {delta:>+8.4f} {better}"
     )
 
     # AUC selective (higher is better)
     delta = semicrf_results.auc_selective - linear_results.auc_selective
-    better = "✓" if delta > 0 else ""
+    better = "[PASS]" if delta > 0 else ""
     print(
-        f"{'Selective Prediction AUC (↑)':<40} {semicrf_results.auc_selective:>12.4f} {linear_results.auc_selective:>12.4f} {delta:>+8.4f} {better}"
+        f"{'Selective Prediction AUC (higher better)':<40} {semicrf_results.auc_selective:>12.4f} {linear_results.auc_selective:>12.4f} {delta:>+8.4f} {better}"
     )
 
     # Uncertainty-error correlation (higher is better - uncertainty should predict errors)
     delta = (
         semicrf_results.uncertainty_error_correlation - linear_results.uncertainty_error_correlation
     )
-    better = "✓" if delta > 0 else ""
+    better = "[PASS]" if delta > 0 else ""
     print(
-        f"{'Uncertainty-Error Correlation (↑)':<40} {semicrf_results.uncertainty_error_correlation:>12.4f} {linear_results.uncertainty_error_correlation:>12.4f} {delta:>+8.4f} {better}"
+        f"{'Uncertainty-Error Correlation (higher better)':<40} {semicrf_results.uncertainty_error_correlation:>12.4f} {linear_results.uncertainty_error_correlation:>12.4f} {delta:>+8.4f} {better}"
     )
 
     print("\nConfidence Interval Coverage (closer to nominal is better):")
@@ -838,7 +838,7 @@ def print_calibration_comparison(
         nominal = level / 100
         s_err = abs(s_cov - nominal)
         l_err = abs(l_cov - nominal)
-        better = "✓" if s_err < l_err else ""
+        better = "[PASS]" if s_err < l_err else ""
         print(
             f"  {level}% CI coverage (nominal={nominal:.2f}): "
             f"{model_names[0]}={s_cov:.3f} (width={s_width:.1f}), "

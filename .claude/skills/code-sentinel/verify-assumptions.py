@@ -195,7 +195,7 @@ def main(trace_name: str) -> int:
             manual_count += 1
 
         passed, msg = verify_assumption(assumption, anchors, trace_name)
-        status = "✓" if passed else "✗"
+        status = "[PASS]" if passed else "[FAIL]"
         mech_tag = "" if is_mechanical else " [manual]"
         print(f"  {status} {assumption['id']}: {assumption['description']}{mech_tag}")
         print(f"      {msg}")

@@ -32,8 +32,8 @@ def run_test(batch, T, C, K, test_name):
     torch.cuda.manual_seed_all(42)
 
     print(f"Config: batch={batch}, T={T}, C={C}, K={K}")
-    print(f"Expected atomic reduction for grad_cum_scores[t]: ~{K * (C // 4)}×")
-    print(f"Expected atomic reduction for grad_duration_bias: ~{C // 4}× per k")
+    print(f"Expected atomic reduction for grad_cum_scores[t]: ~{K * (C // 4)}x")
+    print(f"Expected atomic reduction for grad_duration_bias: ~{C // 4}x per k")
     print(f"Total atomic operations saved: ~{T * K * (C // 4) * batch:,}")
 
     # Setup
@@ -105,14 +105,14 @@ def run_test(batch, T, C, K, test_name):
     )
 
     if has_nan:
-        print("\n❌ FAILED: Gradients contain NaN")
+        print("\n[FAIL]: Gradients contain NaN")
         return False
 
     if has_inf:
-        print("\n❌ FAILED: Gradients contain Inf")
+        print("\n[FAIL]: Gradients contain Inf")
         return False
 
-    print("\n✅ PASSED: Numerical stability maintained")
+    print("\n[PASS]: Numerical stability maintained")
     print("   - No NaN/Inf in gradients")
     print("   - Gradient shapes correct")
 
@@ -137,7 +137,7 @@ if not run_test(
     exit(1)
 
 print(f"\n{'='*70}")
-print("ALL TESTS PASSED ✅")
+print("ALL TESTS PASSED [PASS]")
 print(f"{'='*70}")
 print("\nAtomic optimization successfully validated at multiple scales:")
 print("  - Basic: K=100 (correctness baseline)")

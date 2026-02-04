@@ -298,13 +298,13 @@ def check_backward_agreement(
 
     print("\nAcceptance criteria:")
     print(
-        f"  grad_cum_scores mean abs: {mean_abs_cum:.2e} < {cum_tol:.0e} {'✓' if cum_pass else '✗'}"
+        f"  grad_cum_scores mean abs: {mean_abs_cum:.2e} < {cum_tol:.0e} {'[PASS]' if cum_pass else '[FAIL]'}"
     )
     print(
-        f"  grad_transition max rel:  {rel_trans:.2e} < {param_tol:.0e} {'✓' if trans_pass else '✗'}"
+        f"  grad_transition max rel:  {rel_trans:.2e} < {param_tol:.0e} {'[PASS]' if trans_pass else '[FAIL]'}"
     )
     print(
-        f"  grad_duration_bias max rel: {rel_dur:.2e} < {param_tol:.0e} {'✓' if dur_pass else '✗'}"
+        f"  grad_duration_bias max rel: {rel_dur:.2e} < {param_tol:.0e} {'[PASS]' if dur_pass else '[FAIL]'}"
     )
     print(
         f"\n{'PASS' if passed else 'FAIL'}: All criteria met"

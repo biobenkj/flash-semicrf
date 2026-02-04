@@ -74,7 +74,7 @@ class TestRunner:
             return False
 
     def _print_result(self, result: TestResult):
-        status = "✓" if result.passed else "✗"
+        status = "[PASS]" if result.passed else "[FAIL]"
         print(f"  {status} {result.name} ({result.duration:.2f}s)")
         if not result.passed and result.message:
             print(f"    Error: {result.message}")

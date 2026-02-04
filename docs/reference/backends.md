@@ -46,21 +46,21 @@ and need inference only (no gradients).
 
 ## Streaming Triton Kernel (Recommended)
 
-The streaming API computes edge potentials on-the-fly from O(T×C) cumulative scores,
-eliminating the need for the O(T×K×C²) edge tensor.
+The streaming API computes edge potentials on-the-fly from O(TxC) cumulative scores,
+eliminating the need for the O(TxKxC²) edge tensor.
 
 **Performance comparison (forward-only, NVIDIA L40S):**
 
 | Configuration | triton_scan | streaming | Streaming Advantage |
 |---------------|-------------|-----------|---------------------|
-| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35× faster, 2,393× less memory |
-| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48× faster, 11,795× less memory |
+| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35x faster, 2,393x less memory |
+| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48x faster, 11,795x less memory |
 
 **Why streaming is faster:**
 - Memory bandwidth is the bottleneck, not compute
-- Computing edges on-the-fly from O(T×C) cumulative scores is faster than loading
-  O(T×K×C²) pre-computed edges from memory
-- Linear batch scaling: memory grows as O(batch×T×C), not O(batch×T×K×C²)
+- Computing edges on-the-fly from O(TxC) cumulative scores is faster than loading
+  O(TxKxC²) pre-computed edges from memory
+- Linear batch scaling: memory grows as O(batchxTxC), not O(batchxTxKxC²)
 
 **Training advantages:**
 - Hand-written Triton backward kernels (no compilation overhead)
@@ -76,7 +76,7 @@ eliminating the need for the O(T×K×C²) edge tensor.
 > critical limitations at production scales:
 >
 > - **RecursionError**: T > 1000 exceeds Python recursion limit in inductor
-> - **OOM during backward**: Compiled graphs need 2×+ memory for gradient buffers
+> - **OOM during backward**: Compiled graphs need 2x+ memory for gradient buffers
 > - **Compilation time**: 20+ minutes for T=1000, essentially unusable
 >
 > **Always use the streaming API for training.**
@@ -138,7 +138,7 @@ For training, use the streaming API instead:
 from torch_semimarkov.streaming import semi_crf_streaming_forward
 
 # Streaming: compute edges on-the-fly (recommended for both training and inference)
-cum_scores = cumsum(projected, dim=1)  # O(T×C) - much smaller!
+cum_scores = cumsum(projected, dim=1)  # O(TxC) - much smaller!
 partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
 partition.sum().backward()  # Hand-written Triton backward kernel
 ```

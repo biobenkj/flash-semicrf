@@ -64,7 +64,7 @@ This performs:
 
 **On success (all verified):**
 ```
-Grounded: triton-forward-k3plus @ 40fe66b ✓
+Grounded: triton-forward-k3plus @ 40fe66b [PASS]
 ```
 
 **On failure (drift detected):**
@@ -73,10 +73,10 @@ Grounded: triton-forward-k3plus @ 40fe66b
   Commit: STALE (COMMITTED_CHANGES)
     Verified: 40fe66b | Current: abc1234
   Anchors: 5/7 verified, 2 failed
-    ✗ RING_BUFFER_WRITE: ANCHOR_DRIFT: Expected ~320, found 345 (drift 25 > 20)
-  Assumptions: A1 ✓, A2 ✗, A3 ✓
+    [FAIL] RING_BUFFER_WRITE: ANCHOR_DRIFT: Expected ~320, found 345 (drift 25 > 20)
+  Assumptions: A1 [PASS], A2 [FAIL], A3 [PASS]
 
-⚠️  Cannot provide advice until sentinel is updated.
+[WARN]  Cannot provide advice until sentinel is updated.
 ```
 
 ### Step 3: Remediate if Needed

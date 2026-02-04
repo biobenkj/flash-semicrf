@@ -331,7 +331,7 @@ class TestTritonStreamingKernel:
         """Verify K=1 Triton backward works with TIMIT-like configuration.
 
         TIMIT uses:
-        - C=39 phoneme classes → C_PAD=64 (significant padding)
+        - C=39 phoneme classes -> C_PAD=64 (significant padding)
         - Longer sequences (100-600 frames)
         - Larger batches (32)
 
@@ -344,7 +344,7 @@ class TestTritonStreamingKernel:
         from torch_semimarkov.streaming import semi_crf_streaming_forward
 
         # Match TIMIT configuration
-        batch, T, K, C = 4, 150, 1, 39  # C=39 → C_PAD=64
+        batch, T, K, C = 4, 150, 1, 39  # C=39 -> C_PAD=64
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
             batch, T, K, C, device="cuda"
         )
@@ -1059,8 +1059,8 @@ class TestGradientScalingBugFix:
     """Test that shared parameter gradients are correctly weighted by grad_output.
 
     These tests specifically target the bug where:
-    - BUGGY: grad = Σ_b(marginal[b]) × Σ_b(grad_output[b])
-    - CORRECT: grad = Σ_b(marginal[b] × grad_output[b])
+    - BUGGY: grad = Σ_b(marginal[b]) * Σ_b(grad_output[b])
+    - CORRECT: grad = Σ_b(marginal[b] * grad_output[b])
 
     The bug was masked because all tests used .sum().backward() which creates
     uniform grad_output = [1, 1, ..., 1], making both formulas equivalent.
@@ -1336,13 +1336,13 @@ class TestTritonBackwardDebug:
         3. Whether the error pattern is systematic or random
 
         Key insight: For K=1, the backward kernel processes segments of length 1
-        (t → t+1). The bug manifests as 10^19 magnitude errors, suggesting:
+        (t -> t+1). The bug manifests as 10^19 magnitude errors, suggesting:
         - Uninitialized memory access, OR
         - Incorrect logsumexp accumulation across tiles
         """
         from torch_semimarkov.streaming import semi_crf_streaming_forward
 
-        # Use the failing config: K=1, C=39 → C_PAD=64, 4 tiles
+        # Use the failing config: K=1, C=39 -> C_PAD=64, 4 tiles
         batch, T, K, C = 2, 50, 1, 39
         C_PAD = 64  # Next power of 2
         TILE_C = 16
@@ -1458,9 +1458,9 @@ class TestTritonBackwardDebug:
         """Isolate whether the bug is specific to multi-tile processing.
 
         Compare:
-        - C=4 → C_PAD=4 → 1 tile (expected: PASS)
-        - C=17 → C_PAD=32 → 2 tiles (check if fails)
-        - C=33 → C_PAD=64 → 4 tiles (expected: FAIL)
+        - C=4 -> C_PAD=4 -> 1 tile (expected: PASS)
+        - C=17 -> C_PAD=32 -> 2 tiles (check if fails)
+        - C=33 -> C_PAD=64 -> 4 tiles (expected: FAIL)
 
         If 2-tile also fails, the bug is in tile accumulation.
         If only 4-tile fails, the bug may be in higher-tile handling.
@@ -1468,9 +1468,9 @@ class TestTritonBackwardDebug:
         from torch_semimarkov.streaming import semi_crf_streaming_forward
 
         test_cases = [
-            (4, 4, 1, "1 tile"),  # C=4 → C_PAD=4
-            (17, 32, 2, "2 tiles"),  # C=17 → C_PAD=32
-            (33, 64, 4, "4 tiles"),  # C=33 → C_PAD=64
+            (4, 4, 1, "1 tile"),  # C=4 -> C_PAD=4
+            (17, 32, 2, "2 tiles"),  # C=17 -> C_PAD=32
+            (33, 64, 4, "4 tiles"),  # C=33 -> C_PAD=64
         ]
 
         print("\n" + "=" * 70)
