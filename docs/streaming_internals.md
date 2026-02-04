@@ -79,20 +79,27 @@ cum_scores: (batch, T+1, C)
 
 ### Memory Layout
 
+**Forward pass** uses a ring buffer indexed by `t % K`:
+
 ```python
 alpha_ring: (batch, K, C)
 ```
 
-Forward messages use a ring buffer indexed by `t % K`:
+**Backward pass** uses a larger ring buffer indexed by `t % (2*K)`:
+
+```python
+beta_ring: (batch, 2*K, C)
+```
+
+The backward pass requires `2*K` slots because it needs to look forward by up to K positions while also storing beta values at position t. The `2*K` size ensures no aliasing between read and write positions.
+
+### Forward Ring Buffer
+
+Forward messages use `t % K` indexing:
+
 - `alpha_ring[:, t % K, :]` stores α values at position `t`
 - Only the most recent `K` positions are kept
 - Older values are overwritten as the scan progresses
-
-### Why O(KC) Memory
-
-Standard forward pass stores all α values: **O(T × C)** memory.
-
-With max segment duration K, position `t` only depends on positions `[t-K+1, t-1]`. The ring buffer exploits this by storing only the K most recent values.
 
 ```
 Time:     0   1   2   3   4   5   6   7   8   ...
@@ -100,6 +107,19 @@ Ring idx: 0   1   2   0   1   2   0   1   2   ...  (K=3)
           ↑           ↑           ↑
           overwritten by t=3, 6, 9, ...
 ```
+
+### Backward Ring Buffer
+
+Backward messages use `t % (2*K)` indexing to avoid aliasing:
+- `beta_ring[:, t % (2*K), :]` stores β values at position `t`
+- Looking forward: `beta_ring[:, (t+k) % (2*K), :]` for k ∈ [1, K]
+- With `2*K` slots, `t % (2*K)` never equals `(t+k) % (2*K)` for k ∈ [1, K]
+
+### Why O(KC) Memory
+
+Standard forward pass stores all α values: **O(T × C)** memory.
+
+With max segment duration K, position `t` only depends on positions `[t-K+1, t-1]`. The ring buffer exploits this by storing only the K most recent values (forward) or 2K values (backward).
 
 ---
 
@@ -120,7 +140,7 @@ content_score = cum_scores[t, c_dst] - cum_scores[t-k, c_dst]
 
 ### Code Location
 
-From [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py) (kernel implementation):
+From [triton_forward.py:232-295](../src/torch_semimarkov/streaming/triton_forward.py#L232-L295) (kernel implementation):
 
 ```python
 # Content score via cumsum difference
@@ -128,12 +148,47 @@ cum_end = tl.load(cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c, ...)
 cum_start = tl.load(cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c, ...)
 content_score = cum_end - cum_start  # (C_PAD,)
 
-# Add duration bias
-dur_bias = tl.load(duration_bias_ptr + k * stride_db_k + c_idx * stride_db_c, ...)
+# Add duration bias (duration k uses index k-1)
+dur_idx = k - 1
+dur_bias = tl.load(duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c, ...)
 segment_score = content_score + dur_bias  # (C_PAD,)
 
 # Build edge block
 edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
+```
+
+### Duration-Dependent Transitions
+
+The streaming module supports both **static** and **duration-dependent** transitions:
+
+**Static transitions** `(C, C)`: Same transition matrix for all segment durations
+
+```python
+transition[c_src, c_dst]  # Single matrix
+```
+
+**Duration-dependent transitions** `(K, C, C)`: Different transitions per duration
+
+```python
+transition[k, c_src, c_dst]  # k = 0, 1, ..., K-1 (duration k+1 uses index k)
+```
+
+The kernel detects the shape at launch and uses the appropriate loading pattern:
+
+From [triton_forward.py:283-293](../src/torch_semimarkov/streaming/triton_forward.py#L283-L293):
+
+```python
+# For duration-dependent transitions, load transition[dur_idx] inside the loop
+# Duration k uses index k-1 (same convention as PyTorch reference)
+if HAS_DURATION_TRANSITIONS:
+    transition_block = tl.load(
+        transition_ptr
+        + dur_idx * stride_tr_k
+        + c_dst_idx * stride_tr_dst
+        + c_src_idx * stride_tr_src,
+        mask=c_mask_2d,
+        other=0.0,
+    )  # (C_PAD, C_PAD) - transition[dur_idx].T
 ```
 
 ---
@@ -143,18 +198,25 @@ edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
 | Code Variable | Math Notation | Shape | Description |
 |--------------|---------------|-------|-------------|
 | `cum_scores[:, t, c]` | S_t,c | (batch, T+1, C) | Cumulative projected scores |
-| `transition[c_src, c_dst]` | T_c',c | (C, C) | Label transitions (src → dst) |
+| `transition[c_src, c_dst]` | T_c',c | (C, C) | Static label transitions (src → dst) |
+| `transition[k, c_src, c_dst]` | T_k,c',c | (K, C, C) | Duration-dependent transitions |
 | `duration_bias[k, c]` | B_k,c | (K, C) | Duration-specific label bias |
 | `alpha_ring[:, t%K, :]` | α̃_t | (batch, C) | Log-forward messages (ring buffer) |
-| `beta_ring[:, t%K, :]` | β̃_t | (batch, C) | Log-backward messages (ring buffer) |
+| `beta_ring[:, t%(2K), :]` | β̃_t | (batch, C) | Log-backward messages (2K ring buffer) |
 | `ring_checkpoints[:, i, :, :]` | Ω_i | (batch, K, C) | Saved ring buffer state at checkpoint i |
+| `log_norm_checkpoints[:, i]` | N_i | (batch,) | Cumulative log normalization at checkpoint i |
 | `log_Z` | log Z | (batch,) | Log partition function |
 
 ### Mathematical Notation
 
-The edge potential (log-domain):
+The edge potential (log-domain) with static transitions:
 ```
 ψ̃(t, k, c, c') = (S_t,c - S_{t-k},c) + B_k,c + T_c',c
+```
+
+With duration-dependent transitions:
+```
+ψ̃(t, k, c, c') = (S_t,c - S_{t-k},c) + B_k,c + T_{k,c',c}
 ```
 
 Forward recurrence:
@@ -168,61 +230,101 @@ Forward recurrence:
 
 ### Kernel Entry Point
 
-From [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py):
+From [triton_forward.py:84-135](../src/torch_semimarkov/streaming/triton_forward.py#L84-L135):
 
 ```python
 @triton.jit
-def semi_crf_streaming_scan_kernel(...):
+def semi_crf_streaming_scan_kernel(
+    cum_scores_ptr,      # (batch, T+1, C)
+    transition_ptr,      # (C, C) or (K, C, C)
+    duration_bias_ptr,   # (K, C)
+    lengths_ptr,         # (batch,)
+    proj_start_ptr,      # (batch, T, C) - optional
+    proj_end_ptr,        # (batch, T, C) - optional
+    out_ptr,             # (batch,) - partition function
+    ring_ptr,            # (batch, K, C_PAD) - live ring buffer
+    ring_ckpt_ptr,       # (batch, num_ckpts, K, C_PAD) - checkpoints
+    ...
+):
 ```
 
 ### Initialization
 
+From [triton_forward.py:1015-1023](../src/torch_semimarkov/streaming/triton_forward.py#L1015-L1023):
+
 ```python
-# Ring buffer initialized in launcher (triton_forward.py:640-641)
+# Ring buffer initialized in launcher
 ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
 ring_buffer[:, 0, :C] = 0.0  # alpha[0, c] = 0.0 for all valid labels
+
+# Checkpoint storage initialized
+ring_checkpoints = torch.full(
+    (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
+)
+ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 ```
 
 ### Main Loop Structure
 
+From [triton_forward.py:208-337](../src/torch_semimarkov/streaming/triton_forward.py#L208-L337):
+
 ```python
 for t in tl.range(1, T + 1):
-    active = t <= seq_len
-    alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)  # Accumulator
+    # Cast t to int32 to match seq_len type for consistent comparison
+    active = t.to(tl.int32) <= seq_len
+    alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
 
-    for k in tl.range(1, tl.maximum(K, 2)):
-        k_valid = (k <= t) & (k <= K - 1)
+    for k in tl.range(1, K + 1):
+        k_valid = (k <= t) & (k <= K)
         start_pos = t - k
         ring_k_idx = start_pos % K
 
         # Load alpha_prev from ring buffer
         alpha_prev = tl.load(ring_base + ring_k_idx * stride_ring_k + ...)
 
-        # Compute edge on-the-fly (see above)
+        # Compute edge on-the-fly (prefix-sum decomposition)
+        content_score = cum_end - cum_start
+        segment_score = content_score + dur_bias
+        edge_block = segment_score[:, None] + transition_block
 
         # Accumulate via logsumexp
         scores = alpha_prev[None, :] + edge_block
         score_for_k = logsumexp(scores, axis=1)  # Over c_src
         alpha_t = logsumexp_2way(alpha_t, score_for_k)  # Over k
 
-    # Store to ring buffer
+    # Store to live ring buffer
     ring_t_idx = t % K
     tl.store(ring_base + ring_t_idx * stride_ring_k + ..., alpha_t, ...)
 ```
 
 ### Logsumexp Reduction Pattern
 
-The kernel uses a two-step logsumexp:
+The kernel uses a two-step logsumexp with NEG_INF guards:
+
 1. **Over source labels** (c_src): `logsumexp(scores, axis=1)`
-2. **Over durations** (k): Accumulated incrementally via `logsumexp_2way`
+2. **Over durations** (k): Accumulated incrementally via guarded logsumexp
+
+From [triton_forward.py:304-326](../src/torch_semimarkov/streaming/triton_forward.py#L304-L326):
 
 ```python
-# Stable logsumexp accumulation
+# Logsumexp over c_src (axis=1) with NEG_INF guard
+max_scores = tl.max(scores, axis=1)
+is_all_neginf = max_scores < (NEG_INF + 1.0)
+max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
+log_sum_exp = tl.log(tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1))
+score_for_k = tl.where(is_all_neginf, NEG_INF, max_scores + log_sum_exp)
+
+# Accumulate into alpha_t via guarded logsumexp
 max_alpha = tl.maximum(alpha_t, score_for_k)
-alpha_t = max_alpha + tl.log(
-    tl.exp(alpha_t - max_alpha) + tl.exp(score_for_k - max_alpha)
+is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (score_for_k < (NEG_INF + 1.0))
+max_alpha_safe = tl.where(is_both_neginf, 0.0, max_alpha)
+log_sum_exp_acc = tl.log(
+    tl.exp(alpha_t - max_alpha_safe) + tl.exp(score_for_k - max_alpha_safe)
 )
+alpha_t = tl.where(is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc)
 ```
+
+The NEG_INF guards prevent undefined arithmetic when all inputs are `-1e9` (would produce `exp(0) = 1` incorrectly).
 
 ---
 
@@ -486,71 +588,121 @@ This is a novel extension of the Flash Attention technique to the batched variab
 
 ## Backward Pass Walkthrough
 
-### Two-Phase Algorithm
+### Two-Phase Algorithm with Loop Tiling
 
-From [triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py):
+From [triton_backward.py:56-1037](../src/torch_semimarkov/streaming/triton_backward.py#L56-L1037):
 
-The backward pass processes segments in reverse order:
+The backward pass processes segments in reverse order with **loop tiling** to reduce register pressure:
 
 ```python
-for ckpt_idx in range(NUM_CKPTS - 1, -1, -1):
+for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
+    ckpt_idx = NUM_CKPTS - 1 - ckpt_idx_loop  # Reverse order
     seg_start = ckpt_idx * CHECKPOINT_INTERVAL
     seg_end = min((ckpt_idx + 1) * CHECKPOINT_INTERVAL, T)
 
+    # Load log normalization factor for this checkpoint
+    log_norm_at_ckpt = tl.load(log_norm_ckpt_ptr + ...)
+
     # Phase 1: Recompute alpha from checkpoint
-    # Phase 2: Compute beta backward + accumulate gradients
+    # Phase 2: Compute beta backward + accumulate gradients (TILED)
 ```
 
 ### Phase 1: Alpha Recomputation
 
-Load ring buffer state from checkpoint, then recompute forward through the segment:
+Load ring buffer state from checkpoint, then recompute forward through the segment. Alpha buffer is **segment-isolated** to prevent race conditions:
+
+From [triton_backward.py:285-385](../src/torch_semimarkov/streaming/triton_backward.py#L285-L385):
 
 ```python
-# Load from checkpoint
+# Alpha buffer has segment dimension: (batch, num_segments, SEGMENT_SIZE, C_PAD)
+alpha_buf_seg = alpha_buf_base + ckpt_idx * stride_ab_seg
+
+# Load checkpoint and restore to buffer position 0
 for k_slot in tl.range(0, K):
     alpha_val = tl.load(ring_ckpt_base + ckpt_idx * stride_ckpt_n + k_slot * stride_ckpt_k + ...)
     if k_slot == seg_start % K:
-        tl.store(alpha_buf_base + 0 * stride_ab_t + ..., alpha_val)
+        tl.store(alpha_buf_seg + 0 * stride_ab_t + ..., alpha_val)
+
+# CRITICAL: Memory barrier ensures writes visible across all warps
+tl.debug_barrier()
 
 # Recompute alpha for positions seg_start+1 to seg_end
 for local_t in tl.range(1, SEGMENT_SIZE):
     t = seg_start + local_t
     if t < seg_end and t < seq_len:
-        # Same forward computation as main kernel
+        # Same forward recurrence as main kernel
         ...
 ```
 
-### Phase 2: Beta Backward + Gradients
+### Phase 2: Tiled Beta Backward + Gradients
 
-Compute beta backward while accumulating gradients:
+The marginal computation requires a `(C_PAD × C_PAD)` matrix. At C_PAD=64, this demands ~384 registers/thread. With num_warps=4+, this exceeds available registers and causes spilling.
+
+**Solution**: Process c_dst dimension in tiles of TILE_C (typically 16 or 32):
+
+From [triton_backward.py:540-1037](../src/torch_semimarkov/streaming/triton_backward.py#L540-L1037):
 
 ```python
 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
     t = seg_end - 1 - t_offset
     if t >= seg_start and t < seq_len:
-        alpha_t = tl.load(alpha_buf_base + local_t * stride_ab_t + ...)
-        new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+        alpha_t = tl.load(alpha_buf_seg + local_t * stride_ab_t + ...)
+        new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
-        for k in tl.range(1, tl.maximum(K, 2)):
+        for k in tl.range(1, K + 1):
             end_pos = t + k
             if end_pos <= seq_len:
-                beta_next = tl.load(beta_ring_base + (end_pos % K) * stride_br_k + ...)
+                # === PASS 1: Compute global statistics across all tiles ===
+                global_max = tl.full((), NEG_INF, dtype=tl.float64)
+                global_sum_exp = tl.zeros((), dtype=tl.float64)
 
-                # Compute edge
-                edge_block = ...
+                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
+                    # Load (TILE_C, C_PAD) tile of log_joint
+                    # Update global_max and global_sum_exp via online algorithm
+                    ...
 
-                # Compute marginal
-                log_marginal = alpha_t[None, :] + edge_block + beta_next[:, None] - log_Z
-                marginal = tl.exp(log_marginal)
+                # Compute scale factor bridging normalized alpha and full log_Z
+                log_scale = global_max_safe + log_norm_at_ckpt - log_Z
+                scale = tl.exp(log_scale_clamped)
 
-                # Accumulate gradients
-                ...
+                # === PASS 2: Compute marginals using global statistics ===
+                for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
+                    # Load tile, compute marginal = exp(log_joint - global_max) * scale
+                    # Accumulate gradients per-tile
+                    ...
 
-                # Update beta
-                scores_for_beta = edge_block + beta_next[:, None]
-                new_beta = logsumexp_2way(new_beta, logsumexp(scores_for_beta, axis=0))
+                    # Online logsumexp for beta_k (Flash Attention pattern)
+                    ...
 
-        tl.store(beta_ring_base + (t % K) * stride_br_k + ..., new_beta)
+        # Store beta[t] to ring buffer (uses 2*K slots)
+        t_ring_idx = t % (2 * K)
+        tl.store(beta_ring_base + t_ring_idx * stride_br_k + ..., new_beta)
+```
+
+### Why Two-Pass Tiling?
+
+The two-pass algorithm ensures all tiles use **identical normalization**:
+
+1. **Pass 1**: Compute `global_max` and `global_sum_exp` across ALL tiles using online logsumexp (Flash Attention pattern)
+2. **Pass 2**: Compute marginals using the global statistics
+
+Without this, each tile would use its own local normalization, causing incorrect marginals when marginals span multiple tiles (10-400% errors observed in testing).
+
+### Beta Ring Buffer (2K slots)
+
+The backward pass uses `t % (2*K)` indexing to prevent aliasing:
+
+```python
+# Initialize at final position
+final_ring_idx = final_pos % (2 * K)
+for k_init in tl.range(0, 2 * K):
+    is_final = k_init == final_ring_idx
+    init_val = tl.where(is_final & c_mask, 0.0, NEG_INF)
+    tl.store(beta_ring_base + k_init * stride_br_k + ...)
+
+# During backward: read from (t+k) % (2*K), write to t % (2*K)
+end_ring_idx = end_pos % (2 * K)
+beta_next = tl.load(beta_ring_base + end_ring_idx * stride_br_k + ...)
 ```
 
 ---
@@ -567,36 +719,75 @@ There are two types of parameters:
 
 2. **Shared parameters** (transition, duration_bias):
    - Shape does NOT include batch dimension
-   - Accumulated per-batch **inside** kernel, scaled by `grad_output` **after** via einsum
+   - Accumulated per-batch-per-segment in **workspace buffers**, then reduced via einsum
 
-### The Einsum Pattern
+### Per-Segment Workspace Pattern
 
-From [autograd.py:139-146](../src/torch_semimarkov/streaming/autograd.py#L139-L146):
+The Triton backward kernel uses per-segment workspace buffers to eliminate cross-segment atomic contention:
 
-```python
-# Per-batch: scale each batch element
-scale = grad_output.view(batch, 1, 1)
-grad_cum_scores = grad_cum_scores * scale
-
-# Shared: weighted sum via einsum
-# grad_θ = Σ_b[grad_output[b] × grad_per_batch[b]]
-grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
-grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
-```
-
-### Why This Matters
-
-The difference matters when `grad_output` varies across batch elements (e.g., weighted losses, masked sequences):
+From [triton_backward.py:1375-1420](../src/torch_semimarkov/streaming/triton_backward.py#L1375-L1420):
 
 ```python
-# Correct:
-grad_θ = Σ_b[grad_output[b] × marginal_sum[b]]
+# Workspace shapes include segment dimension for isolation
+# Static transitions: (batch, num_segments, C_PAD, C_PAD)
+# Duration-dependent: (batch, num_segments, K, C_PAD, C_PAD)
+grad_tr_workspace = torch.zeros(batch, num_segments, K, C_PAD, C_PAD, dtype=torch.float64)
+grad_db_workspace = torch.zeros(batch, num_segments, K, C_PAD, dtype=torch.float64)
 
-# Wrong (buggy):
-grad_θ = Σ_b[marginal_sum[b]] × Σ_b[grad_output[b]]
+# Each segment writes to its own workspace slice
+grad_tr_ws_seg = grad_tr_ws_base + ckpt_idx * stride_gtw_seg
+grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
 ```
 
-The einsum approach is also memory-efficient, avoiding large intermediate tensors.
+### The Einsum Reduction Pattern
+
+After kernel execution, host-side reduction combines per-segment workspaces:
+
+From [triton_backward.py:1480-1515](../src/torch_semimarkov/streaming/triton_backward.py#L1480-L1515):
+
+```python
+# 1. Sum over segments (deterministic order)
+grad_tr_workspace = grad_tr_workspace[:, :, :, :C, :C].sum(dim=1)  # (batch, K, C, C)
+grad_db_workspace = grad_db_workspace[:, :, :, :C].sum(dim=1)      # (batch, K, C)
+
+# 2. Weighted reduction via einsum
+# Notation: b=batch, s=segment, k=duration, i=src_state, j=dst_state
+grad_output_f64 = grad_output.to(torch.float64)
+
+if has_duration_transitions:
+    grad_transition = torch.einsum("bkij, b -> kij", grad_tr_workspace, grad_output_f64)
+else:
+    grad_transition = torch.einsum("bij, b -> ij", grad_tr_workspace, grad_output_f64)
+
+grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
+```
+
+### Why Float64 Accumulation?
+
+Gradient tensors use float64 to prevent non-determinism from atomic_add floating-point non-associativity. Error scales as O(sqrt(T×K×C)) per operation; float64 reduces this from ~1e-3 (float32) to ~1e-10 (negligible).
+
+### Atomic Optimization in Kernel
+
+For `grad_cum_scores[t]` which is accessed by all K iterations, a scatter-sum pattern accumulates locally before writing once:
+
+From [triton_backward.py:844-870](../src/torch_semimarkov/streaming/triton_backward.py#L844-L870):
+
+```python
+# Local accumulator (one per position t)
+grad_cs_t_local = tl.zeros([C_PAD], dtype=tl.float64)
+
+for k in tl.range(1, K + 1):
+    # ... compute marginals ...
+
+    # Scatter-sum pattern: accumulate across K iterations
+    scatter_mask = (c_idx[:, None] == c_dst_idx_tile[None, :])
+    scatter_values = tl.where(scatter_mask, marginal_sum_src_tile_scaled[None, :], 0.0)
+    grad_cs_t_local -= tl.sum(scatter_values, axis=1)
+
+# Single write after all k iterations (20-50× reduction vs K atomics)
+tl.atomic_add(grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
+              grad_cs_t_local, mask=c_mask)
+```
 
 ---
 
@@ -781,5 +972,5 @@ This would add ~1.5-2× compute overhead for marginal recomputation.
 python benchmarks/practical_demonstration/synthetic_genomics/gradient_check.py
 
 # Test determinism (will show remaining variance)
-python src/torch_semimarkov/streaming/find_determinism.py
+python scripts/find_determinism.py
 ```
