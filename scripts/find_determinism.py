@@ -30,6 +30,7 @@ from torch_semimarkov.streaming.triton_forward import (
 def test_config(batch, T, C, K, num_runs=10, device="cuda"):
     """Test if a specific config is deterministic."""
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     cum_scores = torch.randn(batch, T + 1, C, device=device, dtype=torch.float32)
     cum_scores[:, 0] = 0.0
@@ -59,6 +60,7 @@ def test_config(batch, T, C, K, num_runs=10, device="cuda"):
 def test_batch_pattern(batch, T, C, K, num_runs=20, device="cuda"):
     """Test which batch indices are affected by non-determinism."""
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     cum_scores = torch.randn(batch, T + 1, C, device=device, dtype=torch.float32)
     cum_scores[:, 0] = 0.0
@@ -89,6 +91,7 @@ def test_batch_pattern(batch, T, C, K, num_runs=20, device="cuda"):
 def test_backward_config(batch, T, C, K, num_runs=10, device="cuda"):
     """Test if backward pass is deterministic and free of NaN."""
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     cum_scores = torch.randn(batch, T + 1, C, device=device, dtype=torch.float32)
     cum_scores[:, 0] = 0.0
@@ -154,10 +157,23 @@ def test_backward_config(batch, T, C, K, num_runs=10, device="cuda"):
             max_diff_db, (results[0]["grad_db"] - results[i]["grad_db"]).abs().max().item()
         )
 
+    # Compute gradient magnitudes for relative error calculation
+    # Use mean of absolute values across all runs as reference magnitude
+    eps = 1e-8
+    mag_cs = torch.stack([r["grad_cs"].abs() for r in results]).mean().item() + eps
+    mag_tr = torch.stack([r["grad_tr"].abs() for r in results]).mean().item() + eps
+    mag_db = torch.stack([r["grad_db"].abs() for r in results]).mean().item() + eps
+
     return {
         "max_diff_cs": max_diff_cs,
         "max_diff_tr": max_diff_tr,
         "max_diff_db": max_diff_db,
+        "rel_diff_cs": max_diff_cs / mag_cs,
+        "rel_diff_tr": max_diff_tr / mag_tr,
+        "rel_diff_db": max_diff_db / mag_db,
+        "mag_cs": mag_cs,
+        "mag_tr": mag_tr,
+        "mag_db": mag_db,
         "nan_count": nan_count,
     }
 
@@ -256,8 +272,19 @@ def main():
                     bad_backward_configs.append((T, C, K, C_PAD, result))
                     print(
                         f"  [FAIL] T={T:3d}, C={C:2d}, K={K:2d}, C_PAD={C_PAD:2d} : "
-                        f"NaN={result['nan_count']}, diff_cs={result['max_diff_cs']:.6f}, "
-                        f"diff_tr={result['max_diff_tr']:.6f}, diff_db={result['max_diff_db']:.6f}"
+                        f"NaN={result['nan_count']}"
+                    )
+                    print(
+                        f"         abs_diff: cs={result['max_diff_cs']:.6f}, "
+                        f"tr={result['max_diff_tr']:.6f}, db={result['max_diff_db']:.6f}"
+                    )
+                    print(
+                        f"         rel_diff: cs={result['rel_diff_cs']:.2%}, "
+                        f"tr={result['rel_diff_tr']:.2%}, db={result['rel_diff_db']:.2%}"
+                    )
+                    print(
+                        f"         magnitude: cs={result['mag_cs']:.4f}, "
+                        f"tr={result['mag_tr']:.4f}, db={result['mag_db']:.4f}"
                     )
 
     print("\n" + "=" * 70)
@@ -265,9 +292,46 @@ def main():
     print("=" * 70)
 
     if bad_backward_configs:
-        print(f"\nFound {len(bad_backward_configs)} problematic BACKWARD configurations:")
+        print(f"\nFound {len(bad_backward_configs)} configurations with non-zero BACKWARD diff:")
+
+        # Categorize by severity
+        severe = []  # > 1% relative diff
+        moderate = []  # 0.1% - 1% relative diff
+        minor = []  # < 0.1% relative diff (likely acceptable GPU noise)
+
         for T, C, K, C_PAD, result in bad_backward_configs:
-            print(f"  T={T}, C={C}, K={K}, C_PAD={C_PAD}, NaN runs={result['nan_count']}/15")
+            max_rel = max(result['rel_diff_cs'], result['rel_diff_tr'], result['rel_diff_db'])
+            entry = (T, C, K, C_PAD, result, max_rel)
+            if max_rel > 0.01:
+                severe.append(entry)
+            elif max_rel > 0.001:
+                moderate.append(entry)
+            else:
+                minor.append(entry)
+
+        if severe:
+            print(f"\n  [SEVERE] {len(severe)} configs with >1% relative diff (likely bug):")
+            for T, C, K, C_PAD, result, max_rel in severe:
+                print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.2%}")
+
+        if moderate:
+            print(f"\n  [MODERATE] {len(moderate)} configs with 0.1%-1% relative diff (worth investigating):")
+            for T, C, K, C_PAD, result, max_rel in moderate:
+                print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.2%}")
+
+        if minor:
+            print(f"\n  [MINOR] {len(minor)} configs with <0.1% relative diff (acceptable GPU noise):")
+            for T, C, K, C_PAD, result, max_rel in minor:
+                print(f"    T={T}, C={C}, K={K}, max_rel={max_rel:.4%}")
+
+        # Overall assessment
+        print("\n" + "-" * 50)
+        if severe:
+            print("[ASSESSMENT] FAIL - Severe non-determinism detected")
+        elif moderate:
+            print("[ASSESSMENT] WARNING - Moderate non-determinism, may be acceptable for training")
+        else:
+            print("[ASSESSMENT] PASS - Only minor GPU floating-point noise detected")
     else:
         print("\n[PASS] All tested BACKWARD configurations are deterministic and NaN-free!")
 

@@ -737,3 +737,237 @@ END {
 }
 ' "$LOG_FILE"
 echo "If scale ratio matches 0.8901, the scale computation formula is wrong"
+
+echo ""
+echo "================================================================================"
+echo "NON-DETERMINISM DEBUG (t=9, k=1)"
+echo "================================================================================"
+echo ""
+
+echo "=== BETA STORE (t=10) ==="
+echo "Beta values stored at t=10, which are read by t=9, k=1."
+echo "If these differ between runs, non-determinism is upstream (t=11+)."
+echo ""
+gawk '
+/=== BETA STORE t=10 ===/ { in_beta_store = 1; next }
+in_beta_store && /new_beta_sum=:/ {
+    match($0, /new_beta_sum=: (-?[0-9.e+-]+)/, a)
+    beta_store_vals[a[1]]++
+    next
+}
+in_beta_store && /t_ring_idx=:/ {
+    match($0, /t_ring_idx=: ([0-9]+)/, a)
+    ring_idx_vals[a[1]]++
+    in_beta_store = 0
+    next
+}
+END {
+    print "new_beta_sum values (deduplicated):"
+    for (val in beta_store_vals) {
+        printf "  %s (×%d threads)\n", val, beta_store_vals[val]
+    }
+    print ""
+    print "t_ring_idx values (deduplicated):"
+    for (val in ring_idx_vals) {
+        printf "  %s (×%d threads)\n", val, ring_idx_vals[val]
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== BETA LOAD (t=9, k=1) ==="
+echo "Beta values loaded at t=9, k=1 (reads beta[10] from ring buffer)."
+echo "If store is consistent but load differs, ring buffer corruption suspected."
+echo ""
+gawk '
+/=== BETA LOAD t=9 k=1 ===/ { in_beta_load = 1; next }
+in_beta_load && /tile_start=:/ {
+    match($0, /tile_start=: ([0-9]+)/, a)
+    tile_start_vals[a[1]]++
+    next
+}
+in_beta_load && /beta_tile_sum=:/ {
+    match($0, /beta_tile_sum=: (-?[0-9.e+-]+)/, a)
+    beta_load_vals[a[1]]++
+    next
+}
+in_beta_load && /end_ring_idx=:/ {
+    match($0, /end_ring_idx=: ([0-9]+)/, a)
+    end_ring_vals[a[1]]++
+    next
+}
+in_beta_load && /end_pos=:/ {
+    match($0, /end_pos=: ([0-9]+)/, a)
+    end_pos_vals[a[1]]++
+    in_beta_load = 0
+    next
+}
+END {
+    print "tile_start values (deduplicated):"
+    for (val in tile_start_vals) {
+        printf "  %s (×%d threads)\n", val, tile_start_vals[val]
+    }
+    print ""
+    print "beta_tile_sum values (deduplicated):"
+    for (val in beta_load_vals) {
+        printf "  %s (×%d threads)\n", val, beta_load_vals[val]
+    }
+    print ""
+    print "end_ring_idx values (deduplicated):"
+    for (val in end_ring_vals) {
+        printf "  %s (×%d threads)\n", val, end_ring_vals[val]
+    }
+    print ""
+    print "end_pos values (deduplicated):"
+    for (val in end_pos_vals) {
+        printf "  %s (×%d threads)\n", val, end_pos_vals[val]
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== PASS 1 GLOBAL STATISTICS ==="
+echo "These values should be IDENTICAL across all runs if Pass 1 is deterministic."
+echo ""
+gawk '
+/=== PASS1 DEBUG t=9 k=1 ===/ { in_pass1 = 1; next }
+in_pass1 && /global_max=:/ {
+    match($0, /global_max=: (-?[0-9.e+-]+)/, a)
+    global_max_vals[a[1]]++
+    next
+}
+in_pass1 && /global_sum_exp=:/ {
+    match($0, /global_sum_exp=: (-?[0-9.e+-]+)/, a)
+    global_sum_vals[a[1]]++
+    in_pass1 = 0
+    next
+}
+END {
+    print "global_max values (deduplicated):"
+    for (val in global_max_vals) {
+        printf "  %s (×%d threads)\n", val, global_max_vals[val]
+    }
+    print ""
+    print "global_sum_exp values (deduplicated):"
+    for (val in global_sum_vals) {
+        printf "  %s (×%d threads)\n", val, global_sum_vals[val]
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== SCALE COMPUTATION ==="
+echo "These values should be IDENTICAL across all runs."
+echo ""
+gawk '
+/=== PASS1 DEBUG t=9 k=1 ===/ { in_scale = 1; next }
+in_scale && /log_scale=:/ {
+    match($0, /log_scale=: (-?[0-9.e+-]+)/, a)
+    log_scale_vals[a[1]]++
+    next
+}
+in_scale && /scale=:/ {
+    match($0, /scale=: ([0-9.e+-]+)/, a)
+    scale_vals[a[1]]++
+    in_scale = 0
+    next
+}
+END {
+    print "log_scale values (deduplicated):"
+    for (val in log_scale_vals) {
+        printf "  %s (×%d threads)\n", val, log_scale_vals[val]
+    }
+    print ""
+    print "scale values (deduplicated):"
+    for (val in scale_vals) {
+        printf "  %s (×%d threads)\n", val, scale_vals[val]
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== LOCAL ACCUMULATOR VALUES ==="
+echo "These values should be IDENTICAL across all runs."
+echo ""
+gawk '
+/=== GRAD_CS_LOCAL t=9 ===/ { in_grad_cs = 1; next }
+in_grad_cs && /grad_cs_t_local_sum=:/ {
+    match($0, /grad_cs_t_local_sum=: (-?[0-9.e+-]+)/, a)
+    grad_cs_vals[a[1]]++
+    in_grad_cs = 0
+    next
+}
+/=== GRAD_DB_LOCAL t=9 k=1 ===/ { in_grad_db = 1; next }
+in_grad_db && /grad_db_k_local_sum=:/ {
+    match($0, /grad_db_k_local_sum=: (-?[0-9.e+-]+)/, a)
+    grad_db_vals[a[1]]++
+    in_grad_db = 0
+    next
+}
+END {
+    print "grad_cs_t_local_sum values (deduplicated):"
+    for (val in grad_cs_vals) {
+        printf "  %s (×%d threads)\n", val, grad_cs_vals[val]
+    }
+    print ""
+    print "grad_db_k_local_sum values (deduplicated):"
+    for (val in grad_db_vals) {
+        printf "  %s (×%d threads)\n", val, grad_db_vals[val]
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== CROSS-RUN ANALYSIS ==="
+echo "If you ran the script multiple times and captured all output:"
+echo "  - Multiple unique values for global_max = Problem in Pass 1 tl.static_range"
+echo "  - Same global_max but different scale = Problem in scale computation"
+echo "  - Same scale but different grad_cs = Problem in Pass 2 accumulation"
+echo ""
+
+echo "================================================================================"
+echo "PYTHON SCRIPT OUTPUT SUMMARY"
+echo "================================================================================"
+echo ""
+
+echo "=== PYTORCH REFERENCE COMPARISON ==="
+grep -A 10 "Comparison vs PyTorch Reference" "$LOG_FILE" 2>/dev/null | head -12
+echo ""
+
+echo "=== FULL TENSOR COMPARISON VS PYTORCH ==="
+grep -A 6 "Full Tensor Comparison vs PyTorch" "$LOG_FILE" 2>/dev/null | head -8
+echo ""
+
+echo "=== RUN-TO-RUN DIFFERENCES ==="
+grep -A 30 "Difference Analysis (Run-to-Run)" "$LOG_FILE" 2>/dev/null | head -35
+echo ""
+
+echo "=== FINAL VERDICT ==="
+grep -E "\[PASS\]|\[FAIL\]" "$LOG_FILE" 2>/dev/null | tail -5
+echo ""
+
+echo "================================================================================"
+echo "DIAGNOSIS"
+echo "================================================================================"
+echo ""
+
+# Check for non-determinism patterns
+if grep -q "\[FAIL\] Non-determinism detected" "$LOG_FILE" 2>/dev/null; then
+    echo "[FAIL] Non-determinism detected in backward pass"
+    echo ""
+    echo "Check the sections above:"
+    echo "  1. If kernel debug values show multiple unique values -> Triton kernel issue"
+    echo "  2. If kernel debug values are consistent but Python shows run-to-run diff -> atomic_add race"
+    echo "  3. If Triton matches PyTorch but runs differ -> Forward pass providing different checkpoints"
+elif grep -q "\[PASS\] All.*runs produced identical results" "$LOG_FILE" 2>/dev/null; then
+    echo "[PASS] Backward pass is deterministic"
+    echo ""
+    # Check if there's still error vs PyTorch
+    if grep -q "max_diff_db=.*e+00" "$LOG_FILE" 2>/dev/null; then
+        echo "WARNING: Deterministic but may have correctness issues vs PyTorch reference"
+        echo "         Check 'Full Tensor Comparison vs PyTorch' section above"
+    fi
+else
+    echo "[UNKNOWN] Could not determine verdict from log file"
+fi
+echo ""

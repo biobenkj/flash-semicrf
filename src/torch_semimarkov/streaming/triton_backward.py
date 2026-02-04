@@ -1061,6 +1061,12 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
+                        # CRITICAL: Memory barrier ensures beta store is visible before next t iteration.
+                        # Without this, the second tile (c=4-7) at t-1 may see stale NEG_INF values
+                        # from ring buffer initialization instead of the values just stored at t.
+                        # Debug analysis showed: tile_start=0 gets correct values, tile_start=4 gets NEG_INF.
+                        tl.debug_barrier()
+
     def _compute_tile_c(C: int) -> int:
         """Compute adaptive TILE_C for c_dst dimension tiling.
 
