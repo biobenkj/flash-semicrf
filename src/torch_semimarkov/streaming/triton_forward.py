@@ -198,7 +198,7 @@ if HAS_TRITON:
         # This avoids K iterations of conditional writes per batch element.
 
         # Track final alpha for each batch element
-        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
         # Cumulative log normalization factor for numerical stability at extreme T
         # This tracks the total shift applied to alpha values at checkpoint boundaries
@@ -211,7 +211,7 @@ if HAS_TRITON:
             active = t.to(tl.int32) <= seq_len
 
             # Accumulate alpha[t] = logsumexp over (k, c_src)
-            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
             # Loop over valid segment durations k = 1, 2, ..., min(K, t)
             for k in tl.range(1, K + 1):
@@ -537,13 +537,13 @@ if HAS_TRITON:
         # - ring_checkpoints[:, 0, 0, :C] = 0.0, rest = NEG_INF
         # This avoids K iterations of conditional writes per batch element.
 
-        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
         for t in tl.range(1, T + 1):
             # Include t == seq_len to compute alpha at final position
             # Cast t to int32 to match seq_len type for consistent comparison
             active = t.to(tl.int32) <= seq_len
-            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
             # Loop over valid segment durations k = 1, 2, ..., min(K, t)
             for k in tl.range(1, K + 1):
@@ -758,12 +758,12 @@ if HAS_TRITON:
                 other=0.0,
             )
 
-        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+        final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
         for t in tl.range(1, T + 1):
             # Cast t to int32 to match seq_len type for consistent comparison
             active = t.to(tl.int32) <= seq_len
-            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
             # Initialize backpointer tracking for this timestep
             best_k_t = tl.zeros([C_PAD], dtype=tl.int32)
@@ -971,7 +971,7 @@ if HAS_TRITON:
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         device = cum_scores.device
-        dtype = cum_scores.dtype
+        dtype = torch.float64  # Internal computation in float64 for numerical stability
 
         # Compute checkpoint interval if not provided
         if checkpoint_interval is None:
@@ -1157,7 +1157,7 @@ if HAS_TRITON:
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         device = cum_scores.device
-        dtype = cum_scores.dtype
+        dtype = torch.float64  # Internal computation in float64 for numerical stability
 
         # Compute checkpoint interval if not provided
         if checkpoint_interval is None:

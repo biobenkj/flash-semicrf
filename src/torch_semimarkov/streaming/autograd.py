@@ -305,6 +305,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             grad_proj_start,
             grad_proj_end,
             None,  # num_warps
+            None,  # checkpoint_interval
         )
 
 
