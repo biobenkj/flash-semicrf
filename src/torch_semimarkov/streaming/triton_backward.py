@@ -712,7 +712,9 @@ if HAS_TRITON:
                                 #   log_norm_at_ckpt accumulated all shifts up to seg_start (~125k at midpoint)
                                 #   Must add back to compute correct marginal: exp(alpha + edge + beta - log_Z)
                                 #   where log_Z is at full scale (~250k at T=100k)
-                                log_scale = global_max_safe.to(tl.float64) + log_norm_at_ckpt - log_Z
+                                log_scale = (
+                                    global_max_safe.to(tl.float64) + log_norm_at_ckpt - log_Z
+                                )
 
                                 # Clamp scale to prevent overflow/underflow
                                 log_scale_clamped = tl.minimum(

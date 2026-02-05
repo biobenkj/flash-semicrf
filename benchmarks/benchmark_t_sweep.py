@@ -42,13 +42,11 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
 import torch
-
 from lib import (
     BenchmarkResult,
     run_single_benchmark,
@@ -84,14 +82,34 @@ ALL_BACKENDS = [
 
 # Plotting colors per backend
 BACKEND_STYLE = {
-    "triton_streaming":        {"color": "#2563eb", "marker": "o",  "ls": "-",  "label": "Triton streaming"},
-    "linear_scan_streaming":   {"color": "#dc2626", "marker": "s",  "ls": "--", "label": "PyTorch streaming"},
-    "linear_scan_vectorized":  {"color": "#16a34a", "marker": "^",  "ls": "-.", "label": "Vectorized scan"},
-    "binary_tree_sharded":     {"color": "#9333ea", "marker": "D",  "ls": ":",  "label": "Binary tree (sharded)"},
-    "linear_scan":             {"color": "#ea580c", "marker": "v",  "ls": "--", "label": "Linear scan"},
-    "binary_tree":             {"color": "#64748b", "marker": "p",  "ls": ":",  "label": "Binary tree"},
-    "block_triangular":        {"color": "#0d9488", "marker": "h",  "ls": "-.", "label": "Block triangular"},
-    "banded":                  {"color": "#ca8a04", "marker": "*",  "ls": "--", "label": "Banded"},
+    "triton_streaming": {"color": "#2563eb", "marker": "o", "ls": "-", "label": "Triton streaming"},
+    "linear_scan_streaming": {
+        "color": "#dc2626",
+        "marker": "s",
+        "ls": "--",
+        "label": "PyTorch streaming",
+    },
+    "linear_scan_vectorized": {
+        "color": "#16a34a",
+        "marker": "^",
+        "ls": "-.",
+        "label": "Vectorized scan",
+    },
+    "binary_tree_sharded": {
+        "color": "#9333ea",
+        "marker": "D",
+        "ls": ":",
+        "label": "Binary tree (sharded)",
+    },
+    "linear_scan": {"color": "#ea580c", "marker": "v", "ls": "--", "label": "Linear scan"},
+    "binary_tree": {"color": "#64748b", "marker": "p", "ls": ":", "label": "Binary tree"},
+    "block_triangular": {
+        "color": "#0d9488",
+        "marker": "h",
+        "ls": "-.",
+        "label": "Block triangular",
+    },
+    "banded": {"color": "#ca8a04", "marker": "*", "ls": "--", "label": "Banded"},
 }
 THEORY_COLOR = "#9ca3af"
 
@@ -119,6 +137,7 @@ def _format_throughput(tp: float) -> str:
 # Sweep runner
 # ======================================================================
 
+
 def run_sweep(
     T_values: list[int],
     K: int,
@@ -143,21 +162,43 @@ def run_sweep(
         if backend in LOG_SEMIRING_ONLY_BACKENDS and semiring != "Log":
             print(f"\n  SKIP {backend}: only supports Log semiring (got {semiring})")
             for T in T_values:
-                results.append(_skip_result(T, K, C, B, backend, semiring, phase,
-                                            f"{backend} only supports Log semiring"))
+                results.append(
+                    _skip_result(
+                        T,
+                        K,
+                        C,
+                        B,
+                        backend,
+                        semiring,
+                        phase,
+                        f"{backend} only supports Log semiring",
+                    )
+                )
             continue
         if backend in LOG_MAX_BACKENDS and semiring not in {"Log", "Max"}:
             print(f"\n  SKIP {backend}: only supports Log/Max semirings (got {semiring})")
             for T in T_values:
-                results.append(_skip_result(T, K, C, B, backend, semiring, phase,
-                                            f"{backend} only supports Log/Max semirings"))
+                results.append(
+                    _skip_result(
+                        T,
+                        K,
+                        C,
+                        B,
+                        backend,
+                        semiring,
+                        phase,
+                        f"{backend} only supports Log/Max semirings",
+                    )
+                )
             continue
 
         style = BACKEND_STYLE.get(backend, {})
         label = style.get("label", backend)
         print(f"\n  {label.upper()}")
         print("  " + "-" * 88)
-        print(f"  {'T':>8} | {'Time':>10} | {'Std':>8} | {'Mem Alloc':>10} | {'Mem Rsrv':>10} | {'Throughput':>14} | Status")
+        print(
+            f"  {'T':>8} | {'Time':>10} | {'Std':>8} | {'Mem Alloc':>10} | {'Mem Rsrv':>10} | {'Throughput':>14} | Status"
+        )
         print("  " + "-" * 88)
 
         backend_oom = False
@@ -167,49 +208,73 @@ def run_sweep(
             if K > T:
                 r = _skip_result(T, K, C, B, backend, semiring, phase, f"K={K} > T={T}")
                 results.append(r)
-                print(f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip (K > T)")
+                print(
+                    f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip (K > T)"
+                )
                 continue
 
             # Skip after OOM
             if backend_oom:
                 r = _skip_result(T, K, C, B, backend, semiring, phase, "Previous T OOM'd")
                 results.append(r)
-                print(f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip (prev OOM)")
+                print(
+                    f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip (prev OOM)"
+                )
                 continue
 
             # Check predicted OOM
             skip, reason = should_skip_config(
-                T, K, C, backend,
+                T,
+                K,
+                C,
+                backend,
                 {backend: oom_history[backend]},
                 max_memory_gb,
             )
             if skip:
                 r = _skip_result(T, K, C, B, backend, semiring, phase, reason)
                 results.append(r)
-                print(f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip ({reason})")
+                print(
+                    f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | skip ({reason})"
+                )
                 continue
 
             gc.collect()
             torch.cuda.empty_cache()
 
             r = run_single_benchmark(
-                T, K, C, B, backend, device, repeats,
-                semiring_name=semiring, phase=phase,
+                T,
+                K,
+                C,
+                B,
+                backend,
+                device,
+                repeats,
+                semiring_name=semiring,
+                phase=phase,
             )
             results.append(r)
 
             if r.status == "success":
                 tp = (B * T) / (r.time_ms_median / 1000) if r.time_ms_median > 0 else 0
                 tp_str = _format_throughput(tp)
-                std_str = f"{r.time_ms_std:.1f}ms" if r.time_ms_std < 1000 else f"{r.time_ms_std/1000:.2f}s"
-                print(f"  {T:>8} | {r.time_ms_median:>8.1f}ms | {std_str:>8} | {r.peak_allocated_gb:>8.3f}GB | "
-                      f"{r.peak_reserved_gb:>8.3f}GB | {tp_str:>14} | ok")
+                std_str = (
+                    f"{r.time_ms_std:.1f}ms"
+                    if r.time_ms_std < 1000
+                    else f"{r.time_ms_std/1000:.2f}s"
+                )
+                print(
+                    f"  {T:>8} | {r.time_ms_median:>8.1f}ms | {std_str:>8} | {r.peak_allocated_gb:>8.3f}GB | "
+                    f"{r.peak_reserved_gb:>8.3f}GB | {tp_str:>14} | ok"
+                )
             elif r.status == "oom":
                 backend_oom = True
                 oom_history[backend].append((T, K, C))
                 print(f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | OOM")
             else:
-                print(f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | {r.status}")
+                print(
+                    f"  {T:>8} | {'':>10} | {'':>8} | {'':>10} | {'':>10} | {'':>14} | {r.status}"
+                )
 
     return results
 
@@ -217,8 +282,14 @@ def run_sweep(
 def _skip_result(T, K, C, B, backend, semiring, phase, reason) -> BenchmarkResult:
     """Create a skip/not_tested BenchmarkResult."""
     return BenchmarkResult(
-        T=T, K=K, C=C, B=B, KC=K * C,
-        backend=backend, semiring=semiring, phase=phase,
+        T=T,
+        K=K,
+        C=C,
+        B=B,
+        KC=K * C,
+        backend=backend,
+        semiring=semiring,
+        phase=phase,
         time_ms_median=float("nan"),
         time_ms_iqr_low=float("nan"),
         time_ms_iqr_high=float("nan"),
@@ -235,12 +306,13 @@ def _skip_result(T, K, C, B, backend, semiring, phase, reason) -> BenchmarkResul
 # Summary
 # ======================================================================
 
-def print_sweep_summary(results: list[BenchmarkResult], backends: list[str],
-                        K: int, C: int, B: int):
+
+def print_sweep_summary(
+    results: list[BenchmarkResult], backends: list[str], K: int, C: int, B: int
+):
     """Print comparison summary."""
 
-    ok = {b: [r for r in results if r.backend == b and r.status == "success"]
-          for b in backends}
+    ok = {b: [r for r in results if r.backend == b and r.status == "success"] for b in backends}
 
     # Memory scaling per backend
     print(f"\n  MEMORY SCALING (K={K}, C={C}, B={B})")
@@ -254,15 +326,16 @@ def print_sweep_summary(results: list[BenchmarkResult], backends: list[str],
         max_r = max(pts, key=lambda r: r.T)
         T_ratio = max_r.T / min_r.T
         mem_ratio = max_r.peak_allocated_gb / max(min_r.peak_allocated_gb, 1e-6)
-        print(f"  {label:30s}: T grew {T_ratio:>6.0f}x, memory grew {mem_ratio:>5.1f}x "
-              f"({min_r.peak_allocated_gb:.2f} -> {max_r.peak_allocated_gb:.2f} GB)")
+        print(
+            f"  {label:30s}: T grew {T_ratio:>6.0f}x, memory grew {mem_ratio:>5.1f}x "
+            f"({min_r.peak_allocated_gb:.2f} -> {max_r.peak_allocated_gb:.2f} GB)"
+        )
 
     # OOM boundaries
-    oom = {b: [r for r in results if r.backend == b and r.status == "oom"]
-           for b in backends}
+    oom = {b: [r for r in results if r.backend == b and r.status == "oom"] for b in backends}
     oom_backends = {b: v for b, v in oom.items() if v}
     if oom_backends:
-        print(f"\n  OOM BOUNDARIES")
+        print("\n  OOM BOUNDARIES")
         print("  " + "-" * 60)
         for b, oom_pts in oom_backends.items():
             label = BACKEND_STYLE.get(b, {}).get("label", b)
@@ -272,19 +345,19 @@ def print_sweep_summary(results: list[BenchmarkResult], backends: list[str],
     # Speedup table (relative to slowest backend at each T)
     active_ok = {b: pts for b, pts in ok.items() if pts}
     if len(active_ok) >= 2:
-        T_sets = [set(r.T for r in pts) for pts in active_ok.values()]
+        T_sets = [{r.T for r in pts} for pts in active_ok.values()]
         shared_Ts = sorted(set.intersection(*T_sets))
     else:
         shared_Ts = []
 
     if shared_Ts:
         active_names = list(active_ok.keys())
-        print(f"\n  SPEEDUP TABLE (relative to slowest at each T)")
+        print("\n  SPEEDUP TABLE (relative to slowest at each T)")
         col_w = 14
         print("  " + "-" * (12 + col_w * len(active_names)))
         header = f"  {'T':>8} |"
         for b in active_names:
-            lbl = BACKEND_STYLE.get(b, {}).get("label", b)[:col_w - 2]
+            lbl = BACKEND_STYLE.get(b, {}).get("label", b)[: col_w - 2]
             header += f" {lbl:>{col_w - 2}} |"
         print(header)
         print("  " + "-" * (12 + col_w * len(active_names)))
@@ -309,11 +382,14 @@ def print_sweep_summary(results: list[BenchmarkResult], backends: list[str],
 # Plotting
 # ======================================================================
 
-def generate_figures(results: list[BenchmarkResult], outdir: Path,
-                     backends: list[str], K: int, C: int, B: int):
+
+def generate_figures(
+    results: list[BenchmarkResult], outdir: Path, backends: list[str], K: int, C: int, B: int
+):
     """Generate publication figures."""
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.ticker as ticker
@@ -321,21 +397,28 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
         print("  matplotlib not available -- skipping figures")
         return
 
-    ok = {b: sorted([r for r in results if r.backend == b and r.status == "success"],
-                     key=lambda r: r.T)
-          for b in backends}
-    oom = {b: [r for r in results if r.backend == b and r.status == "oom"]
-           for b in backends}
+    ok = {
+        b: sorted(
+            [r for r in results if r.backend == b and r.status == "success"], key=lambda r: r.T
+        )
+        for b in backends
+    }
+    oom = {b: [r for r in results if r.backend == b and r.status == "oom"] for b in backends}
 
     active = [b for b in backends if ok.get(b)]
     if not active:
         print("  No successful results -- skipping figures")
         return
 
-    plt.rcParams.update({
-        "font.size": 11, "axes.labelsize": 12, "axes.titlesize": 13,
-        "legend.fontsize": 9, "figure.dpi": 150,
-    })
+    plt.rcParams.update(
+        {
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "axes.titlesize": 13,
+            "legend.fontsize": 9,
+            "figure.dpi": 150,
+        }
+    )
 
     def fmt_T(x, _):
         if x >= 1000:
@@ -349,8 +432,16 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
         s = BACKEND_STYLE.get(b, {"color": "gray", "marker": "o", "ls": "-", "label": b})
         Ts = [r.T for r in ok[b]]
         times = [r.time_ms_median for r in ok[b]]
-        ax.plot(Ts, times, marker=s["marker"], linestyle=s["ls"], color=s["color"],
-                label=s["label"], markersize=5, linewidth=1.5)
+        ax.plot(
+            Ts,
+            times,
+            marker=s["marker"],
+            linestyle=s["ls"],
+            color=s["color"],
+            label=s["label"],
+            markersize=5,
+            linewidth=1.5,
+        )
 
     # Mark OOM boundaries
     for b in active:
@@ -372,7 +463,7 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
     fig.savefig(outdir / "fig_time_vs_T.pdf", bbox_inches="tight")
     fig.savefig(outdir / "fig_time_vs_T.png", bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved fig_time_vs_T.pdf/png")
+    print("  Saved fig_time_vs_T.pdf/png")
 
     # -- Fig 2: Memory vs T --------------------------------------------
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -381,15 +472,29 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
         s = BACKEND_STYLE.get(b, {"color": "gray", "marker": "o", "ls": "-", "label": b})
         Ts = [r.T for r in ok[b]]
         mems = [r.peak_allocated_gb for r in ok[b]]
-        ax.plot(Ts, mems, marker=s["marker"], linestyle=s["ls"], color=s["color"],
-                label=s["label"], markersize=5, linewidth=1.5)
+        ax.plot(
+            Ts,
+            mems,
+            marker=s["marker"],
+            linestyle=s["ls"],
+            color=s["color"],
+            label=s["label"],
+            markersize=5,
+            linewidth=1.5,
+        )
 
     # Theoretical O(TKC^2) exact backend reference
-    all_Ts = sorted(set(r.T for r in results if r.status == "success"))
+    all_Ts = sorted({r.T for r in results if r.status == "success"})
     if all_Ts:
         exact_gb = [B * T * K * C * C * 4 / (1024**3) for T in all_Ts]
-        ax.plot(all_Ts, exact_gb, "--", color=THEORY_COLOR,
-                label=f"Exact O(TKC^2) theoretical", linewidth=1.5)
+        ax.plot(
+            all_Ts,
+            exact_gb,
+            "--",
+            color=THEORY_COLOR,
+            label="Exact O(TKC^2) theoretical",
+            linewidth=1.5,
+        )
 
     # Mark OOM
     for b in active:
@@ -411,11 +516,11 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
     fig.savefig(outdir / "fig_memory_vs_T.pdf", bbox_inches="tight")
     fig.savefig(outdir / "fig_memory_vs_T.png", bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved fig_memory_vs_T.pdf/png")
+    print("  Saved fig_memory_vs_T.pdf/png")
 
     # -- Fig 3: Speedup vs T (relative to slowest) --------------------
     if len(active) >= 2:
-        T_sets = [set(r.T for r in ok[b]) for b in active]
+        T_sets = [{r.T for r in ok[b]} for b in active]
         shared_Ts = sorted(set.intersection(*T_sets))
 
         if len(shared_Ts) >= 2:
@@ -434,15 +539,27 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
                 Ts_b = [T for T in shared_Ts if T in by_b_T[b] and T in by_b_T[ref_backend]]
                 speedups = [by_b_T[ref_backend][T] / by_b_T[b][T] for T in Ts_b]
                 ref_label = BACKEND_STYLE.get(ref_backend, {}).get("label", ref_backend)
-                ax.plot(Ts_b, speedups, marker=s["marker"], linestyle=s["ls"], color=s["color"],
-                        label=f'{s["label"]} vs {ref_label}',
-                        markersize=6, linewidth=1.5)
+                ax.plot(
+                    Ts_b,
+                    speedups,
+                    marker=s["marker"],
+                    linestyle=s["ls"],
+                    color=s["color"],
+                    label=f'{s["label"]} vs {ref_label}',
+                    markersize=6,
+                    linewidth=1.5,
+                )
 
                 # Annotate last point
                 if Ts_b and speedups:
-                    ax.annotate(f"{speedups[-1]:.1f}x", (Ts_b[-1], speedups[-1]),
-                                textcoords="offset points", xytext=(8, 0),
-                                fontsize=9, color=s["color"])
+                    ax.annotate(
+                        f"{speedups[-1]:.1f}x",
+                        (Ts_b[-1], speedups[-1]),
+                        textcoords="offset points",
+                        xytext=(8, 0),
+                        fontsize=9,
+                        color=s["color"],
+                    )
 
             ax.axhline(1.0, color=THEORY_COLOR, linestyle="--", linewidth=1, alpha=0.5)
             ax.set_xscale("log")
@@ -458,12 +575,13 @@ def generate_figures(results: list[BenchmarkResult], outdir: Path,
             fig.savefig(outdir / "fig_speedup_vs_T.pdf", bbox_inches="tight")
             fig.savefig(outdir / "fig_speedup_vs_T.png", bbox_inches="tight")
             plt.close(fig)
-            print(f"  Saved fig_speedup_vs_T.pdf/png")
+            print("  Saved fig_speedup_vs_T.pdf/png")
 
 
 # ======================================================================
 # Main
 # ======================================================================
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -476,34 +594,49 @@ def main():
     parser.add_argument("--B", type=int, default=2, help="Batch size. Default: 2")
     parser.add_argument("--repeats", type=int, default=5, help="Timed iterations. Default: 5")
     parser.add_argument(
-        "--T", type=str, default=None,
+        "--T",
+        type=str,
+        default=None,
         help="Comma-separated T values. Default: log-spaced 100-100K",
     )
     parser.add_argument(
-        "--backends", type=str, default=",".join(DEFAULT_BACKENDS),
+        "--backends",
+        type=str,
+        default=",".join(DEFAULT_BACKENDS),
         help=f"Comma-separated backends. Available: {', '.join(ALL_BACKENDS)}. "
-             f"Default: {','.join(DEFAULT_BACKENDS)}",
+        f"Default: {','.join(DEFAULT_BACKENDS)}",
     )
     parser.add_argument(
-        "--all-backends", action="store_true",
+        "--all-backends",
+        action="store_true",
         help=f"Run all backends: {', '.join(ALL_BACKENDS)}",
     )
     parser.add_argument(
-        "--phase", type=str, default="both",
+        "--phase",
+        type=str,
+        default="both",
         choices=["forward", "backward", "both"],
         help="Which phase to time. Default: both",
     )
     parser.add_argument(
-        "--semiring", type=str, default="Log",
+        "--semiring",
+        type=str,
+        default="Log",
         help="Semiring to use. Default: Log",
     )
     parser.add_argument(
-        "--max-memory-gb", type=float, default=40.0,
+        "--max-memory-gb",
+        type=float,
+        default=40.0,
         help="Skip configs predicted to exceed this memory. Default: 40",
     )
-    parser.add_argument("--quick", action="store_true", help="Quick mode: fewer T values, fewer repeats")
+    parser.add_argument(
+        "--quick", action="store_true", help="Quick mode: fewer T values, fewer repeats"
+    )
     parser.add_argument("--no-plot", action="store_true", help="Skip figure generation")
-    parser.add_argument("--outdir", type=Path, default=Path("results/t_sweep"), help="Output directory")
+    parser.add_argument(
+        "--outdir", type=Path, default=Path("results/t_sweep"), help="Output directory"
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -548,7 +681,9 @@ def main():
     # -- Run sweep -----------------------------------------------------
     results = run_sweep(
         T_values=T_values,
-        K=K, C=C, B=B,
+        K=K,
+        C=C,
+        B=B,
         backends=backends,
         device=device,
         repeats=args.repeats,
@@ -563,14 +698,23 @@ def main():
     # -- Save JSON -----------------------------------------------------
     json_path = args.outdir / "t_sweep_results.json"
     with open(json_path, "w") as f:
-        json.dump({
-            "config": {
-                "K": K, "C": C, "B": B,
-                "phase": args.phase, "semiring": args.semiring,
-                "gpu": gpu_name, "repeats": args.repeats,
+        json.dump(
+            {
+                "config": {
+                    "K": K,
+                    "C": C,
+                    "B": B,
+                    "phase": args.phase,
+                    "semiring": args.semiring,
+                    "gpu": gpu_name,
+                    "repeats": args.repeats,
+                },
+                "results": [asdict(r) for r in results],
             },
-            "results": [asdict(r) for r in results],
-        }, f, indent=2, default=str)
+            f,
+            indent=2,
+            default=str,
+        )
     print(f"\n  Results saved to {json_path}")
 
     # -- Figures -------------------------------------------------------

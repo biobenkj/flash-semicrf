@@ -1025,7 +1025,9 @@ if HAS_TRITON:
         # Log normalization checkpoint storage for numerical stability at extreme T
         # Stores cumulative log normalization factor at each checkpoint boundary
         # Memory cost: negligible (14 * batch * 4 bytes at T=100k)
-        log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=torch.float64)
+        log_norm_checkpoints = torch.zeros(
+            (batch, num_checkpoints), device=device, dtype=torch.float64
+        )
 
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()

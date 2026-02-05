@@ -49,7 +49,6 @@ import time
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 
 # ──────────────────────────────────────────────────────────────────────
 # Imports from torch_semimarkov
@@ -62,7 +61,6 @@ from torch_semimarkov.streaming.triton_forward import (
 
 if HAS_TRITON:
     from torch_semimarkov.streaming.triton_backward import (
-        launch_streaming_triton_backward,
         launch_streaming_triton_marginals,
     )
 
@@ -71,16 +69,18 @@ if HAS_TRITON:
 # Shared utilities
 # ======================================================================
 
+
 @dataclass
 class ScaleConfig:
     """Test scale parameters."""
+
     name: str
-    T: int      # sequence length
-    C: int      # classes
-    K: int      # max duration
+    T: int  # sequence length
+    C: int  # classes
+    K: int  # max duration
     batch: int
     # finite-diff specific
-    fd_T: int       # smaller T for finite diff (expensive)
+    fd_T: int  # smaller T for finite diff (expensive)
     fd_C: int
     fd_K: int
     fd_eps: float
@@ -95,26 +95,66 @@ class ScaleConfig:
 
 SCALES = {
     "small": ScaleConfig(
-        name="small", T=100, C=8, K=10, batch=2,
-        fd_T=10, fd_C=3, fd_K=4, fd_eps=1e-3,
-        conv_T=50, conv_C=4, conv_K=5, conv_epochs=50,
+        name="small",
+        T=100,
+        C=8,
+        K=10,
+        batch=2,
+        fd_T=10,
+        fd_C=3,
+        fd_K=4,
+        fd_eps=1e-3,
+        conv_T=50,
+        conv_C=4,
+        conv_K=5,
+        conv_epochs=50,
     ),
     "medium": ScaleConfig(
-        name="medium", T=500, C=16, K=25, batch=4,
-        fd_T=20, fd_C=4, fd_K=6, fd_eps=1e-3,
-        conv_T=100, conv_C=8, conv_K=10, conv_epochs=100,
+        name="medium",
+        T=500,
+        C=16,
+        K=25,
+        batch=4,
+        fd_T=20,
+        fd_C=4,
+        fd_K=6,
+        fd_eps=1e-3,
+        conv_T=100,
+        conv_C=8,
+        conv_K=10,
+        conv_epochs=100,
     ),
     "large": ScaleConfig(
-        name="large", T=2000, C=32, K=50, batch=4,
-        fd_T=30, fd_C=6, fd_K=8, fd_eps=1e-3,
-        conv_T=200, conv_C=16, conv_K=20, conv_epochs=150,
+        name="large",
+        T=2000,
+        C=32,
+        K=50,
+        batch=4,
+        fd_T=30,
+        fd_C=6,
+        fd_K=8,
+        fd_eps=1e-3,
+        conv_T=200,
+        conv_C=16,
+        conv_K=20,
+        conv_epochs=150,
     ),
     "genome": ScaleConfig(
-        name="genome", T=50000, C=24, K=100, batch=2,
+        name="genome",
+        T=50000,
+        C=24,
+        K=100,
+        batch=2,
         # Finite-diff impractical at this scale (placeholder values)
-        fd_T=50, fd_C=8, fd_K=20, fd_eps=1e-3,
+        fd_T=50,
+        fd_C=8,
+        fd_K=20,
+        fd_eps=1e-3,
         # Convergence also expensive (placeholder values)
-        conv_T=500, conv_C=16, conv_K=50, conv_epochs=50,
+        conv_T=500,
+        conv_C=16,
+        conv_K=50,
+        conv_epochs=50,
         # Aggressive checkpointing for numerical stability at genome scale
         checkpoint_interval=100,  # = K, gives 500 checkpoints instead of 23
     ),
@@ -160,6 +200,7 @@ def result_line(label, passed, detail=""):
 # §1  Self-consistency: marginal sum checks
 # ======================================================================
 
+
 def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
     """Validate that boundary marginals satisfy known invariants.
 
@@ -194,20 +235,28 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         else:
             print()
 
-        cum_scores, transition, duration_bias, lengths = make_inputs(
-            batch, T, C, K, device=device
-        )
+        cum_scores, transition, duration_bias, lengths = make_inputs(batch, T, C, K, device=device)
 
         # --- Triton forward ---
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
             checkpoint_interval=ckpt_interval,
         )
 
         # --- Boundary marginals ---
         marginals = launch_streaming_triton_marginals(
-            cum_scores, transition, duration_bias, lengths,
-            log_Z, ring_ckpts, log_norm_ckpts, interval,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            log_Z,
+            ring_ckpts,
+            log_norm_ckpts,
+            interval,
         )  # (batch, T)
 
         # Check 1: All marginals non-negative (allow FP noise up to -0.01)
@@ -217,20 +266,20 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         max_val = marginals.max().item()
         non_negative = min_val >= -0.01
         all_passed &= result_line(
-            f"Marginals non-negative",
-            non_negative,
-            f"min={min_val:.6f}, max={max_val:.6f}"
+            "Marginals non-negative", non_negative, f"min={min_val:.6f}, max={max_val:.6f}"
         )
 
         # Check 2: Marginal sum ≈ expected number of segments
         # Should be between 1 (one big segment) and T (all singletons)
         marginal_sums = marginals.sum(dim=1)  # (batch,)
         mean_sum = marginal_sums.mean().item()
-        sum_reasonable = (marginal_sums >= 0.5).all().item() and (marginal_sums <= T + 0.5).all().item()
+        sum_reasonable = (marginal_sums >= 0.5).all().item() and (
+            marginal_sums <= T + 0.5
+        ).all().item()
         all_passed &= result_line(
-            f"Marginal sum in [1, T]",
+            "Marginal sum in [1, T]",
             sum_reasonable,
-            f"mean={mean_sum:.2f}, range=[{marginal_sums.min().item():.2f}, {marginal_sums.max().item():.2f}]"
+            f"mean={mean_sum:.2f}, range=[{marginal_sums.min().item():.2f}, {marginal_sums.max().item():.2f}]",
         )
 
         # Check 3: Emission marginals via autograd (reverse cumsum)
@@ -241,8 +290,12 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         # Invariant: Σ_c P(y_t = c) = 1 for each position t.
         cum_scores_ag = cum_scores.clone().detach().requires_grad_(True)
         log_Z_ag = semi_crf_streaming_forward(
-            cum_scores_ag, transition.detach(), duration_bias.detach(),
-            lengths, K, use_triton=True,
+            cum_scores_ag,
+            transition.detach(),
+            duration_bias.detach(),
+            lengths,
+            K,
+            use_triton=True,
             checkpoint_interval=ckpt_interval,
         )
         log_Z_ag.sum().backward()
@@ -259,9 +312,9 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         class_sums = emission_marginals.sum(dim=2)  # (batch, T)
         max_deviation = (class_sums - 1.0).abs().max().item()
         all_passed &= result_line(
-            f"Emission marginals Σ_c P(c|t) = 1",
+            "Emission marginals Σ_c P(c|t) = 1",
             max_deviation < 0.02,
-            f"max deviation = {max_deviation:.6f}"
+            f"max deviation = {max_deviation:.6f}",
         )
 
         # Total across all positions and classes should be T
@@ -273,19 +326,17 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         all_passed &= result_line(
             f"Total emission marginals ≈ T={T}",
             total_deviation < total_threshold,
-            f"max |total - T| = {total_deviation:.4f}"
+            f"max |total - T| = {total_deviation:.4f}",
         )
 
         # Check 4: Emission marginals should be non-negative
         em_min = emission_marginals.min().item()
         all_passed &= result_line(
-            f"Emission marginals non-negative",
-            em_min >= -0.01,
-            f"min = {em_min:.6f}"
+            "Emission marginals non-negative", em_min >= -0.01, f"min = {em_min:.6f}"
         )
 
     # Check 5: Variable-length masking
-    print(f"\n  Config [variable-length]: Testing masking")
+    print("\n  Config [variable-length]: Testing masking")
     batch_vl, T_vl, C_vl, K_vl = 4, 100, 8, 10
     cum_scores, transition, duration_bias, _ = make_inputs(
         batch_vl, T_vl, C_vl, K_vl, device=device
@@ -297,8 +348,14 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         cum_scores, transition, duration_bias, lengths_vl, K_vl
     )
     marginals = launch_streaming_triton_marginals(
-        cum_scores, transition, duration_bias, lengths_vl,
-        log_Z, ring_ckpts, log_norm_ckpts, interval,
+        cum_scores,
+        transition,
+        duration_bias,
+        lengths_vl,
+        log_Z,
+        ring_ckpts,
+        log_norm_ckpts,
+        interval,
     )
 
     # Marginals beyond each sequence's length should be 0
@@ -318,6 +375,7 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
 # ======================================================================
 # §2  Finite differences (gold standard)
 # ======================================================================
+
 
 def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | None = None) -> bool:
     """Compare autograd to numerical gradient via central differences.
@@ -348,16 +406,19 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
     print(f"  Parameters: {', '.join(all_params)}")
     print()
 
-    cum_scores, transition, duration_bias, lengths = make_inputs(
-        batch, T, C, K, device=device
-    )
+    cum_scores, transition, duration_bias, lengths = make_inputs(batch, T, C, K, device=device)
 
     all_passed = True
 
     def forward_fn(cs, tr, db):
         """Compute log Z given current parameters."""
         return semi_crf_streaming_forward(
-            cs, tr, db, lengths, K, use_triton=True,
+            cs,
+            tr,
+            db,
+            lengths,
+            K,
+            use_triton=True,
         ).sum()
 
     # Get autograd gradients
@@ -386,7 +447,6 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
             continue
 
         autograd = autograd_grads[param_name]
-        numerical = torch.zeros_like(param)
 
         t0 = time.perf_counter()
 
@@ -426,8 +486,7 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
 
         # 2. Normalized max error (magnitude agreement — insensitive to near-zero)
         # Uses the larger of the two gradient magnitudes as the scale
-        grad_scale = max(flat_autograd.abs().max().item(),
-                         flat_numerical.abs().max().item(), 1e-8)
+        grad_scale = max(flat_autograd.abs().max().item(), flat_numerical.abs().max().item(), 1e-8)
         normalized_max_err = abs_diff.max().item() / grad_scale
 
         # 3. Element-wise allclose fraction
@@ -446,7 +505,9 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
 
         print(f"  {param_name} ({flat_param.numel()} elements, {elapsed:.1f}s):")
         print(f"    Cosine similarity:   {cos_sim:.8f}  {'✓' if cos_pass else '✗'} (> 0.999)")
-        print(f"    Normalized max err:  {normalized_max_err:.4f}  {'✓' if norm_pass else '✗'} (< 0.05)")
+        print(
+            f"    Normalized max err:  {normalized_max_err:.4f}  {'✓' if norm_pass else '✗'} (< 0.05)"
+        )
         print(f"    Fraction allclose:   {frac_close:.4f}  (info only)")
         print(f"    (info) Mean rel err: {mean_rel:.2e}")
         print(f"    (info) Max abs diff: {abs_diff.max().item():.2e}")
@@ -454,7 +515,7 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
         all_passed &= result_line(
             f"{param_name} finite-diff",
             passed,
-            f"cos={cos_sim:.6f}, norm_max={normalized_max_err:.4f}, frac_close={frac_close:.2%}"
+            f"cos={cos_sim:.6f}, norm_max={normalized_max_err:.4f}, frac_close={frac_close:.2%}",
         )
         print()
 
@@ -464,6 +525,7 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
 # ======================================================================
 # §3  Training convergence
 # ======================================================================
+
 
 def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
     """Train with both PyTorch and Triton backends, compare final loss.
@@ -500,7 +562,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         while t < T:
             c = torch.randint(0, C, (1,)).item()
             seg_len = torch.randint(1, min(K, T - t) + 1, (1,)).item()
-            labels[b, t:t + seg_len] = c
+            labels[b, t : t + seg_len] = c
             t += seg_len
 
     all_passed = True
@@ -534,7 +596,9 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         for epoch in range(n_epochs):
             optimizer.zero_grad()
             loss = model.compute_loss(
-                hidden_states, lengths, labels,
+                hidden_states,
+                lengths,
+                labels,
                 use_triton=use_triton,
                 backend="streaming",
             )
@@ -563,8 +627,10 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
             "elapsed": elapsed,
         }
 
-        print(f"  {backend_name:>8}: final_loss={final_loss:.4f}, "
-              f"time={elapsed:.1f}s, epochs={len(losses)}")
+        print(
+            f"  {backend_name:>8}: final_loss={final_loss:.4f}, "
+            f"time={elapsed:.1f}s, epochs={len(losses)}"
+        )
 
     # Compare final losses
     if "pytorch" in results and "triton" in results:
@@ -574,7 +640,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         loss_rel = loss_diff / (abs(pt_loss) + 1e-8)
 
         print()
-        print(f"  Final loss comparison:")
+        print("  Final loss comparison:")
         print(f"    PyTorch: {pt_loss:.6f}")
         print(f"    Triton:  {tr_loss:.6f}")
         print(f"    Abs diff: {loss_diff:.6f}")
@@ -582,9 +648,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
 
         # Both should converge to similar loss (within 5% relative)
         all_passed &= result_line(
-            "Final loss agreement",
-            loss_rel < 0.05,
-            f"rel_diff={loss_rel:.4%}"
+            "Final loss agreement", loss_rel < 0.05, f"rel_diff={loss_rel:.4%}"
         )
 
         # Both should have decreasing loss (convergence)
@@ -605,9 +669,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         ).item()
 
         all_passed &= result_line(
-            "Loss curve correlation",
-            cos_sim > 0.99,
-            f"cosine_sim={cos_sim:.6f}"
+            "Loss curve correlation", cos_sim > 0.99, f"cosine_sim={cos_sim:.6f}"
         )
     else:
         print("  Cannot compare: need both backends")
@@ -620,6 +682,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
 # Main
 # ======================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Ground-truth correctness validation for Semi-CRF Triton kernels",
@@ -627,19 +690,22 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--test", "-t",
+        "--test",
+        "-t",
         choices=["self-consistency", "finite-diff", "convergence", "all"],
         default="all",
         help="Which test to run (default: all)",
     )
     parser.add_argument(
-        "--scale", "-s",
+        "--scale",
+        "-s",
         choices=list(SCALES.keys()),
         default="medium",
         help="Test scale (default: medium)",
     )
     parser.add_argument(
-        "--genome", action="store_true",
+        "--genome",
+        action="store_true",
         help="Shortcut for --scale genome --test self-consistency (genome-scale sanity check)",
     )
     parser.add_argument(
@@ -655,7 +721,9 @@ def main():
         help="Device (default: cuda if available)",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
+        "--seed",
+        type=int,
+        default=42,
         help="Random seed (default: 42)",
     )
     args = parser.parse_args()
@@ -685,9 +753,7 @@ def main():
         return 1
 
     tests_to_run = (
-        ["self-consistency", "finite-diff", "convergence"]
-        if args.test == "all"
-        else [args.test]
+        ["self-consistency", "finite-diff", "convergence"] if args.test == "all" else [args.test]
     )
 
     overall_passed = True
