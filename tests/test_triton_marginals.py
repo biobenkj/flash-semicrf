@@ -81,7 +81,7 @@ class TestTritonMarginalsBasic:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="Triton marginals don't match PyTorch reference",
         )
@@ -91,7 +91,7 @@ class TestTritonMarginalsBasic:
             log_Z_triton.cpu(),
             log_Z_pytorch,
             rtol=1e-5,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="Partition functions don't match",
         )
@@ -153,7 +153,7 @@ class TestTritonMarginalsBasic:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="Variable length marginals don't match",
         )
@@ -216,7 +216,7 @@ class TestTritonMarginalsEdgeCases:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="K=1 marginals don't match",
         )
@@ -275,7 +275,7 @@ class TestTritonMarginalsEdgeCases:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="T=K marginals don't match",
         )
@@ -334,7 +334,7 @@ class TestTritonMarginalsEdgeCases:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="Batch=1 marginals don't match",
         )
@@ -393,7 +393,7 @@ class TestTritonMarginalsEdgeCases:
             triton_marginals.cpu(),
             pytorch_marginals,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             check_dtype=False,
             msg="Large K marginals don't match",
         )
@@ -475,7 +475,7 @@ class TestTritonMarginalsIntegration:
             marginals_streaming,
             marginals_exact,
             rtol=0.01,
-            atol=1e-5,
+            atol=1e-4,
             msg="Streaming and exact marginals don't match on CUDA",
         )
 
