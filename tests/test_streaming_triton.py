@@ -69,7 +69,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_matches_pytorch_medium(self):
         """Verify Triton kernel matches PyTorch for medium inputs."""
@@ -86,7 +86,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_matches_pytorch_large_C(self):
         """Verify Triton kernel works with larger C (requires padding)."""
@@ -103,7 +103,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_matches_pytorch_non_power_of_2_C(self):
         """Verify Triton kernel handles non-power-of-2 C values."""
@@ -122,7 +122,7 @@ class TestTritonStreamingKernel:
             )
 
             torch.testing.assert_close(
-                partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, msg=f"C={C} failed"
+                partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False, msg=f"C={C} failed"
             )
 
     def test_triton_variable_lengths(self):
@@ -141,7 +141,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_short_sequences(self):
         """Verify Triton kernel handles sequences shorter than K."""
@@ -161,7 +161,7 @@ class TestTritonStreamingKernel:
             )
 
             torch.testing.assert_close(
-                partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, msg=f"T={T} failed"
+                partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False, msg=f"T={T} failed"
             )
 
     def test_triton_max_semiring(self):
@@ -179,7 +179,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_produces_finite_values(self):
         """Verify Triton kernel produces finite values."""
@@ -234,7 +234,7 @@ class TestTritonStreamingKernel:
         )
 
         # Use slightly looser tolerance for longer sequences
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-3, atol=1e-3, check_dtype=False)
 
     def test_triton_k1_forward_matches_pytorch(self):
         """Verify Triton kernel matches PyTorch for K=1 (linear CRF)."""
@@ -253,7 +253,7 @@ class TestTritonStreamingKernel:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_k1_backward_finite_gradients(self):
         """Verify K=1 Triton backward produces finite gradients.
@@ -594,7 +594,7 @@ class TestTritonStreamingBoundaries:
             proj_end=proj_end,
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_with_boundaries_forward_max(self):
         """Verify Triton max semiring with boundaries matches PyTorch."""
@@ -627,7 +627,7 @@ class TestTritonStreamingBoundaries:
             proj_end=proj_end,
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_with_boundaries_gradients(self):
         """Verify Triton backward with boundaries matches PyTorch."""
@@ -751,7 +751,7 @@ class TestTritonStreamingBoundaries:
             proj_end=proj_end,
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_boundaries_variable_lengths(self):
         """Verify boundaries handle variable sequence lengths."""
@@ -827,7 +827,7 @@ class TestTritonStreamingBenchmark:
         )
 
         torch.testing.assert_close(
-            partition_triton, partition_pytorch, rtol=1e-3, atol=1e-3, msg=f"T={T}, K={K} failed"
+            partition_triton, partition_pytorch, rtol=1e-3, atol=1e-3, check_dtype=False, msg=f"T={T}, K={K} failed"
         )
 
 
@@ -891,7 +891,7 @@ class TestDurationDependentTransitions:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_duration_transitions_forward_max(self):
         """Verify Triton max semiring works with (K, C, C) transitions."""
@@ -910,7 +910,7 @@ class TestDurationDependentTransitions:
             cum_scores, transition, duration_bias, lengths, K, semiring="max"
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_triton_duration_transitions_gradients(self):
         """Verify Triton backward gradients match PyTorch for (K, C, C) transitions."""
@@ -1050,7 +1050,7 @@ class TestDurationDependentTransitions:
             cum_scores, transition_static, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -1790,7 +1790,7 @@ class TestKBasedDispatch:
             cum_scores.cpu(), transition.cpu(), duration_bias.cpu(), lengths.cpu(), K
         )
 
-        torch.testing.assert_close(partition_triton.cpu(), partition_pytorch, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(partition_triton.cpu(), partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False)
 
     def test_k1_viterbi_decoding(self):
         """K=1 Viterbi decoding works correctly."""

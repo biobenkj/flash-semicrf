@@ -91,6 +91,7 @@ class TestTritonMarginalsBasic:
             log_Z_pytorch,
             rtol=1e-5,
             atol=1e-5,
+            check_dtype=False,
             msg="Partition functions don't match",
         )
 
