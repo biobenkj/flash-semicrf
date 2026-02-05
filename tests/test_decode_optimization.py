@@ -409,8 +409,11 @@ class TestTritonBackpointers:
 
         # PyTorch reference (cast to float64 to match Triton's internal precision)
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths, K
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+            K,
         )
 
         # Triton
@@ -426,17 +429,28 @@ class TestTritonBackpointers:
 
         # Compare backpointers via path scores (ties may break differently across precisions)
         scores_path_tri = score_viterbi_path(
-            bp_k_tri, bp_c_tri, final_tri,
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths,
+            bp_k_tri,
+            bp_c_tri,
+            final_tri,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
         )
         scores_path_ref = score_viterbi_path(
-            bp_k_ref, bp_c_ref, final_ref,
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths,
+            bp_k_ref,
+            bp_c_ref,
+            final_ref,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
         )
         torch.testing.assert_close(
-            scores_path_tri, scores_path_ref, rtol=1e-10, atol=1e-10,
+            scores_path_tri,
+            scores_path_ref,
+            rtol=1e-10,
+            atol=1e-10,
             msg="Triton and reference backpointers define paths with different scores",
         )
 
@@ -465,8 +479,11 @@ class TestTritonBackpointers:
 
         # Cast to float64 to match Triton's internal precision
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths, K
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+            K,
         )
         scores_tri, bp_k_tri, bp_c_tri, final_tri = semi_crf_streaming_viterbi_triton(
             cum_scores, transition, duration_bias, lengths, K
@@ -477,17 +494,28 @@ class TestTritonBackpointers:
 
         # Compare backpointers via path scores (ties may break differently across precisions)
         scores_path_tri = score_viterbi_path(
-            bp_k_tri, bp_c_tri, final_tri,
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths,
+            bp_k_tri,
+            bp_c_tri,
+            final_tri,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
         )
         scores_path_ref = score_viterbi_path(
-            bp_k_ref, bp_c_ref, final_ref,
-            cum_scores.to(torch.float64), transition.to(torch.float64),
-            duration_bias.to(torch.float64), lengths,
+            bp_k_ref,
+            bp_c_ref,
+            final_ref,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
         )
         torch.testing.assert_close(
-            scores_path_tri, scores_path_ref, rtol=1e-10, atol=1e-10,
+            scores_path_tri,
+            scores_path_ref,
+            rtol=1e-10,
+            atol=1e-10,
             msg="Triton and reference backpointers define paths with different scores (variable lengths)",
         )
 

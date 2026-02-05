@@ -54,7 +54,11 @@ class TestTritonMarginalsBasic:
 
         # PyTorch reference
         pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton (need forward pass first for checkpoints)
@@ -122,7 +126,11 @@ class TestTritonMarginalsBasic:
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton
@@ -182,7 +190,11 @@ class TestTritonMarginalsEdgeCases:
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton
@@ -237,7 +249,11 @@ class TestTritonMarginalsEdgeCases:
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton
@@ -292,7 +308,11 @@ class TestTritonMarginalsEdgeCases:
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton
@@ -347,7 +367,11 @@ class TestTritonMarginalsEdgeCases:
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
+            cum_scores_f64.cpu(),
+            transition_f64.cpu(),
+            duration_bias_f64.cpu(),
+            lengths.cpu(),
+            K,
         )
 
         # Triton
