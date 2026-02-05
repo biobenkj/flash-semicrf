@@ -202,7 +202,7 @@ if HAS_TRITON:
 
         # Cumulative log normalization factor for numerical stability at extreme T
         # This tracks the total shift applied to alpha values at checkpoint boundaries
-        accum_log_norm = 0.0
+        accum_log_norm = tl.zeros((), dtype=tl.float64)
 
         # Main forward loop: t = 1, 2, ..., T
         for t in tl.range(1, T + 1):
@@ -434,7 +434,7 @@ if HAS_TRITON:
 
         # Add back cumulative normalization to get true partition function
         # final_alpha contains normalized values; accum_log_norm contains the total shift
-        partition = raw_partition + accum_log_norm
+        partition = (raw_partition.to(tl.float64) + accum_log_norm).to(tl.float64)
 
         # DEBUG: Print partition (log_Z) for T=100k diagnostic
         # Uncomment these lines to diagnose numerical stability at extreme scale
@@ -1008,7 +1008,7 @@ if HAS_TRITON:
             stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0  # Strides don't matter when not used
 
         # Allocate outputs
-        partition = torch.empty(batch, device=device, dtype=dtype)
+        partition = torch.empty(batch, device=device, dtype=torch.float64)
 
         # Live ring buffer (will be L1/L2 cached for small K*C)
         # Initialize to NEG_INF, then set k=0 to 0.0 (initial alpha state)
@@ -1025,7 +1025,7 @@ if HAS_TRITON:
         # Log normalization checkpoint storage for numerical stability at extreme T
         # Stores cumulative log normalization factor at each checkpoint boundary
         # Memory cost: negligible (14 * batch * 4 bytes at T=100k)
-        log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
+        log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=torch.float64)
 
         # Get strides
         stride_cs_b, stride_cs_t, stride_cs_c = cum_scores.stride()

@@ -195,7 +195,11 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             )
         )
 
-        # Save for backward
+        # Cast partition back to input dtype for return, but keep float64 for backward
+        partition_f64 = partition  # Keep float64 for backward pass
+        partition_return = partition.to(cum_scores.dtype)  # Return float32 to user
+
+        # Save float64 version for backward
         ctx.save_for_backward(
             cum_scores,
             transition,
@@ -203,7 +207,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
             lengths,
             ring_checkpoints,
             log_norm_checkpoints,
-            partition,
+            partition_f64,  # <-- float64
             proj_start,
             proj_end,
         )
@@ -212,7 +216,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         ctx.checkpoint_interval = checkpoint_interval
         ctx.num_warps = num_warps
 
-        return partition
+        return partition_return  # <-- float32 for user
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
