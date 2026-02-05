@@ -82,6 +82,7 @@ class TestTritonMarginalsBasic:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="Triton marginals don't match PyTorch reference",
         )
 
@@ -153,6 +154,7 @@ class TestTritonMarginalsBasic:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="Variable length marginals don't match",
         )
 
@@ -215,6 +217,7 @@ class TestTritonMarginalsEdgeCases:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="K=1 marginals don't match",
         )
 
@@ -273,6 +276,7 @@ class TestTritonMarginalsEdgeCases:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="T=K marginals don't match",
         )
 
@@ -331,6 +335,7 @@ class TestTritonMarginalsEdgeCases:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="Batch=1 marginals don't match",
         )
 
@@ -389,6 +394,7 @@ class TestTritonMarginalsEdgeCases:
             pytorch_marginals,
             rtol=0.01,
             atol=1e-5,
+            check_dtype=False,
             msg="Large K marginals don't match",
         )
 

@@ -163,6 +163,7 @@ class SemiCRFStreaming(torch.autograd.Function):
             None,  # semiring
             grad_proj_start,
             grad_proj_end,
+            None,  # checkpoint_interval
         )
 
 

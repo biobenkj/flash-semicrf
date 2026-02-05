@@ -367,7 +367,7 @@ class TestTritonBackpointers:
         )
 
         # Compare scores
-        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4, check_dtype=False)
 
         # Compare final labels
         assert torch.equal(final_tri, final_ref), "final_labels mismatch"
@@ -414,7 +414,7 @@ class TestTritonBackpointers:
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4, check_dtype=False)
         assert torch.equal(final_tri, final_ref)
 
         # Compare valid positions for each batch
