@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Forward (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `d9aff99`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `52c3f9e`
 **Linked tests:** `tests/test_streaming.py::TestStreamingForward::test_forward_produces_finite_values`
 
 ## Summary
@@ -234,6 +234,7 @@ This prevents the ~2.5*T log-sum growth that causes overflow at T>100K.
 
 ## Version History
 
+- **2026-02-05**: Minor documentation fixes (comment formatting); no functional changes; updated to commit `52c3f9e`
 - **2026-02-02**: Updated for active masking changes; all checkpoint operations now properly masked for variable-length sequences; line numbers updated for commit `d9aff99`
 - **2026-02-02**: Updated line numbers; documented Flash Attention-style normalization; log_norm_checkpoints now returned as 4th value
 - **2026-01-27**: Initial trace @ commit `09e86ed`

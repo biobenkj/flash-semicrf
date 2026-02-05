@@ -1,7 +1,7 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `871c352`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `6c463c3`
 - `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
@@ -256,6 +256,7 @@ needs_grad = (
 
 ## Version History
 
+- **2026-02-05**: Updated autograd.py to commit `6c463c3`; no dispatch logic changes (added checkpoint_interval parameter and dtype conversion handling)
 - **2026-02-01**: Updated line numbers for autograd.py changes (log_norm_checkpoints support)
 - **2026-01-28**: Documented dual indexing scheme divergence (streaming 0-based vs non-streaming 1-based)
 - **2026-01-28**: Added non-streaming backends (`semimarkov.py`) decision tree, algorithm lookup, entry points, and failure routing @ commit `26119fa`

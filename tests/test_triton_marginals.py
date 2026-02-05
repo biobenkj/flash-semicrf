@@ -42,20 +42,15 @@ class TestTritonMarginalsBasic:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 4, 100, 8, 16
 
-        # Setup - create cumulative scores
-        scores = torch.randn(batch, T, C, device=cuda_device)
+        # Setup - create cumulative scores in float64
+        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)  # Zero-center
-        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(
@@ -115,20 +110,15 @@ class TestTritonMarginalsBasic:
         batch, T_max, C, K = 4, 100, 6, 12
         lengths_list = [100, 80, 60, 40]
 
-        # Setup
-        scores = torch.randn(batch, T_max, C, device=cuda_device)
+        # Setup - create cumulative scores in float64
+        scores = torch.randn(batch, T_max, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T_max + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T_max + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.tensor(lengths_list, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
@@ -181,19 +171,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 50, 4, 1
 
-        scores = torch.randn(batch, T, C, device=cuda_device)
+        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
@@ -241,19 +226,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 16, 4, 16
 
-        scores = torch.randn(batch, T, C, device=cuda_device)
+        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
@@ -301,19 +281,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 1, 100, 8, 16
 
-        scores = torch.randn(batch, T, C, device=cuda_device)
+        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
@@ -361,19 +336,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 200, 4, 64
 
-        scores = torch.randn(batch, T, C, device=cuda_device)
+        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float32)
-        cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
+        cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
+        cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition = torch.randn(C, C, device=cuda_device)
-        duration_bias = torch.randn(K, C, device=cuda_device)
+        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
-
-        # Cast inputs to float64 for both paths
-        cum_scores_f64 = cum_scores.to(torch.float64)
-        transition_f64 = transition.to(torch.float64)
-        duration_bias_f64 = duration_bias.to(torch.float64)
 
         # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(

@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `b05260f`
+**Verified against:** `src/torch_semimarkov/streaming/triton_backward.py` @ commit `9dfa110`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -117,6 +117,56 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
         grad_db_workspace[ckpt_idx] += marginal  # Segment-isolated atomic
 ```
 
+## Memory Barriers (Warp Synchronization)
+
+The backward kernel uses **three critical memory barriers** (`tl.debug_barrier()`) to prevent race conditions in multi-warp execution:
+
+### Barrier 1: Post-Checkpoint Load (triton_backward.py:366)
+
+```python
+# After loading checkpoint into ring buffer
+for k_load in range(K):
+    ring_buffer[k_load] = ring_checkpoints[ckpt_idx, k_load]
+
+tl.debug_barrier()  # ← Ensures alpha buffer writes are visible to all warps
+
+# Now safe to recompute alpha forward
+for local_t in tl.range(1, SEGMENT_SIZE):
+    ...
+```
+
+**Why needed**: Segments are processed in reverse order. Without this barrier, segment 1 (processed first) might overwrite alpha buffer values that segment 0 needs to read, causing stale data reads.
+
+**Failure mode**: 10-400% gradient errors in batch=1 tests before barrier was added.
+
+### Barrier 2: Beta Ring Buffer Store (triton_backward.py:1070)
+
+```python
+# After storing beta_t to ring buffer
+for tile_c in range(num_tiles_c):
+    tl.store(beta_ring + ring_t_idx * stride_ring_k + ..., beta_t_tile)
+
+tl.debug_barrier()  # ← Ensures beta store is visible before next t iteration
+```
+
+**Why needed**: Multi-tile implementation for large C. The second tile (c=4-7) at t-1 might see stale NEG_INF values from ring buffer initialization instead of values just stored at t.
+
+**Failure mode**: Second tile gets NEG_INF, first tile gets correct values.
+
+### Barrier 3: End-of-Segment Sync (triton_backward.py:1072)
+
+```python
+# After completing all beta/gradient computation for segment
+for t in range(seg_end-1, seg_start-1, -1):
+    ...  # Beta computation and gradient accumulation
+
+tl.debug_barrier()  # ← Sync all warps before starting next segment
+```
+
+**Why needed**: Ensures all warps complete segment before moving to next checkpoint. Prevents cross-segment data races.
+
+**Failure mode**: Non-deterministic gradients from unsynchronized segment transitions.
+
 ## Critical Invariants
 
 | Invariant | Math | Python Check |
@@ -130,12 +180,12 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
 
 | Metric | Value |
 |--------|-------|
-| **Expected dtype** | float32 inputs, float32 accumulators (kernel uses tl.float64 internally) |
-| **Accumulator dtype** | float32 for workspace tensors (triton_backward.py:1013); tl.float64 in kernel |
-| **grad_cum_scores dtype** | float32 (reverted from float64; log_norm keeps values bounded) |
-| **Alpha buffer** | `(B, SEGMENT_SIZE, C_PAD) * 4` bytes |
-| **Beta ring** | `(B, K, C_PAD) * 4` bytes |
+| **Kernel internal dtype** | tl.float64 for all registers (lines 258, 321, 374, 525, 539, 554, 560-561, 566, 574-575) |
+| **Workspace dtype** | float64 for grad workspaces; float32 for grad_cum_scores (log_norm keeps bounded) |
+| **Alpha buffer** | `(B, SEGMENT_SIZE, C_PAD) * 8` bytes (float64 registers) |
+| **Beta ring** | `(B, K, C_PAD) * 8` bytes (float64 registers) |
 | **Grad workspace** | `(B, num_segments, C, C) * 8` or `(B, num_segments, K, C, C) * 8` bytes (float64) |
+| **Memory barriers** | 3 per batch element: post-checkpoint, beta-store, end-of-segment |
 | **Grid Dim** | `(batch,)` - one program per batch element |
 | **num_warps** | Default 4; range 2-8 |
 | **TILE_C** | 16 (constexpr for tiling) |
@@ -201,11 +251,12 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output
 |-------|----------|-----------|------------|--------|
 | Duration-dependent transition off-by-one | Critical | HAS_DURATION_TRANSITIONS | Use `dur_idx` not `k` for indexing | `09e86ed` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
-| Float32 accumulator overflow | Resolved | Long sequences, large C | log_norm_checkpoints keeps values bounded; kernel uses tl.float64 internally | d7b802c |
+| Numerical precision at extreme T | High | T > 100K | All kernels now use float64 internally | `9dfa110` |
 | Wrong checkpoint_interval | Critical | Mismatched forward/backward | Pass same interval to both | autograd.py:244 |
 | grad_output not scaled | Medium | Wrong gradient magnitude | Triton kernel scales internally | - |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len to int32 | `49d9d61` |
 | Non-deterministic gradients | Critical | Multi-segment backward | Per-segment workspaces eliminate cross-segment atomic contention | `0c9b73e` |
+| Missing memory barriers | Critical | Multi-warp execution | 3 tl.debug_barrier() calls added | `9dfa110` |
 
 ## Debugging: Gradient Mismatch
 
@@ -246,6 +297,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-05**: Migrated all internal computation to float64; added 3 memory barriers (tl.debug_barrier) for warp synchronization: post-checkpoint load (line 366), beta ring store (line 1070), end-of-segment sync (line 1072); documented barrier failure modes; updated to commit `9dfa110`
 - **2026-02-02**: Deterministic gradient accumulation via per-segment workspaces; workspace shapes now `(B, num_segments, ...)` instead of `(B, ...)`; each segment writes to its own slice eliminating cross-segment atomic contention; host-side `.sum(dim=1)` is deterministic; updated to commit `b05260f`
 - **2026-02-02**: Fixed int32/int64 type mismatch for seq_len comparison; seq_len now loaded as int32 to match loop variable type from tl.range; updated to commit `49d9d61`
 - **2026-02-02**: Reverted workspace accumulators from float64 to float32 @ `94652ad`; log_norm_checkpoints keeps values bounded within checkpoint blocks, so float32 is sufficient; kernel-internal accumulators still use tl.float64 for log-sum-exp safety
