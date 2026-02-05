@@ -52,23 +52,24 @@ class TestTritonMarginalsBasic:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton (need forward pass first for checkpoints)
         log_Z_triton, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z_triton,
             ring_ckpts,
@@ -124,23 +125,24 @@ class TestTritonMarginalsBasic:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.tensor(lengths_list, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton
         log_Z_triton, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z_triton,
             ring_ckpts,
@@ -188,23 +190,24 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z,
             ring_ckpts,
@@ -247,23 +250,24 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z,
             ring_ckpts,
@@ -306,23 +310,24 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z,
             ring_ckpts,
@@ -365,23 +370,24 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (cast to float64 to match Triton's internal precision)
+        # Cast inputs to float64 for both paths
+        cum_scores_f64 = cum_scores.to(torch.float64)
+        transition_f64 = transition.to(torch.float64)
+        duration_bias_f64 = duration_bias.to(torch.float64)
+
+        # PyTorch reference
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu().to(torch.float64),
-            transition.cpu().to(torch.float64),
-            duration_bias.cpu().to(torch.float64),
-            lengths.cpu(),
-            K,
+            cum_scores_f64.cpu(), transition_f64.cpu(), duration_bias_f64.cpu(), lengths.cpu(), K,
         )
 
         # Triton
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores_f64, transition_f64, duration_bias_f64, lengths, K
         )
         triton_marginals = launch_streaming_triton_marginals(
-            cum_scores,
-            transition,
-            duration_bias,
+            cum_scores_f64,
+            transition_f64,
+            duration_bias_f64,
             lengths,
             log_Z,
             ring_ckpts,
