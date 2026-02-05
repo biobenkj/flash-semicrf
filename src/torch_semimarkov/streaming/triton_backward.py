@@ -1207,7 +1207,7 @@ if HAS_TRITON:
         T = T_plus_1 - 1
         K = duration_bias.shape[0]
         device = cum_scores.device
-        dtype = cum_scores.dtype
+        dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
 
         num_checkpoints = ring_checkpoints.shape[1]
         C_PAD = _next_power_of_2(C)
