@@ -1,10 +1,10 @@
 # Debugging Journey: Backward Pass Non-Determinism
 
 **Date**: February 2026
-**Duration**: ~4 hours across multiple sessions
-**Severity**: Critical - 36% run-to-run differences in gradients, making training unstable
-**Root Causes**: (1) Missing memory barrier after beta store, (2) Debug script comparison bug
-**Status**: ✅ RESOLVED
+**Duration**: ~6 hours across multiple sessions
+**Severity**: Critical - 100-650% run-to-run differences in gradients, making training unstable
+**Root Causes**: Multiple missing memory barriers in producer-consumer patterns
+**Status**: [RESOLVED]
 
 ---
 
@@ -14,10 +14,21 @@ This document chronicles the debugging journey to resolve non-determinism in the
 
 **Key Discoveries**:
 1. **Beta ring buffer memory visibility**: The second tile (c=4-7) at position t=9 was reading stale NEG_INF values instead of beta values stored at t=10 by the first tile
-2. **Three different global_max values** across runs from the same (t, k) position indicated a race condition
-3. **Debug script comparison bug**: PyTorch returns per-batch gradients `(batch, C, C)`, Triton returns reduced gradients `(C, C)` - direct comparison was invalid
+2. **Beta ring initialization visibility**: Segment processing could begin before NEG_INF/0.0 initialization values were visible
+3. **Alpha recomputation race condition**: With num_warps > 1, different warps at different loop iterations could read stale alpha values before stores completed
+4. **Three different global_max values** across runs from the same (t, k) position indicated race conditions
+5. **Debug script comparison bug**: PyTorch returns per-batch gradients `(batch, C, C)`, Triton returns reduced gradients `(C, C)` - direct comparison was invalid
 
 **Resolution Impact**: All runs now produce identical results, gradients match PyTorch within 2e-5.
+
+**Barriers Required** (4 total):
+
+| Location  | Purpose                                   |
+| --------- | ----------------------------------------- |
+| Line 310  | After beta ring initialization            |
+| Line 371  | After checkpoint load                     |
+| Line 514  | After alpha store in recomputation loop   |
+| Line 1095 | After beta store in t-loop                |
 
 ---
 
@@ -82,7 +93,7 @@ The error pattern suggested:
 tile_sum_exp = tl.sum(tile_exp.to(tl.float64), axis=0)
 ```
 
-**Result**: ❌ Made things worse! The non-determinism persisted and added unnecessary computation.
+**Result**: [FAIL] Made things worse! The non-determinism persisted and added unnecessary computation.
 
 **Lesson**: Float64 doesn't help with race conditions; it only helps with numerical precision.
 
@@ -191,7 +202,7 @@ tl.store(
 tl.debug_barrier()
 ```
 
-**Result**: ✅ Non-determinism FIXED!
+**Result**: [PASS] Non-determinism FIXED!
 
 ```
 === PASS 1 GLOBAL STATISTICS ===
@@ -238,7 +249,7 @@ pytorch_grad_tr_reduced = pytorch_grad_tr.sum(dim=0)  # (batch, C, C) -> (C, C)
 pytorch_grad_db_reduced = pytorch_grad_db.sum(dim=0)  # (batch, K, C) -> (K, C)
 ```
 
-**Final Result**: ✅ All gradients match!
+**Final Result**: [PASS] All gradients match!
 
 ```
 === Full Tensor Comparison vs PyTorch ===
@@ -557,7 +568,28 @@ def launch_streaming_triton_backward(...):
 ### Kernel Fix
 **File**: `src/torch_semimarkov/streaming/triton_backward.py`
 
-**Change**: Added memory barrier after beta store (lines 1106-1120):
+**Change 1**: Added memory barrier after beta ring initialization (line 310):
+```python
+# Initialize beta ring buffer...
+for k_init in tl.range(0, 2 * K):
+    tl.store(beta_ring_base + k_init * stride_br_k + ..., init_val, ...)
+
+# CRITICAL: Memory barrier ensures beta ring initialization is visible before
+# segment processing begins.
+tl.debug_barrier()
+```
+
+**Change 2**: Added memory barrier after alpha store in recomputation loop (line 514):
+```python
+# Store recomputed alpha
+tl.store(alpha_buf_seg + local_t * stride_ab_t + ..., alpha_t, ...)
+
+# CRITICAL: Memory barrier ensures alpha store is visible before next iteration.
+# With num_warps > 1, different warps may be at different loop iterations.
+tl.debug_barrier()
+```
+
+**Change 3**: Added memory barrier after beta store in t-loop (line 1095):
 ```python
 tl.store(
     beta_ring_base + t_ring_idx * stride_br_k + c_idx * stride_br_c,
@@ -568,6 +600,12 @@ tl.store(
 # CRITICAL: Memory barrier ensures beta store is visible before next t iteration.
 tl.debug_barrier()
 ```
+
+**Error Reduction Pattern**:
+
+- Without barriers: 286-650% errors
+- After barrier at line 310 only: 131-197% errors (partial fix)
+- After all barriers: 0% errors (complete fix)
 
 ### Debug Script Fix
 **File**: `scripts/debug_backward_nondeterminism.py`
