@@ -31,16 +31,19 @@ This supplement provides formal algorithmic details for the streaming Semi-CRF i
 $T$ & Sequence length & scalar \\
 $K$ & Maximum segment duration & scalar \\
 $C$ & Number of labels (states) & scalar \\
+$C_{\text{PAD}}$ & Padded label count (next power of 2) & scalar \\
 $B$ & Batch size & scalar \\
 $\mathcal{S}_{t,c}$ & Cumulative projected scores & $(B, T+1, C)$ \\
 $\mathcal{T}_{c',c}$ & Transition scores (source $c'$ to dest $c$) & $(C, C)$ \\
 $\mathcal{B}_{k,c}$ & Duration bias for duration $k$, label $c$ & $(K, C)$ \\
 $\tilde{\alpha}_t(c)$ & Log-forward message at position $t$, label $c$ & $(B, C)$ \\
 $\tilde{\beta}_t(c)$ & Log-backward message & $(B, C)$ \\
-$\boldsymbol{\alpha}$ & Ring buffer for forward messages & $(B, K, C)$ \\
+$\boldsymbol{\alpha}$ & Forward ring buffer & $(B, K, C)$ \\
+$\boldsymbol{\beta}$ & Backward ring buffer & $(B, 2K, C)$ \\
 $\Omega$ & Checkpointed ring buffer states & $(B, N, K, C)$ \\
 $\mathcal{N}$ & Cumulative log-normalization factors & $(B, N)$ \\
 $\Delta$ & Checkpoint interval ($\approx \sqrt{TK}$) & scalar \\
+$\tau$ & Tile size for label dimension & scalar \\
 $\log Z$ & Log partition function & $(B,)$ \\
 \hline
 \end{tabular}
@@ -113,7 +116,7 @@ Algorithm~\ref{alg:streaming_backward} processes segments in reverse, recomputin
 \KwIn{$\mathcal{S}$, $\mathcal{T}$, $\mathcal{B}$, checkpoints $(\Omega, \mathcal{N})$, $\log Z$, upstream $\partial \mathcal{L}/\partial Z$}
 \KwOut{$\nabla \mathcal{S}$, $\nabla \mathcal{T}$, $\nabla \mathcal{B}$}
 \BlankLine
-$\boldsymbol{\beta} \gets -\infty$; \quad $\boldsymbol{\beta}[T \bmod K, :] \gets 0$\;
+$\boldsymbol{\beta} \gets -\infty \in \mathbb{R}^{2K \times C}$; \quad $\boldsymbol{\beta}[T \bmod 2K, :] \gets 0$\;
 Initialize gradient accumulators\;
 \BlankLine
 \For{$i \gets N_{\text{ckpts}}-1$ \KwTo $0$}{
@@ -126,7 +129,7 @@ Initialize gradient accumulators\;
         $\tilde{\boldsymbol{\beta}}_t \gets -\infty$\;
         \BlankLine
         \For{$k \gets 1$ \KwTo $\min(K, T-t)$}{
-            $\tilde{\boldsymbol{\beta}}_{\text{next}} \gets \boldsymbol{\beta}[(t+k) \bmod K, :]$\;
+            $\tilde{\boldsymbol{\beta}}_{\text{next}} \gets \boldsymbol{\beta}[(t+k) \bmod 2K, :]$\tcp*[r]{$2K$ ring buffer}
             $\tilde{\psi} \gets$ Eq.~\eqref{eq:streaming_potential}\;
             \BlankLine
             \tcp{Log-norm correction restores true $\alpha$ scale}
@@ -136,11 +139,135 @@ Initialize gradient accumulators\;
             Accumulate $\nabla \mathcal{S}$, $\nabla \mathcal{T}$, $\nabla \mathcal{B}$ from $\mu$\;
             $\tilde{\boldsymbol{\beta}}_t \gets \text{LSE}(\tilde{\boldsymbol{\beta}}_t, \text{LSE}(\tilde{\psi} + \tilde{\boldsymbol{\beta}}_{\text{next}}[:, \text{None}], \text{axis}=0))$\;
         }
-        $\boldsymbol{\beta}[t \bmod K, :] \gets \tilde{\boldsymbol{\beta}}_t$\;
+        $\boldsymbol{\beta}[t \bmod 2K, :] \gets \tilde{\boldsymbol{\beta}}_t$\tcp*[r]{$2K$ ring buffer}
     }
 }
 \Return{$\nabla \mathcal{S}$, $\nabla \mathcal{T}$, $\nabla \mathcal{B}$}\;
 \end{algorithm}
+
+%==============================================================================
+\section{$2K$ Beta Ring Buffer}
+\label{sec:2k_ring}
+%==============================================================================
+
+While the forward pass uses a ring buffer of size $K$ (sufficient since we only look back $K$ positions), the backward pass requires a ring buffer of size $2K$. This asymmetry arises from the different access patterns:
+
+\textbf{Forward pass access pattern.} At position $t$, we read $\alpha$ values from positions $\{t-K, t-K+1, \ldots, t-1\}$---exactly $K$ previous positions. A ring buffer indexed by $t \bmod K$ suffices.
+
+\textbf{Backward pass access pattern.} At position $t$, we read $\beta$ values from positions $\{t+1, t+2, \ldots, t+K\}$---$K$ future positions. However, we also write $\beta[t]$ while potentially still reading $\beta[t+K]$. If we used a ring buffer of size $K$, we would have:
+\begin{align}
+\text{write index:} \quad & t \bmod K \\
+\text{read index for } k=K: \quad & (t+K) \bmod K = t \bmod K
+\end{align}
+
+This creates a \textbf{write-before-read hazard}: we would overwrite $\beta[t+K]$ before reading it. The $2K$ ring buffer eliminates this conflict:
+\begin{equation}
+t \bmod 2K \neq (t+K) \bmod 2K \quad \text{for all } t \geq 0
+\end{equation}
+
+\textbf{Memory cost.} The additional $KC$ floats is negligible compared to the $O(\sqrt{T/K} \cdot KC)$ checkpoint storage.
+
+%==============================================================================
+\section{Adaptive Loop Tiling}
+\label{sec:tiling}
+%==============================================================================
+
+The marginal computation requires a $(C_{\text{PAD}} \times C_{\text{PAD}})$ matrix per $(t, k)$ pair, which at $C_{\text{PAD}}=64$ demands approximately 384 registers per thread. With 4+ warps, this exceeds available registers and causes spilling to slow local memory.
+
+\textbf{Tiled computation.} We process the destination label dimension $c_{\text{dst}}$ in tiles of size $\tau$ (TILE\_C):
+\begin{enumerate}
+\item Load a $(\tau \times C_{\text{PAD}})$ tile of the marginal matrix
+\item Accumulate gradients from the tile
+\item Use online logsumexp for $\beta$ update across tiles (Flash Attention pattern~\cite{dao2022flashattention})
+\end{enumerate}
+
+This reduces peak register demand to approximately 120 per thread, enabling 4--8 warps without spilling.
+
+\textbf{Adaptive tile sizing.} The tile size $\tau$ is selected based on $C$ to balance compile time, register pressure, and iteration count:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{c c c l}
+\hline
+$C_{\text{PAD}}$ & $\tau$ & Iterations & Rationale \\
+\hline
+$\leq 8$ & 4 & 2 & Minimal iteration count \\
+$\leq 16$ & 8 & 2 & Minimal iteration count \\
+$32$ & 16 & 2 & Balanced \\
+$64$ & 16 & 4 & Moderate register pressure \\
+$\geq 128$ & 32 & $\leq 8$ & Bounded compile time \\
+\hline
+\end{tabular}
+\caption{Adaptive tile size selection via \texttt{\_compute\_tile\_c()}. The algorithm bounds iteration count to $\leq 8$ even at $C=256$ while keeping register pressure manageable.}
+\label{tab:tile_sizing}
+\end{table}
+
+\textbf{Online logsumexp for $\beta$.} Since $\beta$ reduction spans multiple tiles, we use the Flash Attention online pattern:
+\begin{align}
+m^{(i)} &= \max(m^{(i-1)}, m_{\text{tile}}^{(i)}) \\
+\ell^{(i)} &= \ell^{(i-1)} \cdot e^{m^{(i-1)} - m^{(i)}} + \sum_j e^{x_j^{(i)} - m^{(i)}}
+\end{align}
+where $m$ tracks the running maximum and $\ell$ tracks the running sum of exponentials, rescaled at each tile boundary.
+
+%==============================================================================
+\section{Reduced Atomics Strategy}
+\label{sec:reduced_atomics}
+%==============================================================================
+
+GPU atomic operations are expensive and introduce non-determinism due to floating-point non-associativity. We employ three strategies to minimize their use:
+
+\subsection{Local Accumulation for Per-Position Gradients}
+
+For $\nabla \mathcal{S}_{t,c}$, the negative contribution (from segments starting at $t$) is the same position for all $k$ values. Instead of $K \times \text{tiles}$ atomic operations, we accumulate locally:
+
+\begin{algorithm}[H]
+\caption{Local Accumulation for $\nabla \mathcal{S}_t$}\label{alg:local_accum}
+$\texttt{grad\_cs\_t\_local} \gets \mathbf{0} \in \mathbb{R}^{C_{\text{PAD}}}$\;
+\For{$k \gets 1$ \KwTo $K$}{
+    \For{\text{each tile}}{
+        $\texttt{grad\_cs\_t\_local} \mathrel{-}= \sum_{c'} \mu_{\text{tile}}(t, k, c, c')$\tcp*[r]{Register accumulation}
+    }
+}
+$\texttt{atomic\_add}(\nabla \mathcal{S}_t, \texttt{grad\_cs\_t\_local})$\tcp*[r]{Single write}
+\end{algorithm}
+
+\textbf{Speedup}: $K \times \text{tiles} \to 1$ atomic per position (e.g., $1000 \times 4 = 4000 \to 1$ at $K=1000$, $C=64$).
+
+\subsection{Per-Duration Accumulation for Duration Bias}
+
+For $\nabla \mathcal{B}_{k,c}$, we accumulate across all tiles for each $k$, then write once:
+
+\begin{algorithm}[H]
+\caption{Per-Duration Accumulation for $\nabla \mathcal{B}_k$}
+\For{$k \gets 1$ \KwTo $K$}{
+    $\texttt{grad\_db\_k\_local} \gets \mathbf{0} \in \mathbb{R}^{C_{\text{PAD}}}$\;
+    \For{\text{each tile}}{
+        $\texttt{grad\_db\_k\_local} \mathrel{+}= \sum_{c'} \mu_{\text{tile}}(t, k, c, c')$\;
+    }
+    $\texttt{atomic\_add}(\nabla \mathcal{B}_k, \texttt{grad\_db\_k\_local})$\tcp*[r]{Once per $k$}
+}
+\end{algorithm}
+
+\textbf{Speedup}: $\text{tiles} \to 1$ atomic per $(t, k)$ pair.
+
+\subsection{Segment-Isolated Workspace Buffers}
+
+For shared parameters ($\nabla \mathcal{T}$, $\nabla \mathcal{B}$), cross-segment atomic contention introduces non-determinism. We allocate per-segment workspace buffers:
+
+\begin{equation}
+\texttt{grad\_tr\_workspace} \in \mathbb{R}^{B \times N_{\text{segments}} \times C \times C}
+\end{equation}
+
+Each checkpoint segment writes to its own slice, eliminating inter-segment atomics. The final reduction uses deterministic host-side operations:
+
+\begin{align}
+\nabla \mathcal{T}_{c',c} &= \texttt{einsum}(\text{``bsij, b} \to \text{ij''}, \texttt{workspace.sum(dim=1)}, \nabla_{\text{out}}) \\
+\nabla \mathcal{B}_{k,c} &= \texttt{einsum}(\text{``bskc, b} \to \text{kc''}, \texttt{workspace.sum(dim=1)}, \nabla_{\text{out}})
+\end{align}
+
+\textbf{Determinism}: The segment-wise sum is deterministic (fixed order), and \texttt{einsum} performs a single reduction pass.
+
+\textbf{Memory cost}: $O(B \cdot N_{\text{segments}} \cdot K \cdot C^2)$ workspace, which is acceptable since $N_{\text{segments}} \approx \sqrt{T/K}$ is typically small (e.g., 10--100 for $T=100\text{k}$, $K=1000$).
 
 %==============================================================================
 \section{Gradient Computation}
@@ -173,6 +300,12 @@ $\bar{s}_{t,c} = s_{t,c} - \frac{1}{T}\sum_{\tau} s_{\tau,c}$.
 
 \textbf{Log-domain.} All computations use logsumexp: $\text{LSE}(\mathbf{x}) = \max(\mathbf{x}) + \log\sum_i \exp(x_i - \max(\mathbf{x}))$.
 
+\textbf{NEG\_INF guards.} When all logsumexp inputs are $-10^9$, the subtraction $x - \max(x) = 0$ instead of remaining at $-\infty$. Guards detect this case ($\max < -10^9 + 1$) and return $-\infty$ directly.
+
+\textbf{Float64 accumulation.} Gradient tensors for shared parameters use float64 to prevent non-determinism from atomic\_add floating-point non-associativity. Error scales as $O(\sqrt{T \times K \times C})$ per operation; float64 reduces this from $\sim 10^{-3}$ (float32) to $\sim 10^{-10}$ (negligible).
+
+\textbf{Log-marginal clamping.} Before $\exp()$, log-marginals are clamped to $[-700, 700]$ to prevent float64 overflow ($\exp(710) \approx \infty$).
+
 \textbf{Masking.} Invalid positions use $-10^9$ (not $-\infty$) to avoid NaN in gradients.
 
 \textbf{Variable-length batches.} For sequences ending at $L < T$, the normalization shift is masked to zero for $t > L$, freezing $\mathcal{N}_{\text{accum}}$ at the correct value.
@@ -189,15 +322,43 @@ $\bar{s}_{t,c} = s_{t,c} - \frac{1}{T}\sum_{\tau} s_{\tau,c}$.
 \hline
 $\mathcal{S}_{t,c}$ & \texttt{cum\_scores[:, t, c]} & Boundary at index 0 \\
 $\mathcal{T}_{c',c}$ & \texttt{transition[c\_src, c\_dst]} & Source-first storage \\
-$\mathcal{B}_{k,c}$ & \texttt{duration\_bias[k, c]} & $k \in \{1, \ldots, K\}$ \\
-$\boldsymbol{\alpha}$ & \texttt{alpha\_ring} & Ring buffer \\
+$\mathcal{B}_{k,c}$ & \texttt{duration\_bias[k-1, c]} & 0-indexed in code \\
+$\boldsymbol{\alpha}$ & \texttt{ring\_buffer} / \texttt{alpha\_ring} & Size $K$ \\
+$\boldsymbol{\beta}$ & \texttt{beta\_ring} & Size $2K$ (Section~\ref{sec:2k_ring}) \\
 $\Omega$ & \texttt{ring\_checkpoints} & Saved at intervals \\
 $\mathcal{N}$ & \texttt{log\_norm\_checkpoints} & Cumulative log-norm \\
 $\Delta$ & \texttt{checkpoint\_interval} & $\approx \sqrt{TK}$ \\
+$C_{\text{PAD}}$ & \texttt{C\_PAD} & \texttt{\_next\_power\_of\_2(C)} \\
+$\tau$ & \texttt{TILE\_C} & Adaptive (Section~\ref{sec:tiling}) \\
+--- & \texttt{grad\_tr\_workspace} & $(B, N, C, C)$ or $(B, N, K, C, C)$ \\
+--- & \texttt{grad\_db\_workspace} & $(B, N, K, C)$ \\
 \hline
 \end{tabular}
-\caption{Mapping between mathematical notation and implementation.}
+\caption{Mapping between mathematical notation and implementation. $N$ denotes number of segments/checkpoints.}
 \label{tab:implementation}
+\end{table}
+
+%==============================================================================
+\section{Complexity Summary}
+%==============================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l c c}
+\hline
+\textbf{Component} & \textbf{Time} & \textbf{Memory} \\
+\hline
+Forward scan & $O(TKC^2)$ & $O(KC)$ ring buffer \\
+Checkpoints & --- & $O(\sqrt{T/K} \cdot KC)$ \\
+Backward scan & $O(TKC^2)$ & $O(KC)$ ring buffer ($2K$ slots) \\
+Alpha recompute & $O(TKC^2)$ & $O(\Delta \cdot C)$ per segment \\
+Gradient workspace & --- & $O(B \cdot N \cdot KC^2)$ \\
+\hline
+\textbf{Total} & $O(TKC^2)$ & $O(KC + \sqrt{T/K} \cdot KC)$ \\
+\hline
+\end{tabular}
+\caption{Complexity analysis. Memory is independent of $T$ (excluding checkpoints).}
+\label{tab:complexity}
 \end{table}
 
 \bibliographystyle{plain}
