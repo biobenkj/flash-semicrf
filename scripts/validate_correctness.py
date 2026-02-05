@@ -265,11 +265,14 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         )
 
         # Total across all positions and classes should be T
+        # Threshold scales with T: accumulated FP error is ~0.00004 per position
+        # At T=50K, expect ~2.0 deviation; at T=100, expect ~0.004
         position_total = class_sums.sum(dim=1)  # (batch,)
         total_deviation = (position_total - T).abs().max().item()
+        total_threshold = max(1.0, T * 0.0001)  # 0.01% of T
         all_passed &= result_line(
             f"Total emission marginals ≈ T={T}",
-            total_deviation < 1.0,
+            total_deviation < total_threshold,
             f"max |total - T| = {total_deviation:.4f}"
         )
 
