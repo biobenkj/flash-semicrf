@@ -52,11 +52,11 @@ class TestTritonMarginalsBasic:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference (on CPU for comparison)
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )
@@ -124,11 +124,11 @@ class TestTritonMarginalsBasic:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.tensor(lengths_list, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )
@@ -188,11 +188,11 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )
@@ -247,11 +247,11 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )
@@ -306,11 +306,11 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )
@@ -365,11 +365,11 @@ class TestTritonMarginalsEdgeCases:
         duration_bias = torch.randn(K, C, device=cuda_device)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         pytorch_marginals, _ = semi_crf_streaming_marginals_pytorch(
-            cum_scores.cpu(),
-            transition.cpu(),
-            duration_bias.cpu(),
+            cum_scores.cpu().to(torch.float64),
+            transition.cpu().to(torch.float64),
+            duration_bias.cpu().to(torch.float64),
             lengths.cpu(),
             K,
         )

@@ -356,9 +356,10 @@ class TestTritonBackpointers:
         duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores.to(torch.float64), transition.to(torch.float64),
+            duration_bias.to(torch.float64), lengths, K
         )
 
         # Triton
@@ -407,8 +408,10 @@ class TestTritonBackpointers:
         duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
         lengths = torch.tensor([50, 40, 30, 20], device=cuda_device, dtype=torch.long)
 
+        # Cast to float64 to match Triton's internal precision
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores.to(torch.float64), transition.to(torch.float64),
+            duration_bias.to(torch.float64), lengths, K
         )
         scores_tri, bp_k_tri, bp_c_tri, final_tri = semi_crf_streaming_viterbi_triton(
             cum_scores, transition, duration_bias, lengths, K
