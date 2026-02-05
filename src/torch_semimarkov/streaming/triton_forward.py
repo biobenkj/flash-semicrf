@@ -222,12 +222,12 @@ if HAS_TRITON:
                 # Ring index for alpha[start_pos]
                 ring_k_idx = start_pos % K
 
-                # Load alpha_prev from live ring buffer (float32) and cast to float64
+                # Load alpha_prev from live ring buffer
                 alpha_prev = tl.load(
                     ring_base + ring_k_idx * stride_ring_k + c_idx * stride_ring_c,
                     mask=active & k_valid & c_mask,
                     other=NEG_INF,
-                ).to(tl.float64)  # (C_PAD,) - alpha[start_pos, c_src]
+                )  # (C_PAD,) - alpha[start_pos, c_src]
 
                 # === Compute edge block on-the-fly (prefix-sum) ===
 
@@ -328,11 +328,11 @@ if HAS_TRITON:
             # Mask inactive sequences
             alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
 
-            # Store to live ring buffer (cast float64 -> float32)
+            # Store to live ring buffer
             ring_t_idx = t % K
             tl.store(
                 ring_base + ring_t_idx * stride_ring_k + c_idx * stride_ring_c,
-                alpha_t.to(tl.float32),
+                alpha_t,
                 mask=active & c_mask,
             )
 
@@ -374,29 +374,26 @@ if HAS_TRITON:
                 #    so all slots must be shifted to maintain consistency
                 #    Only update for active sequences
                 for k_norm in tl.range(0, K):
-                    # Load float32 ring buffer, cast to float64 for computation
                     ring_val = tl.load(
                         ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
-                    ).to(tl.float64)
+                    )
                     ring_val_shifted = ring_val - shift
-                    # Store back as float32 for memory efficiency
                     tl.store(
                         ring_base + k_norm * stride_ring_k + c_idx * stride_ring_c,
-                        ring_val_shifted.to(tl.float32),
+                        ring_val_shifted,
                         mask=active & c_mask,  # Only update for active sequences
                     )
 
                 # 5. Save normalized ring buffer to checkpoint
                 #    Only save for active sequences with valid checkpoint index
-                #    Load float32 ring buffer and cast to float64 for checkpoint storage
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
-                    ).to(tl.float64)
+                    )
                     # Only save if checkpoint index is valid AND sequence is active
                     save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
@@ -555,12 +552,12 @@ if HAS_TRITON:
                 start_pos = t - k
                 ring_k_idx = start_pos % K
 
-                # Load from live ring buffer (float32) and cast to float64
+                # Load from live ring buffer
                 alpha_prev = tl.load(
                     ring_base + ring_k_idx * stride_ring_k + c_idx * stride_ring_c,
                     mask=active & k_valid & c_mask,
                     other=NEG_INF,
-                ).to(tl.float64)
+                )
 
                 cum_end = tl.load(
                     cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
@@ -628,11 +625,11 @@ if HAS_TRITON:
 
             alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
 
-            # Store to live ring buffer (cast float64 -> float32)
+            # Store to live ring buffer
             ring_t_idx = t % K
             tl.store(
                 ring_base + ring_t_idx * stride_ring_k + c_idx * stride_ring_c,
-                alpha_t.to(tl.float32),
+                alpha_t,
                 mask=active & c_mask,
             )
 
@@ -641,13 +638,12 @@ if HAS_TRITON:
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
-                # Load float32 ring buffer and cast to float64 for checkpoint storage
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
-                    ).to(tl.float64)
+                    )
                     # Only save if checkpoint index is valid AND sequence is active
                     save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
@@ -780,12 +776,11 @@ if HAS_TRITON:
                 start_pos = t - k
                 ring_k_idx = start_pos % K
 
-                # Load alpha_prev from live ring buffer (float32) and cast to float64
                 alpha_prev = tl.load(
                     ring_base + ring_k_idx * stride_ring_k + c_idx * stride_ring_c,
                     mask=active & k_valid & c_mask,
                     other=NEG_INF,
-                ).to(tl.float64)
+                )
 
                 cum_end = tl.load(
                     cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
@@ -867,11 +862,11 @@ if HAS_TRITON:
                 mask=active & c_mask,
             )
 
-            # Store to live ring buffer (cast float64 -> float32)
+            # Store to live ring buffer
             ring_t_idx = t % K
             tl.store(
                 ring_base + ring_t_idx * stride_ring_k + c_idx * stride_ring_c,
-                alpha_t.to(tl.float32),
+                alpha_t,
                 mask=active & c_mask,
             )
 
@@ -880,13 +875,12 @@ if HAS_TRITON:
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
             ckpt_idx = t // CHECKPOINT_INTERVAL
             if should_checkpoint:
-                # Load float32 ring buffer and cast to float64 for checkpoint storage
                 for k_save in tl.range(0, K):
                     ring_val = tl.load(
                         ring_base + k_save * stride_ring_k + c_idx * stride_ring_c,
                         mask=c_mask,
                         other=NEG_INF,
-                    ).to(tl.float64)
+                    )
                     # Only save if checkpoint index is valid AND sequence is active
                     save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
                     tl.store(
@@ -977,7 +971,7 @@ if HAS_TRITON:
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         device = cum_scores.device
-        # Note: Mixed precision - ring buffer is float32, checkpoints are float64
+        dtype = torch.float64  # Internal computation in float64 for numerical stability
 
         # Compute checkpoint interval if not provided
         if checkpoint_interval is None:
@@ -1018,16 +1012,13 @@ if HAS_TRITON:
 
         # Live ring buffer (will be L1/L2 cached for small K*C)
         # Initialize to NEG_INF, then set k=0 to 0.0 (initial alpha state)
-        # MIXED PRECISION: Ring buffer is float32 for memory bandwidth,
-        # kernel casts to float64 for accumulation
-        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=torch.float32)
+        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
         ring_buffer[:, 0, :C] = 0.0  # alpha[0, c] = 0.0 for all valid labels
 
         # Checkpoint storage for backward pass
         # Initialize to NEG_INF, then set checkpoint 0, k=0 to 0.0
-        # PRECISION: Checkpoints stay float64 for backward pass accuracy
         ring_checkpoints = torch.full(
-            (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=torch.float64
+            (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
         )
         ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 
@@ -1166,7 +1157,7 @@ if HAS_TRITON:
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
         device = cum_scores.device
-        # Note: Mixed precision - ring buffer is float32, checkpoints are float64
+        dtype = torch.float64  # Internal computation in float64 for numerical stability
 
         # Compute checkpoint interval if not provided
         if checkpoint_interval is None:
@@ -1202,18 +1193,18 @@ if HAS_TRITON:
             stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0
 
         # Allocate outputs
-        partition = torch.empty(batch, device=device, dtype=torch.float64)
+        partition = torch.empty(batch, device=device, dtype=dtype)
         bp_k = torch.zeros((batch, T, C), device=device, dtype=torch.int32)
         bp_c = torch.zeros((batch, T, C), device=device, dtype=torch.int32)
         final_labels = torch.zeros(batch, device=device, dtype=torch.int64)
 
-        # Ring buffer - float32 for memory bandwidth (kernel casts to float64)
-        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=torch.float32)
+        # Ring buffer
+        ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
         ring_buffer[:, 0, :C] = 0.0
 
-        # Checkpoint storage - float64 for backward pass precision
+        # Checkpoint storage
         ring_checkpoints = torch.full(
-            (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=torch.float64
+            (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
         )
         ring_checkpoints[:, 0, 0, :C] = 0.0
 
