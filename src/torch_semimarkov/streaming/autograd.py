@@ -40,9 +40,10 @@ class SemiCRFStreaming(torch.autograd.Function):
         semiring: str = "log",
         proj_start: Optional[torch.Tensor] = None,
         proj_end: Optional[torch.Tensor] = None,
+        checkpoint_interval: Optional[int] = None,
     ) -> torch.Tensor:
         # Detach inputs for forward computation
-        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+        partition, ring_checkpoints, actual_checkpoint_interval, log_norm_checkpoints = (
             semi_crf_streaming_forward_pytorch(
                 cum_scores.detach(),
                 transition.detach(),
@@ -52,6 +53,7 @@ class SemiCRFStreaming(torch.autograd.Function):
                 semiring,
                 proj_start.detach() if proj_start is not None else None,
                 proj_end.detach() if proj_end is not None else None,
+                checkpoint_interval=checkpoint_interval,
             )
         )
 
@@ -69,7 +71,7 @@ class SemiCRFStreaming(torch.autograd.Function):
         )
         ctx.K = K
         ctx.semiring = semiring
-        ctx.checkpoint_interval = checkpoint_interval
+        ctx.checkpoint_interval = actual_checkpoint_interval
 
         return partition
 
@@ -179,9 +181,10 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         proj_start: Optional[torch.Tensor] = None,
         proj_end: Optional[torch.Tensor] = None,
         num_warps: int = 4,
+        checkpoint_interval: Optional[int] = None,
     ) -> torch.Tensor:
         # Use Triton kernel for forward
-        partition, ring_checkpoints, checkpoint_interval, log_norm_checkpoints = (
+        partition, ring_checkpoints, actual_checkpoint_interval, log_norm_checkpoints = (
             launch_streaming_triton_kernel(
                 cum_scores.detach(),
                 transition.detach(),
@@ -189,6 +192,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
                 lengths,
                 K,
                 semiring,
+                checkpoint_interval=checkpoint_interval,
                 proj_start=proj_start.detach() if proj_start is not None else None,
                 proj_end=proj_end.detach() if proj_end is not None else None,
                 num_warps=num_warps,
@@ -213,7 +217,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         )
         ctx.K = K
         ctx.semiring = semiring
-        ctx.checkpoint_interval = checkpoint_interval
+        ctx.checkpoint_interval = actual_checkpoint_interval
         ctx.num_warps = num_warps
 
         return partition_return  # <-- float32 for user
@@ -497,6 +501,7 @@ def semi_crf_streaming_forward(
     use_triton: bool = True,
     use_compile: bool = False,  # Deprecated, kept for API compatibility
     num_warps: int = 4,
+    checkpoint_interval: Optional[int] = None,
 ) -> torch.Tensor:
     r"""Compute Semi-CRF partition function with streaming edge computation.
 
@@ -663,6 +668,7 @@ def semi_crf_streaming_forward(
                 proj_start,
                 proj_end,
                 num_warps,
+                checkpoint_interval,
             )
         else:
             # Pure PyTorch path
@@ -675,6 +681,7 @@ def semi_crf_streaming_forward(
                 semiring,
                 proj_start,
                 proj_end,
+                checkpoint_interval,
             )
     else:
         # Inference path (no gradients)
@@ -687,6 +694,7 @@ def semi_crf_streaming_forward(
                 lengths,
                 K,
                 semiring,
+                checkpoint_interval=checkpoint_interval,
                 proj_start=proj_start,
                 proj_end=proj_end,
                 num_warps=num_warps,
@@ -703,5 +711,6 @@ def semi_crf_streaming_forward(
                 semiring,
                 proj_start,
                 proj_end,
+                checkpoint_interval=checkpoint_interval,
             )
             return partition

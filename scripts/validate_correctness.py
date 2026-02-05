@@ -35,6 +35,7 @@ Usage:
     python validate_correctness.py --scale small    # Quick smoke test
     python validate_correctness.py --scale medium   # Default
     python validate_correctness.py --scale large    # Thorough (slow)
+    python validate_correctness.py --genome         # Genome-scale self-consistency (T=50K, K=100, C=24)
 
     # Finite-diff on specific parameters only
     python validate_correctness.py --test finite-diff --params cum_scores transition
@@ -88,6 +89,8 @@ class ScaleConfig:
     conv_C: int
     conv_K: int
     conv_epochs: int
+    # checkpoint control (None = auto, K = aggressive for stability)
+    checkpoint_interval: int = None
 
 
 SCALES = {
@@ -105,6 +108,15 @@ SCALES = {
         name="large", T=2000, C=32, K=50, batch=4,
         fd_T=30, fd_C=6, fd_K=8, fd_eps=1e-3,
         conv_T=200, conv_C=16, conv_K=20, conv_epochs=150,
+    ),
+    "genome": ScaleConfig(
+        name="genome", T=50000, C=24, K=100, batch=2,
+        # Finite-diff impractical at this scale (placeholder values)
+        fd_T=50, fd_C=8, fd_K=20, fd_eps=1e-3,
+        # Convergence also expensive (placeholder values)
+        conv_T=500, conv_C=16, conv_K=50, conv_epochs=50,
+        # Aggressive checkpointing for numerical stability at genome scale
+        checkpoint_interval=100,  # = K, gives 500 checkpoints instead of 23
     ),
 }
 
@@ -172,8 +184,15 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
     if cfg.T > 100:
         configs.append((2, 50, 8, 10, "small"))
 
+    # Use checkpoint_interval from config (None for auto, K for aggressive)
+    ckpt_interval = cfg.checkpoint_interval
+
     for batch, T, C, K, label in configs:
-        print(f"\n  Config [{label}]: batch={batch}, T={T}, C={C}, K={K}")
+        print(f"\n  Config [{label}]: batch={batch}, T={T}, C={C}, K={K}", end="")
+        if ckpt_interval is not None:
+            print(f", checkpoint_interval={ckpt_interval}")
+        else:
+            print()
 
         cum_scores, transition, duration_bias, lengths = make_inputs(
             batch, T, C, K, device=device
@@ -181,7 +200,8 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
 
         # --- Triton forward ---
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores, transition, duration_bias, lengths, K,
+            checkpoint_interval=ckpt_interval,
         )
 
         # --- Boundary marginals ---
@@ -223,6 +243,7 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         log_Z_ag = semi_crf_streaming_forward(
             cum_scores_ag, transition.detach(), duration_bias.detach(),
             lengths, K, use_triton=True,
+            checkpoint_interval=ckpt_interval,
         )
         log_Z_ag.sum().backward()
         grad_cs = cum_scores_ag.grad  # (batch, T+1, C)
@@ -615,6 +636,10 @@ def main():
         help="Test scale (default: medium)",
     )
     parser.add_argument(
+        "--genome", action="store_true",
+        help="Shortcut for --scale genome --test self-consistency (genome-scale sanity check)",
+    )
+    parser.add_argument(
         "--params",
         nargs="+",
         choices=["cum_scores", "transition", "duration_bias"],
@@ -631,6 +656,11 @@ def main():
         help="Random seed (default: 42)",
     )
     args = parser.parse_args()
+
+    # Handle --genome shortcut
+    if args.genome:
+        args.scale = "genome"
+        args.test = "self-consistency"
 
     cfg = SCALES[args.scale]
 
