@@ -65,6 +65,9 @@ def force_clear_triton_cache():
     - File system operations (cache deletion) complete fully
     - GPU returns to a stable, clean state before the test proceeds
 
+    Additionally, this disables Triton caching for the remainder of the process
+    by setting TRITON_CACHE_DIR to /dev/null, forcing fresh compilation.
+
     Example:
         def test_large_config(self):
             force_clear_triton_cache()
@@ -73,6 +76,7 @@ def force_clear_triton_cache():
     if not torch.cuda.is_available():
         return
 
+    import os
     import time
 
     # Step 1: Synchronize all CUDA operations before clearing anything
@@ -84,20 +88,36 @@ def force_clear_triton_cache():
     # Step 3: Wait for GPU to settle after memory operations
     time.sleep(1.0)
 
-    # Step 4: Clear on-disk Triton cache
+    # Step 4: Clear on-disk Triton cache with retry logic
     try:
         import shutil
         from pathlib import Path
 
         cache_dir = Path.home() / ".triton" / "cache"
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir, ignore_errors=True)
+
+        # Try multiple times with delays in case files are locked
+        for attempt in range(3):
+            try:
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=False)
+                break
+            except (OSError, PermissionError):
+                if attempt < 2:
+                    time.sleep(0.5)
+                else:
+                    # Last resort: try with ignore_errors
+                    if cache_dir.exists():
+                        shutil.rmtree(cache_dir, ignore_errors=True)
 
     except ImportError:
         # Required imports not available, skip
         pass
 
-    # Step 5: Final sync and settling time to ensure clean GPU state
+    # Step 5: Disable Triton caching entirely by redirecting cache to /dev/null
+    # This forces fresh compilation and prevents any cache reuse
+    os.environ["TRITON_CACHE_DIR"] = "/dev/null"
+
+    # Step 6: Final sync and settling time to ensure clean GPU state
     torch.cuda.synchronize()
     time.sleep(1.0)
 

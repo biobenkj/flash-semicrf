@@ -126,7 +126,11 @@ class TestTritonMarginalsBasic:
         )
 
     def test_triton_marginals_variable_lengths(self, cuda_device):
-        """Marginals should handle variable sequence lengths correctly."""
+        """Marginals should handle variable sequence lengths correctly.
+
+        This test is sensitive to Triton cache contamination with variable
+        length configurations. Clear cache to ensure clean compilation.
+        """
         from torch_semimarkov.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
@@ -136,6 +140,8 @@ class TestTritonMarginalsBasic:
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
+
+        force_clear_triton_cache()
 
         torch.manual_seed(123)
         if torch.cuda.is_available():
