@@ -3,6 +3,32 @@
 These tests verify that the Triton kernel for computing boundary marginals
 matches the PyTorch reference implementation. They require CUDA and are
 designed to be run on HPC with GPU compute.
+
+IMPORTANT: Random Number Generation and Numerical Precision
+------------------------------------------------------------
+These tests generate random data in float32 (default dtype) then convert to float64
+for cumulative sum and kernel computation:
+
+    scores = torch.randn(..., device=cuda_device).to(torch.float64)  # CORRECT
+
+NOT:
+
+    scores = torch.randn(..., device=cuda_device, dtype=torch.float64)  # WRONG
+
+**Why this matters:**
+1. PyTorch's RNG generates different values for dtype=float64 vs float32.to(float64)
+2. The Triton kernels compute internally in float64 for numerical stability
+3. Tests compare Triton (float64) vs PyTorch reference (also float64)
+4. Small numerical differences from different RNG paths can push results outside
+   tolerance (rtol=0.01, atol=1e-4), especially for batch=1 or edge cases
+5. Using .to(torch.float64) ensures consistent random values across test runs
+   and matches the original test intent when tests were written in float32
+
+**If you modify these tests:**
+- Keep the pattern: generate in float32, then .to(torch.float64)
+- Don't use dtype=torch.float64 directly in torch.randn/torch.zeros (except for
+  the cumsum buffer which never had random values)
+- If tests start failing with "marginals don't match", check RNG dtype consistency
 """
 
 import pytest
@@ -43,13 +69,14 @@ class TestTritonMarginalsBasic:
         batch, T, C, K = 4, 100, 8, 16
 
         # Setup - create cumulative scores in float64
-        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)  # Zero-center
         cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
@@ -115,13 +142,14 @@ class TestTritonMarginalsBasic:
         lengths_list = [100, 80, 60, 40]
 
         # Setup - create cumulative scores in float64
-        scores = torch.randn(batch, T_max, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T_max, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
         cum_scores_f64 = torch.zeros(batch, T_max + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.tensor(lengths_list, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
@@ -179,13 +207,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 50, 4, 1
 
-        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
         cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
@@ -238,13 +267,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 16, 4, 16
 
-        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
         cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
@@ -297,13 +327,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 1, 100, 8, 16
 
-        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
         cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
@@ -356,13 +387,14 @@ class TestTritonMarginalsEdgeCases:
             torch.cuda.manual_seed_all(42)
         batch, T, C, K = 2, 200, 4, 64
 
-        scores = torch.randn(batch, T, C, device=cuda_device, dtype=torch.float64)
+        # Generate in default dtype (float32) then convert to float64 for cumsum
+        scores = torch.randn(batch, T, C, device=cuda_device).to(torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
         cum_scores_f64 = torch.zeros(batch, T + 1, C, device=cuda_device, dtype=torch.float64)
         cum_scores_f64[:, 1:] = torch.cumsum(scores, dim=1)
 
-        transition_f64 = torch.randn(C, C, device=cuda_device, dtype=torch.float64)
-        duration_bias_f64 = torch.randn(K, C, device=cuda_device, dtype=torch.float64)
+        transition_f64 = torch.randn(C, C, device=cuda_device).to(torch.float64)
+        duration_bias_f64 = torch.randn(K, C, device=cuda_device).to(torch.float64)
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
         # PyTorch reference
