@@ -258,11 +258,8 @@ def run_sweep(
             if r.status == "success":
                 tp = (B * T) / (r.time_ms_median / 1000) if r.time_ms_median > 0 else 0
                 tp_str = _format_throughput(tp)
-                std_str = (
-                    f"{r.time_ms_std:.1f}ms"
-                    if r.time_ms_std < 1000
-                    else f"{r.time_ms_std/1000:.2f}s"
-                )
+                iqr = r.time_ms_iqr_high - r.time_ms_iqr_low
+                std_str = f"{iqr:.1f}ms" if iqr < 1000 else f"{iqr/1000:.2f}s"
                 print(
                     f"  {T:>8} | {r.time_ms_median:>8.1f}ms | {std_str:>8} | {r.peak_allocated_gb:>8.3f}GB | "
                     f"{r.peak_reserved_gb:>8.3f}GB | {tp_str:>14} | ok"
@@ -293,7 +290,6 @@ def _skip_result(T, K, C, B, backend, semiring, phase, reason) -> BenchmarkResul
         time_ms_median=float("nan"),
         time_ms_iqr_low=float("nan"),
         time_ms_iqr_high=float("nan"),
-        time_ms_std=float("nan"),
         time_per_position_ms=float("nan"),
         peak_allocated_gb=float("nan"),
         peak_reserved_gb=float("nan"),

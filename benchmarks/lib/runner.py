@@ -203,9 +203,7 @@ def _run_edge_tensor_benchmark(
                 # Use CheckpointShardSemiring to reduce peak memory at cost of time
                 from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
 
-                ShardedSemiring = CheckpointShardSemiring(
-                    struct_to_use.semiring, max_size=10000
-                )
+                ShardedSemiring = CheckpointShardSemiring(struct_to_use.semiring, max_size=10000)
                 struct_sharded = SemiMarkov(ShardedSemiring)
                 v, _, _ = struct_sharded._dp_binary_tree(edge_input, lengths, force_grad=True)
                 return v
