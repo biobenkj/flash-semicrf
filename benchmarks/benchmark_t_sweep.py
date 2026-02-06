@@ -449,6 +449,8 @@ def generate_figures(
         s = BACKEND_STYLE.get(b, {"color": "gray", "marker": "o", "ls": "-", "label": b})
         Ts = [r.T for r in ok[b]]
         times = [r.time_ms_median for r in ok[b]]
+        lo = [r.time_ms_iqr_low for r in ok[b]]
+        hi = [r.time_ms_iqr_high for r in ok[b]]
         ax.plot(
             Ts,
             times,
@@ -459,6 +461,7 @@ def generate_figures(
             markersize=5,
             linewidth=1.5,
         )
+        ax.fill_between(Ts, lo, hi, color=s["color"], alpha=0.12)
 
     # Mark OOM boundaries
     for b in active:
@@ -617,6 +620,9 @@ def generate_figures(
         Ts = [r.T for r in ok[b]]
         # positions per second = T / (time_ms / 1000) = T * 1000 / time_ms
         throughput = [r.T * 1000 / r.time_ms_median for r in ok[b]]
+        # IQR on throughput: faster time -> higher throughput (bounds invert)
+        tp_lo = [r.T * 1000 / r.time_ms_iqr_high for r in ok[b]]
+        tp_hi = [r.T * 1000 / r.time_ms_iqr_low for r in ok[b]]
         ax.plot(
             Ts,
             throughput,
@@ -627,6 +633,7 @@ def generate_figures(
             markersize=5,
             linewidth=1.5,
         )
+        ax.fill_between(Ts, tp_lo, tp_hi, color=s["color"], alpha=0.12)
         # Annotate last point with throughput value
         if throughput:
             val = throughput[-1]
