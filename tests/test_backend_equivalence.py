@@ -824,15 +824,6 @@ class TestStreamingVsTorchStructVariableLengths:
         max_diff = (v_ts.detach() - partition_streaming.detach()).abs().max().item()
         assert max_diff < 1e-6, f"Variable length partition differs by {max_diff:.2e}"
 
-        # Also verify per-batch element
-        for b in range(B):
-            diff = abs(v_ts[b].item() - partition_streaming[b].item())
-            assert diff < 1e-6, (
-                f"Batch {b} (len={lengths_streaming[b].item()}): "
-                f"ts={v_ts[b].item():.6f} vs streaming={partition_streaming[b].item():.6f}, "
-                f"diff={diff:.2e}"
-            )
-
     def test_variable_lengths_all_linear_backends(self):
         """All linear torch-struct backends match streaming for variable lengths."""
         T_streaming, K, C, B = 24, 5, 4, 3
