@@ -77,6 +77,8 @@ ALL_BACKENDS = [
     "triton_streaming",
     "linear_scan_streaming",
     "linear_scan_vectorized",
+    "linear_scan",
+    "binary_tree",
     "binary_tree_sharded",
 ]
 
