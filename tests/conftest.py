@@ -52,13 +52,18 @@ def skip_if_no_cuda():
 
 
 def force_clear_triton_cache():
-    """Force clear Triton cache (both on-disk and CUDA state).
+    """Force clear Triton cache (both on-disk and CUDA state) with GPU settling time.
 
     This is a helper function that can be called explicitly from tests that
     are particularly sensitive to cache contamination. Use this when:
     - A test uses significantly different config than preceding tests
     - Test order dependencies are suspected
     - Numerical precision issues arise from cached kernels
+
+    The function includes proper synchronization and settling time to ensure:
+    - All pending CUDA operations complete before cache clearing
+    - File system operations (cache deletion) complete fully
+    - GPU returns to a stable, clean state before the test proceeds
 
     Example:
         def test_large_config(self):
@@ -68,11 +73,22 @@ def force_clear_triton_cache():
     if not torch.cuda.is_available():
         return
 
+    import time
+
+    # Step 1: Synchronize all CUDA operations before clearing anything
+    torch.cuda.synchronize()
+
+    # Step 2: Clear CUDA memory cache
+    torch.cuda.empty_cache()
+
+    # Step 3: Wait for GPU to settle after memory operations
+    time.sleep(1.0)
+
+    # Step 4: Clear on-disk Triton cache
     try:
         import shutil
         from pathlib import Path
 
-        # Clear on-disk cache (no need to import triton, just clear the cache dir)
         cache_dir = Path.home() / ".triton" / "cache"
         if cache_dir.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -81,27 +97,25 @@ def force_clear_triton_cache():
         # Required imports not available, skip
         pass
 
-    # Clear CUDA state
-    torch.cuda.empty_cache()
+    # Step 5: Final sync and settling time to ensure clean GPU state
     torch.cuda.synchronize()
+    time.sleep(1.0)
 
 
-@pytest.fixture(autouse=True)
-def clear_triton_cache():
-    """Clear Triton cache directory before each test to prevent cache contamination.
+@pytest.fixture
+def clear_triton_cache_fixture():
+    """Optional fixture to clear Triton cache before a test.
 
-    This fixture prevents test order dependencies caused by Triton kernel caching.
-    When running the full test suite, earlier tests may compile kernels with
-    autotuning parameters optimized for their specific configurations. Later tests
-    that reuse these cached kernels can produce slightly different numerical results.
+    This fixture can be used explicitly by tests that need cache clearing.
+    It is NOT autouse to avoid excessive cache clearing and timing issues.
 
-    This is especially important for tests with varying:
-    - Sequence lengths (T)
-    - Duration parameters (K)
-    - Number of classes (C)
-    - Batch sizes
+    Tests should prefer calling force_clear_triton_cache() directly at the
+    start of the test method for more control over when clearing happens.
 
-    The fixture deletes ~/.triton/cache before each test to force fresh compilation.
+    Usage:
+        def test_something(self, clear_triton_cache_fixture):
+            # Cache is cleared before this test
+            ...
     """
     if not torch.cuda.is_available():
         yield
