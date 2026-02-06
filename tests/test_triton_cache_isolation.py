@@ -7,6 +7,8 @@ test order dependencies caused by Triton kernel cache contamination.
 import pytest
 import torch
 
+from tests.conftest import force_clear_triton_cache
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestTritonCacheIsolation:
@@ -59,6 +61,9 @@ class TestTritonCacheIsolation:
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
+
+        # Explicitly clear cache to demonstrate the helper function usage
+        force_clear_triton_cache()
 
         from torch_semimarkov.streaming import (
             launch_streaming_triton_kernel,

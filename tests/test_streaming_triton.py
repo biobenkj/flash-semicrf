@@ -7,6 +7,7 @@ Validates the Triton implementation against the PyTorch reference.
 import pytest
 import torch
 
+from tests.conftest import force_clear_triton_cache
 from torch_semimarkov.streaming import (
     HAS_TRITON,
     semi_crf_streaming_forward_pytorch,
@@ -239,7 +240,15 @@ class TestTritonStreamingKernel:
         assert torch.allclose(ckpt_0[:, 0, :], torch.zeros_like(ckpt_0[:, 0, :]))
 
     def test_triton_larger_sequence(self):
-        """Verify Triton kernel works with larger sequences."""
+        """Verify Triton kernel works with larger sequences.
+
+        This test is particularly sensitive to Triton cache contamination from
+        earlier tests with smaller configurations. We explicitly clear the cache
+        to ensure kernels are compiled with appropriate autotuning parameters
+        for the larger sequence length (T=500).
+        """
+        force_clear_triton_cache()
+
         batch, T, K, C = 2, 500, 16, 8
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
             batch, T, K, C, device="cuda"

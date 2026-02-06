@@ -51,6 +51,41 @@ def skip_if_no_cuda():
         pytest.skip("CUDA not available")
 
 
+def force_clear_triton_cache():
+    """Force clear Triton cache (both on-disk and CUDA state).
+
+    This is a helper function that can be called explicitly from tests that
+    are particularly sensitive to cache contamination. Use this when:
+    - A test uses significantly different config than preceding tests
+    - Test order dependencies are suspected
+    - Numerical precision issues arise from cached kernels
+
+    Example:
+        def test_large_config(self):
+            force_clear_triton_cache()
+            # ... rest of test
+    """
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        import shutil
+        from pathlib import Path
+
+        # Clear on-disk cache (no need to import triton, just clear the cache dir)
+        cache_dir = Path.home() / ".triton" / "cache"
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+
+    except ImportError:
+        # Required imports not available, skip
+        pass
+
+    # Clear CUDA state
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+
 @pytest.fixture(autouse=True)
 def clear_triton_cache():
     """Clear Triton cache directory before each test to prevent cache contamination.
@@ -72,21 +107,8 @@ def clear_triton_cache():
         yield
         return
 
-    try:
-        import triton
-        import shutil
-        from pathlib import Path
-
-        # Get Triton cache directory (usually ~/.triton/cache)
-        cache_dir = Path.home() / ".triton" / "cache"
-
-        # Delete the cache directory if it exists
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir, ignore_errors=True)
-
-    except ImportError:
-        # Triton not installed, skip cache clearing
-        pass
+    # Use the helper function to clear cache
+    force_clear_triton_cache()
 
     yield
 
