@@ -9,7 +9,7 @@ Generates synthetic gene sequences with known structure:
 - Simple label scheme: C=3-5 labels
 
 This provides ground truth for evaluating Semi-CRF duration learning.
-The key insight: if Semi-CRF learns duration distributions that match
+The important observation: if Semi-CRF learns duration distributions that match
 the known generating distributions, it validates the duration modeling
 capability that linear CRFs cannot provide.
 

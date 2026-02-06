@@ -391,6 +391,7 @@ class TestK3TritonBoundary:
             partition_pytorch,
             rtol=1e-4,
             atol=1e-4,
+            check_dtype=False,
             msg="K=3 Triton should match PyTorch reference",
         )
 
@@ -474,6 +475,7 @@ class TestK3TritonBoundary:
             partition_pytorch,
             rtol=1e-4,
             atol=1e-4,
+            check_dtype=False,
             msg="K=3 variable lengths: Triton should match PyTorch",
         )
 
@@ -499,6 +501,7 @@ class TestK3TritonBoundary:
             partition_pytorch,
             rtol=1e-4,
             atol=1e-4,
+            check_dtype=False,
             msg="K=3 max semiring: Triton should match PyTorch",
         )
 

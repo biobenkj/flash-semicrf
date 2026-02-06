@@ -255,7 +255,7 @@ if HAS_TRITON:
         # Load batch-specific values
         # Cast seq_len to int32 to match loop variable type from tl.range
         seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
-        log_Z = tl.load(log_Z_ptr + batch_idx)
+        log_Z = tl.load(log_Z_ptr + batch_idx).to(tl.float64)
         grad_out = tl.load(grad_output_ptr + batch_idx)
 
         # Clamp indices to ensure address calculations stay within bounds
@@ -318,7 +318,7 @@ if HAS_TRITON:
             # This is needed to restore the scale when computing marginals
             log_norm_at_ckpt = tl.load(
                 log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n
-            )
+            ).to(tl.float64)
 
             # Compute segment-specific workspace base pointers for deterministic accumulation.
             # Each segment writes to its own workspace slice, eliminating cross-segment atomics.
@@ -712,7 +712,9 @@ if HAS_TRITON:
                                 #   log_norm_at_ckpt accumulated all shifts up to seg_start (~125k at midpoint)
                                 #   Must add back to compute correct marginal: exp(alpha + edge + beta - log_Z)
                                 #   where log_Z is at full scale (~250k at T=100k)
-                                log_scale = global_max_safe + log_norm_at_ckpt - log_Z
+                                log_scale = (
+                                    global_max_safe.to(tl.float64) + log_norm_at_ckpt - log_Z
+                                )
 
                                 # Clamp scale to prevent overflow/underflow
                                 log_scale_clamped = tl.minimum(
@@ -1066,6 +1068,8 @@ if HAS_TRITON:
                         # from ring buffer initialization instead of the values just stored at t.
                         # Debug analysis showed: tile_start=0 gets correct values, tile_start=4 gets NEG_INF.
                         tl.debug_barrier()
+            # CRITICAL: Sync all warps before starting next segment
+            tl.debug_barrier()
 
     def _compute_tile_c(C: int) -> int:
         """Compute adaptive TILE_C for c_dst dimension tiling.
@@ -1205,7 +1209,7 @@ if HAS_TRITON:
         T = T_plus_1 - 1
         K = duration_bias.shape[0]
         device = cum_scores.device
-        dtype = cum_scores.dtype
+        dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
 
         num_checkpoints = ring_checkpoints.shape[1]
         C_PAD = _next_power_of_2(C)

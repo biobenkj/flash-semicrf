@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `0c9b73e`
+**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `9dfa110`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -63,52 +63,57 @@ if needs_grad:
 
 ```
 Inputs:
-  cum_scores: (B, T+1, C) float32     <- Zero-centered cumsum of projected scores
-  transition: (C, C) or (K, C, C)     <- Label transition matrix
-  duration_bias: (K, C)               <- Duration-specific bias
+  cum_scores: (B, T+1, C) float64     <- Zero-centered cumsum of projected scores
+  transition: (C, C) or (K, C, C)     <- Label transition matrix (float64)
+  duration_bias: (K, C)               <- Duration-specific bias (float64)
   lengths: (B,)                       <- Sequence lengths
-  proj_start: (B, T, C) optional      <- Start boundary scores
-  proj_end: (B, T, C) optional        <- End boundary scores
+  proj_start: (B, T, C) optional      <- Start boundary scores (float64)
+  proj_end: (B, T, C) optional        <- End boundary scores (float64)
 
-Launcher allocates (triton_forward.py:1000-1018):
-  partition: (B,)                     <- Output
-  ring_buffer: (B, K, C_PAD)          <- Live ring buffer (initialized: [0,:,0,:C]=0, rest=NEG_INF)
-  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved states for backward
-  log_norm_checkpoints: (B, num_ckpts)       <- Cumulative normalization factors
+Launcher allocates (triton_forward.py:1011-1030):
+  partition: (B,) float64             <- Output
+  ring_buffer: (B, K, C_PAD) float64  <- Live ring buffer (initialized: [0,:,0,:C]=0, rest=NEG_INF)
+  ring_checkpoints: (B, num_ckpts, K, C_PAD) float64 <- Saved states for backward
+  log_norm_checkpoints: (B, num_ckpts) float64       <- Cumulative normalization factors
 
 Kernel produces:
-  partition: (B,)                     <- Log partition function
-  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Checkpoints at interval boundaries
-  log_norm_checkpoints: (B, num_ckpts)       <- For numerical stability at extreme T
+  partition: (B,) float64             <- Log partition function
+  ring_checkpoints: (B, num_ckpts, K, C_PAD) float64 <- Checkpoints at interval boundaries
+  log_norm_checkpoints: (B, num_ckpts) float64       <- For numerical stability at extreme T
 ```
 
 ## Algorithm Steps
 
-### 1. Buffer Initialization (triton_forward.py:1003-1018)
+### 1. Buffer Initialization (triton_forward.py:1015-1030)
 
 ```python
-ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=dtype)
+# dtype = torch.float64 (line 974) - All internal computation uses float64
+ring_buffer = torch.full((batch, K, C_PAD), NEG_INF, device=device, dtype=torch.float64)
 ring_buffer[:, 0, :C] = 0.0  # alpha[0, c] = 0.0 for all valid labels
 
-ring_checkpoints = torch.full((batch, num_ckpts, K, C_PAD), NEG_INF, ...)
+ring_checkpoints = torch.full((batch, num_ckpts, K, C_PAD), NEG_INF, device=device, dtype=torch.float64)
 ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 
-log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=dtype)
+log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=torch.float64)
 ```
 
 ### 2. Kernel Launch (triton_forward.py:1042-1084)
 
 Grid: `(batch,)` - one program per batch element
 
-### 3. Main Forward Loop (triton_forward.py:208-420)
+### 3. Main Forward Loop (triton_forward.py:201-422)
 
 ```
+# Initialize tracking variables (line 201)
+final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+accum_log_norm = tl.zeros((), dtype=tl.float64)  # line 205
+
 for t in range(1, T + 1):  # t = 1, 2, ..., T
     # ACTIVE MASKING: Include t == seq_len to compute alpha at final position
     # NOTE: Both t and seq_len are cast to int32 for consistent Triton comparison
     active = t.to(tl.int32) <= seq_len  # seq_len loaded as int32
 
-    alpha_t = full([C_PAD], NEG_INF)
+    alpha_t = full([C_PAD], NEG_INF, dtype=tl.float64)  # line 214
 
     for k in range(1, K + 1):  # k = 1, 2, ..., K
         k_valid = (k <= t) & (k <= K)
@@ -254,9 +259,9 @@ Backward recomputes forward between checkpoints using saved ring states.
 
 | Metric | Value |
 |--------|-------|
-| **Expected dtype** | float32 (float16 causes overflow in LogSumExp) |
-| **Accumulator dtype** | float32 always |
-| **SRAM Usage** | `C_PAD * K * 4` bytes per block (ring buffer) |
+| **Internal dtype** | float64 (triton_forward.py:974) for numerical stability |
+| **Accumulator dtype** | float64 always (tl.float64 for all registers) |
+| **SRAM Usage** | `C_PAD * K * 8` bytes per block (ring buffer, float64) |
 | **Grid Dim** | `(batch,)` - one program per batch element |
 | **num_warps** | Default 4; range 2-8 |
 | **Triton Special** | No atomic adds; use `tl.sum` reduction |
@@ -309,8 +314,8 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | Duration-dependent transition off-by-one | Critical | HAS_DURATION_TRANSITIONS | Use `dur_idx` not `k` for indexing | `09e86ed` |
 | K=1/K=2 ring buffer aliasing | Critical | Always | Dispatch to specialized paths | `870bd1f` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
-| Float16 overflow | High | Long sequences | Force float32 inputs | - |
-| Non-power-of-2 C | Medium | Always | Pad to C_PAD | triton_forward.py:975 |
+| Numerical precision at extreme T | High | T > 100K | All kernels now use float64 internally | `9dfa110` |
+| Non-power-of-2 C | Medium | Always | Pad to C_PAD | triton_forward.py:985 |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len and t to int32 | `49d9d61` |
 | NEG_INF comparison failure | Critical | Variable-length + checkpointing | Use `active` directly for shift | `49d9d61` |
 
@@ -333,6 +338,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-05**: Migrated all internal computation to float64 for numerical stability; updated dtype annotations throughout; updated to commit `9dfa110`
 - **2026-02-02**: Updated to commit `0c9b73e` (minor comment cleanup)
 - **2026-02-02**: Fixed int32/int64 type mismatch in Triton comparisons; `seq_len` loaded as int32, `t` cast to int32 for `active` and `is_final` comparisons; checkpoint normalization now uses `active` directly instead of NEG_INF comparison (workaround for silent comparison failure); updated to commit `49d9d61`
 - **2026-02-02**: Updated for active masking changes; all kernel operations now properly masked for variable-length sequences; checkpoint normalization uses `active` to prevent phantom shifts; line numbers updated for commit `d9aff99`

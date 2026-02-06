@@ -1,6 +1,6 @@
 # Streaming Semi-CRF Internals
 
-Technical reference for developers working with the streaming inference module.
+Technical reference for working with the streaming inference module.
 
 ## Overview
 
@@ -21,16 +21,51 @@ The streaming approach reduces memory to **O(K × C)** by:
 1. Using a **ring buffer** for forward/backward messages
 2. Computing edge potentials **on-the-fly** from cumulative scores
 3. **Checkpointing** the ring buffer state for the backward pass
+4. **Per-checkpoint log normalization** for numerical stability at extreme T
 
 ### Module Structure
 
 | File | Purpose |
 |------|---------|
-| [autograd.py](../src/torch_semimarkov/streaming/autograd.py) | Public API and autograd functions |
+| [autograd.py](../src/torch_semimarkov/streaming/autograd.py) | Public API, autograd functions, and K-dispatch logic |
 | [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py) | Triton forward kernels (log/max semiring) |
-| [triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py) | Triton backward kernel |
+| [triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py) | Triton backward kernel with loop tiling |
+| [triton_cache.py](../src/torch_semimarkov/streaming/triton_cache.py) | Triton cache validation utilities |
 | [pytorch_reference.py](../src/torch_semimarkov/streaming/pytorch_reference.py) | Pure PyTorch reference implementation |
 | [constants.py](../src/torch_semimarkov/streaming/constants.py) | Shared constants (NEG_INF) |
+
+---
+
+## K-Dispatch Logic
+
+The streaming module automatically routes to optimized implementations based on K:
+
+| K Value | Implementation | Memory | Notes |
+|---------|---------------|--------|-------|
+| K=1 | Linear CRF fast path | O(batch × C) | No ring buffer, no duration loop |
+| K=2 | Specialized 2-step path | O(batch × C) | Explicit history, no ring buffer |
+| K≥3 | Triton streaming kernel | O(K × C) | Ring buffer architecture |
+
+**Important observation**: The Triton kernels require K≥3 because the ring buffer architecture assumes meaningful separation between timesteps. K=1 causes ring buffer aliasing (all `t % 1 = 0`), and K=2 has ring buffer fragility.
+
+From [autograd.py:602-656](../src/torch_semimarkov/streaming/autograd.py#L602-L656):
+
+```python
+# K=1 Fast Path: Linear CRF (no ring buffer, no duration loop)
+if K == 1:
+    return LinearCRFStreaming.apply(...)
+
+# K=2 Fast Path: Explicit 2-step history (no ring buffer)
+if K == 2:
+    return SemiCRFK2Streaming.apply(...)
+
+# K>=3: Triton streaming kernel (ring buffer architecture)
+can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+if can_use_triton:
+    return SemiCRFStreamingTriton.apply(...)
+else:
+    return SemiCRFStreaming.apply(...)  # Pure PyTorch fallback
+```
 
 ---
 
@@ -61,7 +96,7 @@ edge[..., c_dst, c_src]  # Transition FROM c_src TO c_dst
 
 This means:
 - `transition[c_src, c_dst]` stores score for c_src → c_dst
-- When computing edges, we use `transition.T` to get `[c_dst, c_src]` layout
+- But when computing edges, we use `transition.T` to get `[c_dst, c_src]` layout
 
 ### Cumulative Score Layout
 
@@ -143,7 +178,7 @@ content_score = cum_scores[t, c_dst] - cum_scores[t-k, c_dst]
 From [triton_forward.py:232-295](../src/torch_semimarkov/streaming/triton_forward.py#L232-L295) (kernel implementation):
 
 ```python
-# Content score via cumsum difference
+# Content score via cumulative sum difference
 cum_end = tl.load(cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c, ...)
 cum_start = tl.load(cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c, ...)
 content_score = cum_end - cum_start  # (C_PAD,)
@@ -230,7 +265,7 @@ Forward recurrence:
 
 ### Kernel Entry Point
 
-From [triton_forward.py:84-135](../src/torch_semimarkov/streaming/triton_forward.py#L84-L135):
+From [triton_forward.py:83-135](../src/torch_semimarkov/streaming/triton_forward.py#L83-L135):
 
 ```python
 @triton.jit
@@ -244,13 +279,16 @@ def semi_crf_streaming_scan_kernel(
     out_ptr,             # (batch,) - partition function
     ring_ptr,            # (batch, K, C_PAD) - live ring buffer
     ring_ckpt_ptr,       # (batch, num_ckpts, K, C_PAD) - checkpoints
+    log_norm_ckpt_ptr,   # (batch, num_ckpts) - cumulative log normalization
     ...
 ):
 ```
 
 ### Initialization
 
-From [triton_forward.py:1015-1023](../src/torch_semimarkov/streaming/triton_forward.py#L1015-L1023):
+The ring buffer and checkpoint 0 are pre-initialized by the launcher:
+
+From launcher code:
 
 ```python
 # Ring buffer initialized in launcher
@@ -262,17 +300,23 @@ ring_checkpoints = torch.full(
     (batch, num_checkpoints, K, C_PAD), NEG_INF, device=device, dtype=dtype
 )
 ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
+
+# Log normalization checkpoints
+log_norm_checkpoints = torch.zeros(batch, num_checkpoints, device=device, dtype=dtype)
 ```
 
 ### Main Loop Structure
 
-From [triton_forward.py:208-337](../src/torch_semimarkov/streaming/triton_forward.py#L208-L337):
+From [triton_forward.py:207-338](../src/torch_semimarkov/streaming/triton_forward.py#L207-L338):
 
 ```python
+# Cumulative log normalization factor for numerical stability at extreme T
+accum_log_norm = tl.zeros((), dtype=tl.float64)
+
 for t in tl.range(1, T + 1):
     # Cast t to int32 to match seq_len type for consistent comparison
     active = t.to(tl.int32) <= seq_len
-    alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float32)
+    alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
     for k in tl.range(1, K + 1):
         k_valid = (k <= t) & (k <= K)
@@ -343,13 +387,14 @@ We use option 3 with checkpoint interval S = √(T×K).
 
 ```python
 ring_checkpoints: (batch, num_ckpts, K, C)
+log_norm_checkpoints: (batch, num_ckpts)
 ```
 
-At each checkpoint position `i × S`, we save the entire ring buffer state.
+At each checkpoint position `i × S`, we save the entire ring buffer state and the cumulative log normalization factor.
 
 ### Checkpoint Interval Calculation
 
-From [pytorch_reference.py:25-45](../src/torch_semimarkov/streaming/pytorch_reference.py#L25-L45):
+From [pytorch_reference.py:15-18](../src/torch_semimarkov/streaming/pytorch_reference.py#L15-L18):
 
 ```python
 def _compute_checkpoint_interval(T: int, K: int) -> int:
@@ -362,17 +407,42 @@ def _compute_checkpoint_interval(T: int, K: int) -> int:
     return max(K, optimal)  # At least K
 ```
 
-### Saving Checkpoints
+### Saving Checkpoints with Normalization
 
-From the forward kernel:
+From [triton_forward.py:339-414](../src/torch_semimarkov/streaming/triton_forward.py#L339-L414):
 
 ```python
 should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
 ckpt_idx = t // CHECKPOINT_INTERVAL
 if should_checkpoint:
+    # ===== NORMALIZATION STEP (for numerical stability at extreme T) =====
+    # Following Flash Attention pattern: normalize at checkpoints
+    
+    # 1. Find max alpha value for normalization (active sequences only)
+    alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
+    max_val = tl.max(alpha_for_norm)
+    shift = tl.where(active, max_val, 0.0)
+    
+    # 2. Update cumulative normalization factor
+    accum_log_norm = accum_log_norm + shift
+    
+    # 3. Normalize alpha_t register
+    alpha_t = alpha_t - shift
+    
+    # 4. Normalize ALL K slots in ring buffer
+    for k_norm in tl.range(0, K):
+        ring_val = tl.load(ring_base + k_norm * stride_ring_k + ...)
+        ring_val_shifted = ring_val - shift
+        tl.store(ring_base + k_norm * stride_ring_k + ..., ring_val_shifted, mask=active & c_mask)
+    
+    # 5. Save normalized ring buffer to checkpoint
     for k_save in tl.range(0, K):
         ring_val = tl.load(ring_base + k_save * stride_ring_k + ...)
-        tl.store(ring_ckpt_base + ckpt_idx * stride_ckpt_n + k_save * stride_ckpt_k + ...)
+        tl.store(ring_ckpt_base + ckpt_idx * stride_ckpt_n + k_save * stride_ckpt_k + ..., ring_val)
+    
+    # 6. Save cumulative log normalization factor
+    if (ckpt_idx < NUM_CKPTS) & active:
+        tl.store(log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n, accum_log_norm)
 ```
 
 ---
@@ -453,7 +523,7 @@ The additional storage is negligible:
 
 ```python
 log_norm_checkpoints: (batch, num_checkpoints)
-# At T=100k with ~14 checkpoints: 14 × batch × 4 bytes = 56 bytes/sequence
+# At T=100k with ~14 checkpoints: 14 × batch × 8 bytes = 112 bytes/sequence (float64)
 ```
 
 ### Literature Grounding
@@ -467,23 +537,6 @@ This technique synthesizes established methods:
 3. **CTC (Graves et al., 2006)** — Connectionist Temporal Classification uses similar log-space normalization for numerical stability.
 
 4. **Gradient Checkpointing (Chen et al., 2016)** — Saving intermediate state for memory-efficient backprop; we extend this to include normalization state.
-
-### Implementation Details
-
-**Forward kernel** ([triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py)):
-
-- Checkpoint normalization block: lines 330-380
-- Final partition computation with `accum_log_norm`: line ~405
-
-**Backward kernel** ([triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py)):
-
-- Load `log_norm_at_ckpt` at segment start: line ~305
-- Add to marginal computation: line ~650
-
-**Autograd** ([autograd.py](../src/torch_semimarkov/streaming/autograd.py)):
-
-- Save `log_norm_checkpoints` in forward: `save_for_backward`
-- Pass to backward kernel: backward launcher call
 
 ### Variable-Length Batch Handling
 
@@ -505,24 +558,9 @@ Without masking (BROKEN):
           partition[0] ≈ expected + 2×NEG_INF ≈ -2e9 → COMPLETELY WRONG
 ```
 
-The test failure manifests as ~1e9 difference in partition values for variable-length batches.
-
 #### The Solution: Active Sequence Masking
 
-Both PyTorch and Triton implementations mask the `active` flag when computing normalization shifts:
-
-```text
-At checkpoint boundary (t % interval == 0):
-  1. active = (t <= seq_len[b])
-  2. alpha_for_norm = where(active, α_t, NEG_INF)
-  3. shift = max(alpha_for_norm)
-  4. Guard: if shift == NEG_INF → shift = 0  # Inactive sequence
-  5. accum_log_norm += shift  # Only non-zero for active sequences
-```
-
-**Key insight**: For inactive sequences, `alpha_for_norm` is all `NEG_INF`, so `shift = 0` and `accum_log_norm` freezes at the correct value.
-
-**Triton Implementation** ([triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py)):
+From [triton_forward.py:354-361](../src/torch_semimarkov/streaming/triton_forward.py#L354-L361):
 
 ```python
 # 1. Find max alpha value for normalization (over valid C only)
@@ -530,59 +568,15 @@ At checkpoint boundary (t % interval == 0):
 alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
 max_val = tl.max(alpha_for_norm)
 
-# Guard against all-NEG_INF case (inactive sequence or numerical issue)
-is_all_neginf = max_val < (NEG_INF + 1.0)
-shift = tl.where(is_all_neginf, 0.0, max_val)
+# WORKAROUND: Use `active` directly to determine if we should apply shift
+shift = tl.where(active, max_val, 0.0)
 
 # 2. Update cumulative normalization factor
 #    shift is 0 for inactive sequences, so no phantom updates
 accum_log_norm = accum_log_norm + shift
-
-# 3. Normalize alpha and ring buffer
-alpha_t = alpha_t - shift
-# ... normalize all K ring buffer slots ...
-
-# 4. Save checkpoint with active masking
-save_mask = (ckpt_idx < NUM_CKPTS) & active & c_mask
-tl.store(ring_ckpt_ptr + ..., alpha_t, mask=save_mask)
-tl.store(log_norm_ckpt_ptr + ..., accum_log_norm, mask=(ckpt_idx < NUM_CKPTS) & active)
 ```
 
-**PyTorch Implementation** ([pytorch_reference.py](../src/torch_semimarkov/streaming/pytorch_reference.py)):
-
-```python
-# Normalize at checkpoint boundary
-active_mask = (t <= lengths)  # (batch,)
-
-# Compute shift only for active sequences
-alpha_for_norm = torch.where(
-    active_mask[:, None],
-    alpha_t,
-    torch.full_like(alpha_t, NEG_INF)
-)
-shift = alpha_for_norm.max(dim=-1).values  # (batch,)
-
-# Guard against all-NEG_INF (inactive sequences)
-is_all_neginf = shift < (NEG_INF + 1.0)
-shift = torch.where(is_all_neginf, torch.zeros_like(shift), shift)
-
-# Update accum_log_norm (frozen for inactive sequences)
-accum_log_norm = accum_log_norm + shift
-
-# Apply normalization
-alpha_t = alpha_t - shift[:, None]
-ring_buffer = ring_buffer - shift[:, None, None]
-```
-
-#### Comparison with Flash Attention
-
-Flash Attention explicitly states: "Triton version doesn't support different sequence lengths in a batch (i.e., RaggedTensor/NestedTensor)." Our approach extends the Flash Attention normalization pattern to handle variable-length batches by:
-
-1. **Masking active sequences** in the shift computation
-2. **Zeroing shifts for ended sequences** via the `is_all_neginf` guard
-3. **Freezing `accum_log_norm`** once a sequence ends
-
-This is a novel extension of the Flash Attention technique to the batched variable-length Semi-CRF setting.
+**Important observation**: For inactive sequences, `shift = 0` and `accum_log_norm` freezes at the correct value.
 
 ---
 
@@ -590,9 +584,9 @@ This is a novel extension of the Flash Attention technique to the batched variab
 
 ### Two-Phase Algorithm with Loop Tiling
 
-From [triton_backward.py:56-1037](../src/torch_semimarkov/streaming/triton_backward.py#L56-L1037):
-
 The backward pass processes segments in reverse order with **loop tiling** to reduce register pressure:
+
+From [triton_backward.py:307-326](../src/torch_semimarkov/streaming/triton_backward.py#L307-L326):
 
 ```python
 for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
@@ -600,8 +594,12 @@ for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
     seg_start = ckpt_idx * CHECKPOINT_INTERVAL
     seg_end = min((ckpt_idx + 1) * CHECKPOINT_INTERVAL, T)
 
-    # Load log normalization factor for this checkpoint
-    log_norm_at_ckpt = tl.load(log_norm_ckpt_ptr + ...)
+    # Load cumulative log normalization factor for this checkpoint
+    log_norm_at_ckpt = tl.load(log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n)
+
+    # Compute segment-specific workspace base pointers for deterministic accumulation
+    grad_tr_ws_seg = grad_tr_ws_base + ckpt_idx * stride_gtw_seg
+    grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
 
     # Phase 1: Recompute alpha from checkpoint
     # Phase 2: Compute beta backward + accumulate gradients (TILED)
@@ -611,7 +609,7 @@ for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
 
 Load ring buffer state from checkpoint, then recompute forward through the segment. Alpha buffer is **segment-isolated** to prevent race conditions:
 
-From [triton_backward.py:285-385](../src/torch_semimarkov/streaming/triton_backward.py#L285-L385):
+From [triton_backward.py:340-366](../src/torch_semimarkov/streaming/triton_backward.py#L340-L366):
 
 ```python
 # Alpha buffer has segment dimension: (batch, num_segments, SEGMENT_SIZE, C_PAD)
@@ -638,14 +636,14 @@ for local_t in tl.range(1, SEGMENT_SIZE):
 
 The marginal computation requires a `(C_PAD × C_PAD)` matrix. At C_PAD=64, this demands ~384 registers/thread. With num_warps=4+, this exceeds available registers and causes spilling.
 
-**Solution**: Process c_dst dimension in tiles of TILE_C (typically 16 or 32):
+**Solution**: Process c_dst dimension in tiles of TILE_C (typically 16):
 
-From [triton_backward.py:540-1037](../src/torch_semimarkov/streaming/triton_backward.py#L540-L1037):
+From [triton_backward.py:510-730](../src/torch_semimarkov/streaming/triton_backward.py#L510-L730):
 
 ```python
 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
     t = seg_end - 1 - t_offset
-    if t >= seg_start and t < seq_len:
+    if t >= seg_start and t < seq_len and t >= 0:
         alpha_t = tl.load(alpha_buf_seg + local_t * stride_ab_t + ...)
         new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
 
@@ -669,9 +667,6 @@ for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                     # Load tile, compute marginal = exp(log_joint - global_max) * scale
                     # Accumulate gradients per-tile
-                    ...
-
-                    # Online logsumexp for beta_k (Flash Attention pattern)
                     ...
 
         # Store beta[t] to ring buffer (uses 2*K slots)
@@ -725,8 +720,6 @@ There are two types of parameters:
 
 The Triton backward kernel uses per-segment workspace buffers to eliminate cross-segment atomic contention:
 
-From [triton_backward.py:1375-1420](../src/torch_semimarkov/streaming/triton_backward.py#L1375-L1420):
-
 ```python
 # Workspace shapes include segment dimension for isolation
 # Static transitions: (batch, num_segments, C_PAD, C_PAD)
@@ -743,7 +736,7 @@ grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
 
 After kernel execution, host-side reduction combines per-segment workspaces:
 
-From [triton_backward.py:1480-1515](../src/torch_semimarkov/streaming/triton_backward.py#L1480-L1515):
+From [triton_backward.py:1447-1466](../src/torch_semimarkov/streaming/triton_backward.py#L1447-L1466):
 
 ```python
 # 1. Sum over segments (deterministic order)
@@ -762,50 +755,89 @@ else:
 grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output_f64)
 ```
 
-### Why Float64 Accumulation?
+### Why Float64 for Shared Parameter Gradients?
 
-Gradient tensors use float64 to prevent non-determinism from atomic_add floating-point non-associativity. Error scales as O(sqrt(T×K×C)) per operation; float64 reduces this from ~1e-3 (float32) to ~1e-10 (negligible).
+Shared parameter gradients (`grad_transition`, `grad_duration_bias`) accumulate contributions from all T×K positions. With T=100k and K=1000, this means ~10^8 atomic additions per gradient element. Float32 accumulation would introduce O(sqrt(T×K×C)) error per element, leading to ~1e-3 relative error — visible in training. Float64 reduces this to ~1e-10 (negligible).
 
-### Atomic Optimization in Kernel
-
-For `grad_cum_scores[t]` which is accessed by all K iterations, a scatter-sum pattern accumulates locally before writing once:
-
-From [triton_backward.py:844-870](../src/torch_semimarkov/streaming/triton_backward.py#L844-L870):
-
-```python
-# Local accumulator (one per position t)
-grad_cs_t_local = tl.zeros([C_PAD], dtype=tl.float64)
-
-for k in tl.range(1, K + 1):
-    # ... compute marginals ...
-
-    # Scatter-sum pattern: accumulate across K iterations
-    scatter_mask = (c_idx[:, None] == c_dst_idx_tile[None, :])
-    scatter_values = tl.where(scatter_mask, marginal_sum_src_tile_scaled[None, :], 0.0)
-    grad_cs_t_local -= tl.sum(scatter_values, axis=1)
-
-# Single write after all k iterations (20-50× reduction vs K atomics)
-tl.atomic_add(grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
-              grad_cs_t_local, mask=c_mask)
-```
+Per-position gradients (`grad_cum_scores`) don't accumulate across T, so float32 is sufficient.
 
 ---
 
 ## Numerical Considerations
 
-### Float32 Requirement
+### Float64 Internal Computation
 
-Cumulative scores **must** be float32 for numerical stability at T > 100K:
+All internal computation uses **float64** for numerical stability at extreme sequence lengths. This includes:
 
+**Forward kernel:**
+- `alpha_t`, `final_alpha`: float64 registers
+- `accum_log_norm`: float64 scalar
+- `ring_buffer`: float64 tensor `(batch, K, C_PAD)`
+- `ring_checkpoints`: float64 tensor `(batch, num_ckpts, K, C_PAD)`
+- `log_norm_checkpoints`: float64 tensor `(batch, num_ckpts)`
+- `partition`: float64 output
+
+From [triton_forward.py:974](../src/torch_semimarkov/streaming/triton_forward.py#L974):
 ```python
-# In the kernel docstring warning:
-# cum_scores MUST be float32 for numerical stability at T > 100K.
-# Zero-centering before cumsum is critical to prevent precision loss.
+dtype = torch.float64  # Internal computation in float64 for numerical stability
 ```
 
-### Zero-Centering
+**Backward kernel:**
+- `alpha_buffer`, `beta_ring`: float64 working memory
+- `grad_tr_workspace`, `grad_db_workspace`: float64 (accumulated across T)
+- Kernel-internal accumulators: `tl.float64` for logsumexp safety
 
-Before computing cumulative scores, zero-center the projected scores:
+From [triton_backward.py:1212](../src/torch_semimarkov/streaming/triton_backward.py#L1212):
+```python
+dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
+```
+
+### Selective Precision for Gradients
+
+Gradient tensors use **selective precision** based on their accumulation pattern:
+
+From [triton_backward.py:1276-1285](../src/torch_semimarkov/streaming/triton_backward.py#L1276-L1285):
+```python
+# NUMERICAL STABILITY: Selective precision for gradient tensors.
+# - grad_cum_scores: O(B*T*C) but per-position (no cross-T accumulation) -> float32 OK
+# - grad_transition, grad_duration_bias: small but accumulated across all T -> need float64
+# The kernel-internal accumulators still use tl.float64 for log-sum-exp safety.
+
+grad_cum_scores = torch.zeros(batch, T_plus_1, C_PAD, device=device, dtype=torch.float32)
+grad_tr_workspace = torch.zeros(..., dtype=torch.float64)
+grad_db_workspace = torch.zeros(..., dtype=torch.float64)
+```
+
+| Gradient | Dtype | Rationale |
+|----------|-------|-----------|
+| `grad_cum_scores` | float32 | Per-position, no cross-T accumulation |
+| `grad_transition` | float64 | Accumulated across all T×K positions |
+| `grad_duration_bias` | float64 | Accumulated across all T positions |
+| `grad_proj_start/end` | float32 | Per-position, no cross-T accumulation |
+
+### Autograd Dtype Handling
+
+The autograd function manages dtype conversion between user-facing float32 and internal float64:
+
+From [autograd.py:203-224](../src/torch_semimarkov/streaming/autograd.py#L203-L224):
+```python
+# Cast partition back to input dtype for return, but keep float64 for backward
+partition_f64 = partition  # Keep float64 for backward pass
+partition_return = partition.to(cum_scores.dtype)  # Return float32 to user
+
+# Save float64 version for backward
+ctx.save_for_backward(
+    ...
+    partition_f64,  # <-- float64 for backward numerical stability
+    ...
+)
+
+return partition_return  # <-- float32 for user
+```
+
+### Zero-Centering for Cumulative Scores
+
+Before computing cumulative scores, zero-center the projected scores to prevent magnitude growth:
 
 ```python
 projected = projected - projected.mean(dim=1, keepdim=True)
@@ -813,7 +845,7 @@ cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float32)
 cum_scores[:, 1:, :] = torch.cumsum(projected.float(), dim=1)
 ```
 
-This prevents cumulative scores from growing too large and losing precision.
+**Why this matters**: Without zero-centering, cumulative scores can reach magnitudes of O(T) which reduces effective precision. Zero-centering keeps values bounded regardless of T.
 
 ### NEG_INF Masking
 
@@ -827,9 +859,64 @@ NEG_INF = -1e9
 alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
 ```
 
+The threshold `-1e9` is chosen to be:
+- Small enough to be dominated by any valid score in logsumexp
+- Large enough that `exp(NEG_INF - max)` underflows to 0 rather than producing NaN
+
+### NEG_INF Guards in Logsumexp
+
+When all logsumexp inputs are NEG_INF, the standard computation `max + log(sum(exp(x - max)))` breaks:
+- `max = NEG_INF`
+- `x - max = 0` (instead of staying at NEG_INF)
+- `exp(0) = 1`, `log(C) ≈ 3` → wrong result
+
+The kernel guards against this:
+
+```python
+max_scores = tl.max(scores, axis=1)
+is_all_neginf = max_scores < (NEG_INF + 1.0)
+max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
+log_sum_exp = tl.log(tl.sum(tl.exp(scores - max_scores_safe[:, None]), axis=1))
+score_for_k = tl.where(is_all_neginf, NEG_INF, max_scores + log_sum_exp)
+```
+
+### Log-Marginal Clamping
+
+Before `exp()` in the backward pass, log-marginals are clamped to prevent float64 overflow:
+
+```python
+log_scale_clamped = tl.minimum(log_scale, 0.0)  # Upper bound: scale ≤ 1
+log_scale_clamped = tl.maximum(log_scale_clamped, -700.0)  # Prevent underflow
+scale = tl.exp(log_scale_clamped)
+```
+
+The bounds are chosen because `exp(710) ≈ inf` in float64.
+
 ### Forward-Backward Identity at Scale
 
 At extreme sequence lengths (T ≥ 100k), accumulated floating-point error can violate the forward-backward identity `α[t] + β[t] ≈ log_Z`, causing marginal scale factors to overflow. This is solved by **per-checkpoint log normalization** — see the dedicated section [Per-Checkpoint Log Normalization](#per-checkpoint-log-normalization) for details.
+
+---
+
+## Triton Cache Validation
+
+The module includes cache validation utilities to detect when Triton kernel configuration has changed:
+
+From [triton_cache.py](../src/torch_semimarkov/streaming/triton_cache.py):
+
+```python
+class TritonConfig(NamedTuple):
+    """Configuration values that affect Triton kernel compilation."""
+    num_warps: int
+
+def validate_triton_cache(config: TritonConfig, warn: bool = True) -> bool:
+    """Check if Triton cache matches current config.
+    
+    Returns True if cache is valid, False on mismatch (with warning).
+    """
+```
+
+This helps users avoid stale cache issues when changing `num_warps` or other configuration.
 
 ---
 
@@ -865,11 +952,13 @@ Streaming memory scales as O(batch × T × C), not O(batch × T × K × C²):
 1. **Shape mismatch with boundaries**: `proj_start` and `proj_end` must have shape `(batch, T, C)`, not `(batch, T+1, C)`
 
 2. **Gradient NaN**: Usually caused by:
-   - Not zero-centering before cumsum
+   - Not zero-centering before cumulative sums
    - Using float16 for cum_scores
    - At T ≥ 100k: forward-backward identity violation (see [Per-Checkpoint Log Normalization](#per-checkpoint-log-normalization))
 
 3. **Wrong partition value**: Check that `cum_scores[:, 0, :]` is all zeros (the boundary condition)
+
+4. **K < 3 with Triton kernels**: Use the dispatch logic in `semi_crf_streaming_forward()` which automatically routes K=1 and K=2 to specialized implementations
 
 ### Verification Against Reference
 
@@ -889,7 +978,7 @@ assert torch.allclose(partition_triton, partition_ref, atol=1e-4)
 
 A dedicated test script at `benchmarks/practical_demonstration/synthetic_genomics/gradient_check.py` compares Triton kernel gradients vs PyTorch reference at the low-level API.
 
-**Key insight**: Both implementations now use log normalization checkpointing for numerical stability at extreme sequence lengths (T>100K). The PyTorch reference was updated to match the Triton kernel's Flash Attention-style checkpoint normalization pattern.
+**Important observation**: Both implementations now use log normalization checkpointing for numerical stability at extreme sequence lengths (T>100K). The PyTorch reference was updated to match the Triton kernel's Flash Attention-style checkpoint normalization pattern.
 
 | Gradient | Metric | Threshold | Why |
 | -------- | ------ | --------- | --- |

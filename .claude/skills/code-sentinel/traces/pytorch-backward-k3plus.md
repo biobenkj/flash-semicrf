@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Backward (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `d9aff99`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `52c3f9e`
 **Linked tests:** `tests/test_streaming.py::TestStreamingBackward::test_backward_produces_finite_gradients`
 
 ## Summary
@@ -161,5 +161,6 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 
 ## Version History
 
+- **2026-02-05**: Minor documentation fixes (comment formatting); no functional changes; updated to commit `52c3f9e`
 - **2026-02-02**: Updated line numbers (backward now at 915); documented relative log-marginal pattern with 8-step breakdown; added per-batch gradient convention
 - **2026-01-27**: Initial trace @ commit `09e86ed`

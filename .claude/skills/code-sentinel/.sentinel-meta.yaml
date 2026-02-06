@@ -2,7 +2,7 @@
 # Machine-readable state for automation and status queries
 
 version: 2.0
-last_global_verification: 2026-02-02T00:00:00Z
+last_global_verification: 2026-02-05T00:00:00Z
 
 # Note: Dual indexing scheme active during benchmarking phase
 # - Streaming backends: 0-based (dur_idx = k - 1) - production target
@@ -11,7 +11,7 @@ last_global_verification: 2026-02-02T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: 0c9b73e
+    verified_commit: 9dfa110
     source_files:
       - src/torch_semimarkov/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -54,7 +54,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: 871c352
+    verified_commit: 6c463c3
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
     assumptions_mechanical: []
@@ -69,7 +69,7 @@ sentinels:
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: b05260f
+    verified_commit: 9dfa110
     source_files:
       - src/torch_semimarkov/streaming/triton_backward.py
     assumptions_mechanical: []
@@ -83,7 +83,7 @@ sentinels:
       - triton-forward-k3plus
 
   pytorch-forward-k3plus:
-    verified_commit: d9aff99
+    verified_commit: 52c3f9e
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -94,7 +94,7 @@ sentinels:
     depends_on: []
 
   pytorch-backward-k3plus:
-    verified_commit: d9aff99
+    verified_commit: 52c3f9e
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -106,7 +106,7 @@ sentinels:
       - pytorch-forward-k3plus
 
   k1-linear-crf:
-    verified_commit: d9aff99
+    verified_commit: 52c3f9e
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -117,7 +117,7 @@ sentinels:
     depends_on: []
 
   k2-fast-path:
-    verified_commit: d9aff99
+    verified_commit: 52c3f9e
     source_files:
       - src/torch_semimarkov/streaming/pytorch_reference.py
     assumptions_mechanical: []

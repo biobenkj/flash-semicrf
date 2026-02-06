@@ -14,6 +14,57 @@ import torch
 from torch_semimarkov import SemiMarkovCRFHead
 
 
+def score_viterbi_path(bp_k, bp_c, final_labels, cum_scores, transition, duration_bias, lengths):
+    """Trace back through backpointers and compute the total path score.
+
+    This scores the Viterbi path defined by (bp_k, bp_c, final_labels) by
+    summing edge potentials along the path. Two sets of backpointers that
+    define different paths through ties should produce identical scores.
+
+    Args:
+        bp_k: (batch, T, C) best duration backpointers
+        bp_c: (batch, T, C) best source label backpointers
+        final_labels: (batch,) best final label
+        cum_scores: (batch, T+1, C) cumulative scores
+        transition: (C, C) or (K, C, C) transition matrix
+        duration_bias: (K, C) duration biases
+        lengths: (batch,) sequence lengths
+
+    Returns:
+        Tensor of shape (batch,) with the total score for each path.
+    """
+    batch = bp_k.shape[0]
+    device = cum_scores.device
+    dtype = cum_scores.dtype
+    scores = torch.zeros(batch, device=device, dtype=dtype)
+
+    for b in range(batch):
+        T_b = lengths[b].item()
+        pos = T_b
+        c = final_labels[b].item()
+        total = 0.0
+
+        while pos > 0:
+            k = int(bp_k[b, pos - 1, c].item())
+            c_src = int(bp_c[b, pos - 1, c].item())
+
+            # Edge score: content + duration_bias + transition
+            content = (cum_scores[b, pos, c] - cum_scores[b, pos - k, c]).item()
+            dur = duration_bias[k - 1, c].item()
+            if transition.ndim == 2:
+                trans = transition[c_src, c].item()
+            else:
+                trans = transition[k - 1, c_src, c].item()
+
+            total += content + dur + trans
+            pos -= k
+            c = c_src
+
+        scores[b] = total
+
+    return scores
+
+
 class TestDecodeTritonEquivalence:
     """Test that Triton-enabled decode matches PyTorch reference."""
 
@@ -356,9 +407,13 @@ class TestTritonBackpointers:
         duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
         lengths = torch.full((batch,), T, device=cuda_device, dtype=torch.long)
 
-        # PyTorch reference
+        # PyTorch reference (cast to float64 to match Triton's internal precision)
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+            K,
         )
 
         # Triton
@@ -367,22 +422,37 @@ class TestTritonBackpointers:
         )
 
         # Compare scores
-        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4, check_dtype=False)
 
         # Compare final labels
         assert torch.equal(final_tri, final_ref), "final_labels mismatch"
 
-        # Compare backpointers for valid positions
-        # Note: backpointers may differ for ties, but the path they define should be valid
-        # For simplicity, we check that they're equal (deterministic tie-breaking)
-        for b in range(batch):
-            seq_len = lengths[b].item()
-            assert torch.equal(
-                bp_k_tri[b, :seq_len], bp_k_ref[b, :seq_len]
-            ), f"bp_k mismatch at batch {b}"
-            assert torch.equal(
-                bp_c_tri[b, :seq_len], bp_c_ref[b, :seq_len]
-            ), f"bp_c mismatch at batch {b}"
+        # Compare backpointers via path scores (ties may break differently across precisions)
+        scores_path_tri = score_viterbi_path(
+            bp_k_tri,
+            bp_c_tri,
+            final_tri,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+        )
+        scores_path_ref = score_viterbi_path(
+            bp_k_ref,
+            bp_c_ref,
+            final_ref,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+        )
+        torch.testing.assert_close(
+            scores_path_tri,
+            scores_path_ref,
+            rtol=1e-10,
+            atol=1e-10,
+            msg="Triton and reference backpointers define paths with different scores",
+        )
 
     def test_triton_backpointers_variable_lengths(self, cuda_device):
         """Test Triton backpointers with variable length sequences."""
@@ -407,21 +477,47 @@ class TestTritonBackpointers:
         duration_bias = torch.randn(K, C, device=cuda_device, dtype=torch.float32) * 0.1
         lengths = torch.tensor([50, 40, 30, 20], device=cuda_device, dtype=torch.long)
 
+        # Cast to float64 to match Triton's internal precision
         scores_ref, bp_k_ref, bp_c_ref, final_ref = semi_crf_streaming_viterbi_with_backpointers(
-            cum_scores, transition, duration_bias, lengths, K
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+            K,
         )
         scores_tri, bp_k_tri, bp_c_tri, final_tri = semi_crf_streaming_viterbi_triton(
             cum_scores, transition, duration_bias, lengths, K
         )
 
-        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(scores_tri, scores_ref, rtol=1e-4, atol=1e-4, check_dtype=False)
         assert torch.equal(final_tri, final_ref)
 
-        # Compare valid positions for each batch
-        for b in range(batch):
-            L = lengths[b].item()
-            assert torch.equal(bp_k_tri[b, :L], bp_k_ref[b, :L]), f"bp_k mismatch batch {b}"
-            assert torch.equal(bp_c_tri[b, :L], bp_c_ref[b, :L]), f"bp_c mismatch batch {b}"
+        # Compare backpointers via path scores (ties may break differently across precisions)
+        scores_path_tri = score_viterbi_path(
+            bp_k_tri,
+            bp_c_tri,
+            final_tri,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+        )
+        scores_path_ref = score_viterbi_path(
+            bp_k_ref,
+            bp_c_ref,
+            final_ref,
+            cum_scores.to(torch.float64),
+            transition.to(torch.float64),
+            duration_bias.to(torch.float64),
+            lengths,
+        )
+        torch.testing.assert_close(
+            scores_path_tri,
+            scores_path_ref,
+            rtol=1e-10,
+            atol=1e-10,
+            msg="Triton and reference backpointers define paths with different scores (variable lengths)",
+        )
 
     def test_decode_uses_triton_on_gpu(self, cuda_device):
         """Verify decode_with_traceback uses Triton path on CUDA."""

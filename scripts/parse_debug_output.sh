@@ -926,6 +926,546 @@ echo "  - Same scale but different grad_cs = Problem in Pass 2 accumulation"
 echo ""
 
 echo "================================================================================"
+echo "SUM REDUCTION PRECISION ANALYSIS (t=1000, k=1) - LARGE CONFIG"
+echo "================================================================================"
+echo ""
+
+echo ""
+echo "=== KERNEL CONFIGURATION ==="
+gawk '
+/=== BACKWARD KERNEL DEBUG ===/ { in_config = 1; next }
+in_config && /idx \(\) NUM_CKPTS=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    num_ckpts = a[1]
+    next
+}
+in_config && /idx \(\) CHECKPOINT_INTERVAL=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    interval = a[1]
+    next
+}
+in_config && /idx \(\) T=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    T = a[1]
+    in_config = 0
+    next
+}
+END {
+    if (num_ckpts != "") {
+        printf "  NUM_CKPTS:           %s\n", num_ckpts
+        printf "  CHECKPOINT_INTERVAL: %s\n", interval
+        printf "  T:                   %s\n", T
+        print ""
+        
+        # Calculate which checkpoint contains t=1000
+        if (interval != "" && T != "") {
+            target_t = 1000
+            expected_ckpt = int(target_t / interval)
+            printf "  Expected checkpoint for t=1000: %d (covers positions %d-%d)\n", 
+                expected_ckpt, expected_ckpt * interval, (expected_ckpt + 1) * interval - 1
+        }
+    } else {
+        print "  [No kernel config found in output]"
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== CHECKPOINT PROCESSING LOG ==="
+gawk '
+/Processing checkpoint:/ {
+    match($0, /Processing checkpoint: (-?[0-9]+)/, a)
+    ckpt = a[1]
+    in_ckpt = 1
+    next
+}
+in_ckpt && /seg_start=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    seg_start = a[1]
+    next
+}
+in_ckpt && /seg_end=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    seg_end = a[1]
+    printf "  Checkpoint %2d: positions %4d-%4d", ckpt, seg_start, seg_end
+    
+    # Check if t=1000 falls in this range
+    if (seg_start <= 1000 && 1000 < seg_end) {
+        printf "  ← CONTAINS t=1000"
+    }
+    printf "\n"
+    in_ckpt = 0
+    next
+}
+END {
+    if (NR == 0) {
+        print "  [No checkpoint processing log found]"
+    }
+}
+' "$LOG_FILE"
+
+echo "=== PYTORCH REFERENCE (Ground Truth) ==="
+gawk '
+/=== PYTORCH REF t=1000 k=1/ { in_pt = 1; next }
+in_pt && /^alpha_t_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); alpha_sum = a[1]; next }
+in_pt && /^alpha_t\[0\]:/ { match($0, /: (-?[0-9.e+-]+)/, a); alpha_0 = a[1]; next }
+in_pt && /^beta_next_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); beta_sum = a[1]; next }
+in_pt && /^beta_next\[0\]:/ { match($0, /: (-?[0-9.e+-]+)/, a); beta_0 = a[1]; next }
+in_pt && /^edge_block_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); edge_sum = a[1]; next }
+in_pt && /^edge_block\[0,0\]:/ { match($0, /: (-?[0-9.e+-]+)/, a); edge_00 = a[1]; next }
+in_pt && /^log_joint_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_joint_sum = a[1]; next }
+in_pt && /^log_joint\[0,0\]:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_joint_00 = a[1]; next }
+in_pt && /^log_marginal_rel_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_marg_rel_sum = a[1]; next }
+in_pt && /^marginal_unnorm_sum:/ { match($0, /: (-?[0-9.e+-]+)/, a); marg_unnorm_sum = a[1]; next }
+in_pt && /local_ref/ { match($0, /: (-?[0-9.e+-]+)/, a); local_ref = a[1]; next }
+in_pt && /log_norm_at_ckpt/ { match($0, /: (-?[0-9.e+-]+)/, a); log_norm = a[1]; next }
+in_pt && /^log_Z:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_Z = a[1]; next }
+in_pt && /^log_scale:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_scale = a[1]; next }
+in_pt && /^scale:/ { match($0, /: (-?[0-9.e+-]+)/, a); scale = a[1]; next }
+in_pt && /marginal_sum \(all\)/ { match($0, /: (-?[0-9.e+-]+)/, a); marg_sum = a[1]; next }
+in_pt && /marginal\[0,0,0\]/ { match($0, /: (-?[0-9.e+-]+)/, a); marg_00 = a[1]; next }
+in_pt && /marginal_max/ { match($0, /: (-?[0-9.e+-]+)/, a); marg_max = a[1]; next }
+in_pt && /marginal_sum_over_src_total/ { match($0, /: (-?[0-9.e+-]+)/, a); sum_src = a[1]; next }
+in_pt && /marginal_sum_over_src\[0\]/ { match($0, /: (-?[0-9.e+-]+)/, a); sum_src_0 = a[1]; in_pt = 0; next }
+END {
+    print "  Intermediate Values:"
+    printf "    alpha_t_sum:                 %s\n", alpha_sum
+    printf "    alpha_t[0]:                  %s\n", alpha_0
+    printf "    beta_next_sum:               %s\n", beta_sum
+    printf "    beta_next[0]:                %s\n", beta_0
+    printf "    edge_block_sum:              %s\n", edge_sum
+    printf "    edge_block[0,0]:             %s\n", edge_00
+    printf "    log_joint_sum:               %s\n", log_joint_sum
+    printf "    log_joint[0,0]:              %s\n", log_joint_00
+    printf "    log_marginal_rel_sum:        %s\n", log_marg_rel_sum
+    printf "    marginal_unnorm_sum:         %s\n", marg_unnorm_sum
+    print ""
+    print "  Pass 1 Statistics:"
+    printf "    local_ref (global_max):      %s\n", local_ref
+    printf "    log_norm_at_ckpt:            %s\n", log_norm
+    printf "    log_Z:                       %s\n", log_Z
+    printf "    log_scale:                   %s\n", log_scale
+    printf "    scale:                       %s\n", scale
+    print ""
+    print "  Final Marginals:"
+    printf "    marginal_sum (all):          %s\n", marg_sum
+    printf "    marginal[0,0,0]:             %s\n", marg_00
+    printf "    marginal_max:                %s\n", marg_max
+    printf "    marginal_sum_over_src_total: %s\n", sum_src
+    printf "    marginal_sum_over_src[0]:    %s\n", sum_src_0
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== TRITON LEVEL 1: Pass 1 Output (Global Statistics) ==="
+gawk '
+/=== PASS1 DEBUG t=1000 k=1 ===/ { in_pass1 = 1; next }
+in_pass1 && /idx \(\) ckpt_idx=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    ckpt_idx_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) log_norm_at_ckpt=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    log_norm_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) log_Z=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    log_Z_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) global_max=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    gmax_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) global_sum_exp=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    gsum_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) log_scale=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    lscale_vals[a[1]]++
+    next
+}
+in_pass1 && /idx \(\) scale=:/ && !/log_scale/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    scale_vals[a[1]]++
+    in_pass1 = 0
+    next
+}
+END {
+    print "  ckpt_idx (deduplicated):"
+    for (val in ckpt_idx_vals) printf "    %s (×%d threads)\n", val, ckpt_idx_vals[val]
+    print ""
+    print "  log_norm_at_ckpt (deduplicated):"
+    for (val in log_norm_vals) printf "    %s (×%d threads)\n", val, log_norm_vals[val]
+    print ""
+    print "  log_Z (deduplicated):"
+    for (val in log_Z_vals) printf "    %s (×%d threads)\n", val, log_Z_vals[val]
+    print ""
+    print "  global_max (deduplicated):"
+    for (val in gmax_vals) printf "    %s (×%d threads)\n", val, gmax_vals[val]
+    print ""
+    print "  global_sum_exp (deduplicated):"
+    for (val in gsum_vals) printf "    %s (×%d threads)\n", val, gsum_vals[val]
+    print ""
+    print "  log_scale (deduplicated):"
+    for (val in lscale_vals) printf "    %s (×%d threads)\n", val, lscale_vals[val]
+    print ""
+    print "  scale (deduplicated):"
+    for (val in scale_vals) printf "    %s (×%d threads)\n", val, scale_vals[val]
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== TRITON LEVEL 2: Marginal Tile (Before Sum Reduction) ==="
+echo "(Aggregated across ALL tiles)"
+gawk '
+/=== MARGINAL TILE DEBUG t=1000 k=1 ===/ { in_tile = 1; next }
+in_tile && /idx \(\) alpha_t_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); alpha_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) alpha_t\[0\]=:/ { match($0, /: (-?[0-9.e+-]+)/, a); alpha_0_vals[a[1]]++; next }
+in_tile && /idx \(\) beta_tile_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); beta_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) beta_tile\[0\]=:/ { match($0, /: (-?[0-9.e+-]+)/, a); beta_0_vals[a[1]]++; next }
+in_tile && /idx \(\) edge_tile_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); edge_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) edge_tile\[0,0\]=:/ { match($0, /: (-?[0-9.e+-]+)/, a); edge_00_vals[a[1]]++; next }
+in_tile && /idx \(\) log_joint_tile_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_joint_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) log_joint_tile\[0,0\]=:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_joint_00_vals[a[1]]++; next }
+in_tile && /idx \(\) log_marginal_rel_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); log_marg_rel_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) marginal_unnorm_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); marg_unnorm_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) marginal_tile_sum=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tile_sum_vals[a[1]]++; next }
+in_tile && /idx \(\) marginal_tile\[0,0\]=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tile_00_vals[a[1]]++; next }
+in_tile && /idx \(\) marginal_tile_max=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tile_max_vals[a[1]]++; next }
+in_tile && /idx \(\) marginal_tile_min=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tile_min_vals[a[1]]++; in_tile = 0; next }
+END {
+    print "  Intermediate Values:"
+    print "    alpha_t_sum (deduplicated):"
+    for (val in alpha_sum_vals) printf "      %s (×%d threads)\n", val, alpha_sum_vals[val]
+    print "    alpha_t[0] (deduplicated):"
+    for (val in alpha_0_vals) printf "      %s (×%d threads)\n", val, alpha_0_vals[val]
+    print "    beta_tile_sum (deduplicated):"
+    for (val in beta_sum_vals) printf "      %s (×%d threads)\n", val, beta_sum_vals[val]
+    print "    beta_tile[0] (deduplicated):"
+    for (val in beta_0_vals) printf "      %s (×%d threads)\n", val, beta_0_vals[val]
+    print "    edge_tile_sum (deduplicated):"
+    for (val in edge_sum_vals) printf "      %s (×%d threads)\n", val, edge_sum_vals[val]
+    print "    edge_tile[0,0] (deduplicated):"
+    for (val in edge_00_vals) printf "      %s (×%d threads)\n", val, edge_00_vals[val]
+    print "    log_joint_tile_sum (deduplicated):"
+    for (val in log_joint_sum_vals) printf "      %s (×%d threads)\n", val, log_joint_sum_vals[val]
+    print "    log_joint_tile[0,0] (deduplicated):"
+    for (val in log_joint_00_vals) printf "      %s (×%d threads)\n", val, log_joint_00_vals[val]
+    print "    log_marginal_rel_sum (deduplicated):"
+    for (val in log_marg_rel_sum_vals) printf "      %s (×%d threads)\n", val, log_marg_rel_sum_vals[val]
+    print "    marginal_unnorm_sum (deduplicated):"
+    for (val in marg_unnorm_sum_vals) printf "      %s (×%d threads)\n", val, marg_unnorm_sum_vals[val]
+    print ""
+    print "  Final Marginal Tile:"
+    print "    marginal_tile_sum (deduplicated):"
+    for (val in tile_sum_vals) printf "      %s (×%d threads)\n", val, tile_sum_vals[val]
+    print "    marginal_tile[0,0] (deduplicated):"
+    for (val in tile_00_vals) printf "      %s (×%d threads)\n", val, tile_00_vals[val]
+    print "    marginal_tile_max (deduplicated):"
+    for (val in tile_max_vals) printf "      %s (×%d threads)\n", val, tile_max_vals[val]
+    print "    marginal_tile_min (deduplicated):"
+    for (val in tile_min_vals) printf "      %s (×%d threads)\n", val, tile_min_vals[val]
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== TRITON LEVEL 3: After Sum Reduction ==="
+echo "(Aggregated across ALL tiles)"
+gawk '
+/=== SUM REDUCTION DEBUG t=1000 k=1 ===/ { in_sum = 1; next }
+in_sum && /idx \(\) marginal_sum_src_tile_total=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    sum_total_vals[a[1]]++
+    next
+}
+in_sum && /idx \(\) marginal_sum_src_tile\[0\]=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    sum_0_vals[a[1]]++
+    in_sum = 0
+    next
+}
+END {
+    print "  marginal_sum_src_tile_total (deduplicated):"
+    for (val in sum_total_vals) printf "    %s (×%d threads)\n", val, sum_total_vals[val]
+    print ""
+    print "  marginal_sum_src_tile[0] (deduplicated):"
+    for (val in sum_0_vals) printf "    %s (×%d threads)\n", val, sum_0_vals[val]
+}
+' "$LOG_FILE"
+
+echo ""
+echo "=== TRITON LEVEL 4: Scatter-Sum Pattern ==="
+gawk '
+/=== SCATTER-SUM DEBUG t=1000 k=1 ===/ { in_scatter = 1; next }
+in_scatter && /idx \(\) grad_cs_t_local_sum=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    grad_sum_vals[a[1]]++
+    next
+}
+in_scatter && /idx \(\) grad_cs_t_local\[0\]=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a)
+    grad_0_vals[a[1]]++
+    in_scatter = 0
+    next
+}
+END {
+    print "  grad_cs_t_local_sum (deduplicated):"
+    for (val in grad_sum_vals) printf "    %s (×%d threads)\n", val, grad_sum_vals[val]
+    print ""
+    print "  grad_cs_t_local[0] (deduplicated):"
+    for (val in grad_0_vals) printf "    %s (×%d threads)\n", val, grad_0_vals[val]
+}
+' "$LOG_FILE"
+
+echo ""
+echo "================================================================================"
+echo "CRITICAL ANALYSIS: Sum Reduction Precision Test"
+echo "================================================================================"
+echo ""
+
+gawk '
+BEGIN {
+    # Extract values from PyTorch reference
+    pt_marg_sum = 0
+    pt_sum_src = 0
+
+    # Extract values from Triton
+    tr_tile_sum = 0
+    tr_sum_total = 0
+    tr_gmax = 0
+    tr_scale = 0
+
+    pt_gmax = 0
+    pt_scale = 0
+    pt_log_norm = 0
+    pt_log_Z = 0
+    tr_log_norm = 0
+    tr_log_Z = 0
+}
+
+# PyTorch reference
+/=== PYTORCH REF t=1000 k=1/ { in_pt = 1; next }
+in_pt && /local_ref/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_gmax = a[1]; next }
+in_pt && /log_norm_at_ckpt/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_log_norm = a[1]; next }
+in_pt && /^log_Z:/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_log_Z = a[1]; next }
+in_pt && /^scale:/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_scale = a[1]; next }
+in_pt && /marginal_sum \(all\)/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_marg_sum = a[1]; next }
+in_pt && /marginal_sum_over_src_total/ { match($0, /: (-?[0-9.e+-]+)/, a); pt_sum_src = a[1]; in_pt = 0; next }
+
+# Triton Level 1
+/=== PASS1 DEBUG t=1000 k=1 ===/ { in_tr1 = 1; next }
+in_tr1 && /idx \(\) log_norm_at_ckpt=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tr_log_norm = a[1]; next }
+in_tr1 && /idx \(\) log_Z=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tr_log_Z = a[1]; next }
+in_tr1 && /idx \(\) global_max=:/ { match($0, /: (-?[0-9.e+-]+)/, a); tr_gmax = a[1]; next }
+in_tr1 && /idx \(\) scale=:/ && !/log_scale/ { match($0, /: (-?[0-9.e+-]+)/, a); tr_scale = a[1]; in_tr1 = 0; next }
+
+# Triton Level 2 (will show all tiles, each deduplicated)
+/=== MARGINAL TILE DEBUG/ { in_tr2 = 1; next }
+in_tr2 && /idx \(\) marginal_tile_sum=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a);
+    tr_tile_sums[a[1]]++;
+    next
+}
+in_tr2 && /===/ { in_tr2 = 0; next }
+
+# Triton Level 3 (will show all tiles, each deduplicated)
+/=== SUM REDUCTION DEBUG/ { in_tr3 = 1; next }
+in_tr3 && /idx \(\) marginal_sum_src_tile_total=:/ {
+    match($0, /: (-?[0-9.e+-]+)/, a);
+    tr_sum_totals[a[1]]++;
+    next
+}
+in_tr3 && /===/ { in_tr3 = 0; next }
+
+END {
+    # Aggregate across all tiles
+    tr_tile_sum = 0
+    for (val in tr_tile_sums) {
+        tr_tile_sum += val
+    }
+    tr_sum_total = 0
+    for (val in tr_sum_totals) {
+        tr_sum_total += val
+    }
+
+    print "TEST 1: Does tl.sum(marginal_tile, axis=1) preserve total?"
+    print "-------------------------------------------------------------"
+    if (tr_tile_sum != 0 && tr_sum_total != 0) {
+        diff = tr_tile_sum - tr_sum_total
+        abs_diff = (diff < 0) ? -diff : diff
+        rel_error = (tr_tile_sum != 0) ? (abs_diff / tr_tile_sum * 100) : 0
+
+        printf "  marginal_tile_sum (all tiles):          %17.10e\n", tr_tile_sum
+        printf "  marginal_sum_src_tile_total (all tiles): %17.10e\n", tr_sum_total
+        printf "  Difference:                  %17.10e\n", diff
+        printf "  Relative error:              %7.4f%%\n", rel_error
+        print ""
+
+        if (rel_error < 0.001) {
+            print "  ✓ PASS: Sum reduction is ACCURATE (error < 0.001%)"
+            print "  → Issue is NOT in tl.sum(axis=1) itself"
+        } else if (rel_error < 1.0) {
+            print "  ⚠ WARNING: Sum reduction has SMALL error (" rel_error "%)"
+            print "  → May compound over 400k operations at large scale"
+        } else {
+            print "  ✗ FAIL: Sum reduction has LARGE error (" rel_error "%)"
+            print "  → CONFIRMED: tl.sum(axis=1) precision issue"
+        }
+    } else {
+        print "  ⚠ SKIP: No Triton Level 2/3 data found"
+    }
+
+    print ""
+    print "TEST 2: Does PyTorch sum reduction match expected total?"
+    print "-------------------------------------------------------------"
+    if (pt_marg_sum != 0 && pt_sum_src != 0) {
+        diff_pt = pt_marg_sum - pt_sum_src
+        abs_diff_pt = (diff_pt < 0) ? -diff_pt : diff_pt
+        rel_error_pt = (pt_marg_sum != 0) ? (abs_diff_pt / pt_marg_sum * 100) : 0
+
+        printf "  marginal_sum (all):          %17.10e\n", pt_marg_sum
+        printf "  marginal_sum_over_src_total: %17.10e\n", pt_sum_src
+        printf "  Difference:                  %17.10e\n", diff_pt
+        printf "  Relative error:              %7.4f%%\n", rel_error_pt
+        print ""
+
+        if (rel_error_pt < 0.001) {
+            print "  ✓ PyTorch sum reduction is accurate"
+        } else {
+            print "  ✗ PyTorch sum reduction has error (unexpected)"
+        }
+    } else {
+        print "  ⚠ SKIP: No PyTorch reference data found"
+    }
+
+    print ""
+    print "TEST 3: Triton vs PyTorch Comparison"
+    print "-------------------------------------------------------------"
+    if (tr_gmax != 0 && pt_gmax != 0) {
+        log_norm_diff = tr_log_norm - pt_log_norm
+        abs_log_norm_diff = (log_norm_diff < 0) ? -log_norm_diff : log_norm_diff
+        rel_log_norm_error = (pt_log_norm != 0) ? (abs_log_norm_diff / pt_log_norm * 100) : 0
+
+        log_Z_diff = tr_log_Z - pt_log_Z
+        abs_log_Z_diff = (log_Z_diff < 0) ? -log_Z_diff : log_Z_diff
+        rel_log_Z_error = (pt_log_Z != 0) ? (abs_log_Z_diff / pt_log_Z * 100) : 0
+
+        gmax_diff = tr_gmax - pt_gmax
+        abs_gmax_diff = (gmax_diff < 0) ? -gmax_diff : gmax_diff
+
+        scale_diff = tr_scale - pt_scale
+        abs_scale_diff = (scale_diff < 0) ? -scale_diff : scale_diff
+        rel_scale_error = (pt_scale != 0) ? (abs_scale_diff / pt_scale * 100) : 0
+
+        tile_diff = tr_tile_sum - pt_marg_sum
+        abs_tile_diff = (tile_diff < 0) ? -tile_diff : tile_diff
+        rel_tile_error = (pt_marg_sum != 0) ? (abs_tile_diff / pt_marg_sum * 100) : 0
+
+        printf "  PyTorch log_norm:     %17.10e\n", pt_log_norm
+        printf "  Triton log_norm:      %17.10e\n", tr_log_norm
+        printf "  Difference:           %17.10e\n", log_norm_diff
+        printf "  Relative error:       %7.4f%%\n", rel_log_norm_error
+        print ""
+
+        printf "  PyTorch log_Z:        %17.10e\n", pt_log_Z
+        printf "  Triton log_Z:         %17.10e\n", tr_log_Z
+        printf "  Difference:           %17.10e\n", log_Z_diff
+        printf "  Relative error:       %7.4f%%\n", rel_log_Z_error
+        print ""
+
+        printf "  PyTorch global_max:   %17.10e\n", pt_gmax
+        printf "  Triton global_max:    %17.10e\n", tr_gmax
+        printf "  Difference:           %17.10e\n", gmax_diff
+        print ""
+
+        printf "  PyTorch scale:        %17.10e\n", pt_scale
+        printf "  Triton scale:         %17.10e\n", tr_scale
+        printf "  Difference:           %17.10e\n", scale_diff
+        printf "  Relative error:       %7.4f%%\n", rel_scale_error
+        print ""
+
+        printf "  PyTorch marginal_sum: %17.10e\n", pt_marg_sum
+        printf "  Triton marginal_sum:  %17.10e\n", tr_tile_sum
+        printf "  Difference:           %17.10e\n", tile_diff
+        printf "  Relative error:       %7.4f%%\n", rel_tile_error
+        print ""
+
+        if (abs_gmax_diff < 1e-6 && rel_scale_error < 0.1 && rel_log_norm_error < 0.01) {
+            print "  ✓ Pass 1 statistics match PyTorch"
+        } else {
+            print "  ✗ Pass 1 diverges from PyTorch"
+            print ""
+            if (rel_log_norm_error > 0.01) {
+                print "  → PRIMARY ISSUE: log_norm_at_ckpt mismatch (" rel_log_norm_error "%)"
+                print "    - Forward pass may have incorrect log_norm_ckpts"
+                print "    - OR checkpoint indexing is wrong"
+                print "    - OR wrong checkpoint is being loaded"
+            }
+            if (abs_gmax_diff > 1e-6) {
+                print "  → SECONDARY ISSUE: global_max error"
+                print "    - Error is in Pass 1 online logsumexp"
+            }
+            if (rel_scale_error > 0.1 && rel_log_norm_error < 0.01 && abs_gmax_diff < 1e-6) {
+                print "  → scale error without log_norm/global_max error"
+                print "    - Check log_scale computation arithmetic"
+            }
+        }
+        print ""
+
+        if (rel_tile_error < 1.0) {
+            print "  ✓ Marginal tile matches PyTorch (< 1% error)"
+        } else {
+            print "  ✗ Marginal tile diverges from PyTorch"
+            print "  → Error is in marginal computation (Pass 2)"
+        }
+    } else {
+        print "  ⚠ SKIP: Missing comparison data"
+    }
+
+    print ""
+    print "TEST 4: Step-by-Step Intermediate Value Comparison"
+    print "-------------------------------------------------------------"
+    print "This traces the computation chain to find where divergence occurs:"
+    print "  alpha + edge + beta → log_joint → exp(log_joint - global_max) → * scale → marginal"
+    print ""
+
+    # Note: Need to extract Triton intermediate values from earlier parsing
+    # This section will be populated by a separate AWK pass
+    print "  [Run script again with updated log to see intermediate comparisons]"
+
+    print ""
+    print "DIAGNOSIS SUMMARY"
+    print "================="
+    print ""
+
+    if (tr_tile_sum != 0 && tr_sum_total != 0) {
+        diff = tr_tile_sum - tr_sum_total
+        abs_diff = (diff < 0) ? -diff : diff
+        rel_error = (tr_tile_sum != 0) ? (abs_diff / tr_tile_sum * 100) : 0
+
+        if (rel_error < 0.001) {
+            print "→ Sum reduction (tl.sum(axis=1)) is NOT the issue"
+            print "→ Error must be in:"
+            print "    1. Scatter-sum pattern (Level 4)"
+            print "    2. Accumulation across k iterations"
+            print "    3. Pass 1 online logsumexp"
+        } else {
+            print "→ CONFIRMED: Sum reduction precision loss"
+            print "→ Fix: Cast to float64 before sum:"
+            print "    marginal_sum_src_tile = tl.sum(marginal_tile.to(tl.float64), axis=1)"
+        }
+    }
+}
+' "$LOG_FILE"
+
+echo ""
+echo "================================================================================"
 echo "PYTHON SCRIPT OUTPUT SUMMARY"
 echo "================================================================================"
 echo ""

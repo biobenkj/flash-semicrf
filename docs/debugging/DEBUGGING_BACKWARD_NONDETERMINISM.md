@@ -358,7 +358,7 @@ Level 4: Scale computation     ← Is the normalization correct?
 Level 5: Local accumulators    ← Are gradients accumulating correctly?
 ```
 
-**Key Insight**: The bug revealed itself at Level 2 (beta load), showing tile 1 got wrong values.
+**Important Observation**: The bug revealed itself at Level 2 (beta load), showing tile 1 got wrong values.
 
 ### 2. Tile-Specific Analysis
 

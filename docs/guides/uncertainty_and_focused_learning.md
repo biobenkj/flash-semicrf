@@ -55,7 +55,7 @@ This is computed efficiently via the forward-backward algorithm, which is built 
 
 For clinical-scale sequences (T >= 10K), materializing the full edge tensor for exact marginals would require terabytes of memory. Instead, we use **gradient-based marginals**:
 
-The key insight is that the gradient of the log partition function with respect to the input scores encodes marginal information:
+The important observation is that the gradient of the log partition function with respect to the input scores encodes marginal information:
 
 ```
 ∂(log Z) / ∂(cum_scores[t, c]) ∝ P(label c used at position t)

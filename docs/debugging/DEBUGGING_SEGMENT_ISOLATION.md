@@ -449,7 +449,7 @@ Level 3: Beta loading (backward inputs)
 Level 4: Marginal computation (final output)
 ```
 
-**Key Insight**: Once we found alpha recomputation was wrong, we didn't need to check marginals or beta. The bug was upstream.
+**Important Observation**: Once we found alpha recomputation was wrong, we didn't need to check marginals or beta. The bug was upstream.
 
 ### 3. Forward vs Backward Comparison
 
@@ -527,7 +527,7 @@ for seg_idx, (seg_start, seg_end) in enumerate(segments):
     print(f"  Error rate: {100 * errors_in_seg.mean():.2f}%")
 ```
 
-**Key Insight**: The perfect segment split (0% vs 100% errors) immediately ruled out algorithm bugs and pointed to resource contention.
+**Important Observation**: The perfect segment split (0% vs 100% errors) immediately ruled out algorithm bugs and pointed to resource contention.
 
 ---
 
@@ -635,7 +635,7 @@ tl.debug_barrier()  # Before reading from different ring position
 
 ### 6. Trust Your Tests (But Verify Them)
 
-**Key Insight**: When segment 1 was perfect (0% errors) while segment 0 was broken (100% errors), this proved:
+**Important Observation**: When segment 1 was perfect (0% errors) while segment 0 was broken (100% errors), this proved:
 - The algorithm is correct (segment 1 proves it)
 - The math is correct (no systematic scaling issues)
 - The bug is in resource management or synchronization

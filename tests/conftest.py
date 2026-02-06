@@ -13,6 +13,8 @@ All tests should:
 3. Work correctly with the CPU fallback implementations
 """
 
+import os
+
 import pytest
 import torch
 
@@ -22,6 +24,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "requires_cuda: mark test as requiring CUDA (will be skipped if not available)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "gpu_isolated: mark test as requiring isolated GPU execution (run separately to avoid Triton cache contamination)",
     )
 
 
@@ -49,6 +55,150 @@ def skip_if_no_cuda():
     """Fixture to skip tests that require CUDA."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+
+
+# Global list to track temporary Triton cache directories for cleanup
+_triton_temp_cache_dirs = []
+
+
+def _cleanup_triton_temp_caches():
+    """Clean up all temporary Triton cache directories created during testing."""
+    import shutil
+
+    for cache_dir in _triton_temp_cache_dirs:
+        try:
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+        except Exception:
+            pass
+    _triton_temp_cache_dirs.clear()
+
+
+def force_clear_triton_cache():
+    """Force clear Triton cache (both on-disk and CUDA state) with GPU settling time.
+
+    This is a helper function that can be called explicitly from tests that
+    are particularly sensitive to cache contamination. Use this when:
+    - A test uses significantly different config than preceding tests
+    - Test order dependencies are suspected
+    - Numerical precision issues arise from cached kernels
+
+    The function includes proper synchronization and settling time to ensure:
+    - All pending CUDA operations complete before cache clearing
+    - File system operations (cache deletion) complete fully
+    - GPU returns to a stable, clean state before the test proceeds
+
+    Additionally, this creates a unique temporary cache directory for each test,
+    isolating compilation state. Cleanup happens automatically:
+    - Via pytest session fixture (primary cleanup method)
+    - Via atexit handler (backup if pytest teardown is interrupted)
+
+    Example:
+        def test_large_config(self):
+            force_clear_triton_cache()
+            # ... rest of test
+    """
+    if not torch.cuda.is_available():
+        return
+
+    import atexit
+    import os
+    import tempfile
+    import time
+    import uuid
+
+    # Step 1: Synchronize all CUDA operations before clearing anything
+    torch.cuda.synchronize()
+
+    # Step 2: Clear CUDA memory cache
+    torch.cuda.empty_cache()
+
+    # Step 3: Wait for GPU to settle after memory operations
+    time.sleep(1.0)
+
+    # Step 4: Clear on-disk Triton cache with retry logic
+    try:
+        import shutil
+        from pathlib import Path
+
+        cache_dir = Path.home() / ".triton" / "cache"
+
+        # Try multiple times with delays in case files are locked
+        for attempt in range(3):
+            try:
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=False)
+                break
+            except (OSError, PermissionError):
+                if attempt < 2:
+                    time.sleep(0.5)
+                else:
+                    # Last resort: try with ignore_errors
+                    if cache_dir.exists():
+                        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    except ImportError:
+        # Required imports not available, skip
+        pass
+
+    # Step 5: Set Triton cache to a fresh temporary directory
+    # This isolates each test's compilation from others
+    unique_cache_dir = os.path.join(
+        tempfile.gettempdir(), f"triton_test_cache_{uuid.uuid4().hex[:8]}"
+    )
+    os.environ["TRITON_CACHE_DIR"] = unique_cache_dir
+
+    # Track this directory for cleanup
+    _triton_temp_cache_dirs.append(unique_cache_dir)
+
+    # Register cleanup on first call
+    if len(_triton_temp_cache_dirs) == 1:
+        atexit.register(_cleanup_triton_temp_caches)
+
+    # Step 6: Final sync and settling time to ensure clean GPU state
+    torch.cuda.synchronize()
+    time.sleep(1.0)
+
+
+@pytest.fixture
+def clear_triton_cache_fixture():
+    """Optional fixture to clear Triton cache before a test.
+
+    This fixture can be used explicitly by tests that need cache clearing.
+    It is NOT autouse to avoid excessive cache clearing and timing issues.
+
+    Tests should prefer calling force_clear_triton_cache() directly at the
+    start of the test method for more control over when clearing happens.
+
+    Usage:
+        def test_something(self, clear_triton_cache_fixture):
+            # Cache is cleared before this test
+            ...
+    """
+    if not torch.cuda.is_available():
+        yield
+        return
+
+    # Use the helper function to clear cache
+    force_clear_triton_cache()
+
+    yield
+
+    # Clean up CUDA memory after test
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_triton_temp_caches_at_session_end():
+    """Pytest session fixture to clean up temporary Triton cache directories.
+
+    This ensures cleanup happens even if atexit handlers don't fire properly.
+    Runs automatically at the end of the test session.
+    """
+    yield
+    # Cleanup runs after all tests complete
+    _cleanup_triton_temp_caches()
 
 
 # =============================================================================
