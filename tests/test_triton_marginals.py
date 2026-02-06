@@ -125,6 +125,7 @@ class TestTritonMarginalsBasic:
             msg="Partition functions don't match",
         )
 
+    @pytest.mark.gpu_isolated
     def test_triton_marginals_variable_lengths(self, cuda_device):
         """Marginals should handle variable sequence lengths correctly.
 
@@ -318,6 +319,7 @@ class TestTritonMarginalsEdgeCases:
             msg="T=K marginals don't match",
         )
 
+    @pytest.mark.gpu_isolated
     def test_triton_marginals_small_batch(self, cuda_device):
         """Test with batch=1.
 

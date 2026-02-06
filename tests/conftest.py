@@ -25,6 +25,10 @@ def pytest_configure(config):
         "markers",
         "requires_cuda: mark test as requiring CUDA (will be skipped if not available)",
     )
+    config.addinivalue_line(
+        "markers",
+        "gpu_isolated: mark test as requiring isolated GPU execution (run separately to avoid Triton cache contamination)",
+    )
 
 
 @pytest.fixture(autouse=True)

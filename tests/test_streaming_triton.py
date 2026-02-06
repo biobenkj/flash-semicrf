@@ -239,6 +239,7 @@ class TestTritonStreamingKernel:
         ckpt_0 = ring_ckpts[:, 0, :, :]  # (batch, K, C)
         assert torch.allclose(ckpt_0[:, 0, :], torch.zeros_like(ckpt_0[:, 0, :]))
 
+    @pytest.mark.gpu_isolated
     def test_triton_larger_sequence(self):
         """Verify Triton kernel works with larger sequences.
 
