@@ -53,7 +53,7 @@ def skip_if_no_cuda():
 
 @pytest.fixture(autouse=True)
 def clear_triton_cache():
-    """Clear Triton JIT cache before each test to prevent cache contamination.
+    """Clear Triton cache directory before each test to prevent cache contamination.
 
     This fixture prevents test order dependencies caused by Triton kernel caching.
     When running the full test suite, earlier tests may compile kernels with
@@ -66,7 +66,7 @@ def clear_triton_cache():
     - Number of classes (C)
     - Batch sizes
 
-    The fixture only runs when CUDA is available and Triton is installed.
+    The fixture deletes ~/.triton/cache before each test to force fresh compilation.
     """
     if not torch.cuda.is_available():
         yield
@@ -74,31 +74,15 @@ def clear_triton_cache():
 
     try:
         import triton
+        import shutil
+        from pathlib import Path
 
-        # Try multiple methods to clear the cache (compatibility with different Triton versions)
-        cleared = False
+        # Get Triton cache directory (usually ~/.triton/cache)
+        cache_dir = Path.home() / ".triton" / "cache"
 
-        # Method 1: Direct compiler cache clear (newer Triton versions)
-        if hasattr(triton, "compiler") and hasattr(triton.compiler, "clear_cache"):
-            triton.compiler.clear_cache()
-            cleared = True
-
-        # Method 2: Clear runtime JIT cache (older Triton versions)
-        if hasattr(triton, "runtime") and hasattr(triton.runtime, "jit"):
-            if hasattr(triton.runtime.jit, "clear_cache"):
-                triton.runtime.jit.clear_cache()
-                cleared = True
-
-        # Method 3: Access and clear the internal cache dictionary (fallback)
-        if not cleared:
-            try:
-                from triton.runtime.cache import get_cache_manager
-
-                cache_manager = get_cache_manager(None)
-                if hasattr(cache_manager, "clear"):
-                    cache_manager.clear()
-            except (ImportError, AttributeError):
-                pass
+        # Delete the cache directory if it exists
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
 
     except ImportError:
         # Triton not installed, skip cache clearing
@@ -106,7 +90,7 @@ def clear_triton_cache():
 
     yield
 
-    # Also clear CUDA memory cache after test to prevent memory fragmentation
+    # Clean up CUDA memory after test
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
