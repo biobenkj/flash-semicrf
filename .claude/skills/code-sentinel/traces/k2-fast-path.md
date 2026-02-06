@@ -1,6 +1,6 @@
 # Sentinel: K=2 Specialized Path
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `d9aff99`
+**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `52c3f9e`
 **Linked tests:** `tests/test_streaming_triton.py::TestKSpecificPaths::test_k2_forward_correctness`
 
 ## Summary

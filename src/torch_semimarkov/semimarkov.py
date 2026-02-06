@@ -630,7 +630,9 @@ class SemiMarkov(_Struct):
                 else:
                     new_c = sequence[b, n]
                     if n != 0:
-                        labels[b, last, n - last, new_c, c] = 1
+                        labels[b, last, n - last - 1, new_c, c] = (
+                            1  # 0-based: duration d → index d-1
+                        )
                     last = n
                     c = new_c
         return labels
@@ -645,7 +647,7 @@ class SemiMarkov(_Struct):
         for i in range(on.shape[0]):
             if on[i][1] == 0:
                 labels[on[i][0], on[i][1]] = on[i][4]
-            labels[on[i][0], on[i][1] + on[i][2]] = on[i][3]
+            labels[on[i][0], on[i][1] + on[i][2] + 1] = on[i][3]  # dur_idx d-1 → actual duration d
         return labels, (C, K)
 
     @staticmethod
