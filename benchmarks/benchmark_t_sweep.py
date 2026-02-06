@@ -82,6 +82,25 @@ ALL_BACKENDS = [
     "binary_tree_sharded",
 ]
 
+REGIMES = {
+    "ner": {
+        "description": "NER-scale comparison (all backends viable)",
+        "K": 16,
+        "C": 24,
+        "B": 2,
+        "T": [64, 128, 256, 512, 1024, 2048, 4096],
+        "backends": ALL_BACKENDS,
+    },
+    "streaming": {
+        "description": "Genomics-scale streaming-only (chromosome-length)",
+        "K": 200,
+        "C": 6,
+        "B": 2,
+        "T": [10000, 25000, 50000, 100000, 250000, 500000, 1000000],
+        "backends": ["triton_streaming", "linear_scan_streaming"],
+    },
+}
+
 # Plotting colors per backend
 BACKEND_STYLE = {
     "triton_streaming": {"color": "#2563eb", "marker": "o", "ls": "-", "label": "Triton streaming"},
@@ -629,6 +648,15 @@ def main():
         help="Skip configs predicted to exceed this memory. Default: 40",
     )
     parser.add_argument(
+        "--regime",
+        type=str,
+        default=None,
+        choices=list(REGIMES.keys()),
+        help="Benchmark regime preset. NER-scale, all backends (K=16,C=24,T=64-4K). "
+        "'streaming': genomics-scale, streaming only (K=200,C=6,T=10K-1M). "
+        "Explicit --K/--C/--T/--backends flags override regime defaults.",
+    )
+    parser.add_argument(
         "--quick", action="store_true", help="Quick mode: fewer T values, fewer repeats"
     )
     parser.add_argument("--no-plot", action="store_true", help="Skip figure generation")
@@ -643,18 +671,40 @@ def main():
 
     device = torch.device("cuda")
 
-    # Parse T values
+    # Apply regime preset (explicit CLI flags override)
+    regime_T = None
+    regime_backends = None
+    if args.regime:
+        regime = REGIMES[args.regime]
+        if "--K" not in sys.argv:
+            args.K = regime["K"]
+        if "--C" not in sys.argv:
+            args.C = regime["C"]
+        if "--B" not in sys.argv:
+            args.B = regime["B"]
+        regime_T = regime["T"]
+        regime_backends = regime["backends"]
+        # Put regime results in a subdirectory
+        args.outdir = args.outdir / args.regime
+
+    # Parse T values (priority: --T > --quick > regime > default)
     if args.T:
         T_values = parse_int_list(args.T)
     elif args.quick:
         T_values = QUICK_T_VALUES
         args.repeats = 3
+    elif regime_T:
+        T_values = regime_T
     else:
         T_values = DEFAULT_T_VALUES
 
-    # Parse backends
+    # Parse backends (priority: --all-backends > --backends > regime > default)
     if args.all_backends:
         backends = ALL_BACKENDS
+    elif "--backends" in sys.argv:
+        backends = [b.strip() for b in args.backends.split(",") if b.strip()]
+    elif regime_backends:
+        backends = regime_backends
     else:
         backends = [b.strip() for b in args.backends.split(",") if b.strip()]
 
@@ -667,6 +717,8 @@ def main():
     print("=" * 72)
     print("  T-SWEEP BENCHMARK: Speed & Memory vs Sequence Length")
     print("=" * 72)
+    if args.regime:
+        print(f"  Regime: {args.regime} \u2014 {REGIMES[args.regime]['description']}")
     print(f"  GPU: {gpu_name} ({total_gb:.0f} GB)")
     print(f"  Fixed: K={K}, C={C}, B={B}")
     print(f"  T values: {T_values}")
@@ -699,6 +751,7 @@ def main():
         json.dump(
             {
                 "config": {
+                    "regime": args.regime,
                     "K": K,
                     "C": C,
                     "B": B,
