@@ -14,7 +14,7 @@ Place this script in the ``benchmarks/`` directory alongside
 ``benchmark_memory_analysis.py`` so that ``from lib import ...`` resolves.
 
 Usage:
-    # Default: Triton + PyTorch streaming, K=50, C=24
+    # Default: Triton + Streaming scan, K=50, C=24
     python benchmarks/benchmark_t_sweep.py
 
     # All backends (exact ones will OOM at large T — that's the point)
@@ -108,7 +108,7 @@ BACKEND_STYLE = {
         "color": "#dc2626",
         "marker": "s",
         "ls": "--",
-        "label": "PyTorch streaming",
+        "label": "Streaming scan",
     },
     "linear_scan_vectorized": {
         "color": "#16a34a",
@@ -482,16 +482,18 @@ def generate_figures(
     plt.close(fig)
     print("  Saved fig_time_vs_T.pdf/png")
 
-    # -- Fig 2: Memory vs T --------------------------------------------
+    # -- Fig 2: Memory vs T (MB units for visibility) --------------------
     fig, ax = plt.subplots(figsize=(8, 5))
+
+    mem_floor_mb = 0.1  # floor for log scale (sub-MB values clamp here)
 
     for b in active:
         s = BACKEND_STYLE.get(b, {"color": "gray", "marker": "o", "ls": "-", "label": b})
         Ts = [r.T for r in ok[b]]
-        mems = [r.peak_allocated_gb for r in ok[b]]
+        mems_mb = [max(r.peak_allocated_gb * 1024, mem_floor_mb) for r in ok[b]]
         ax.plot(
             Ts,
-            mems,
+            mems_mb,
             marker=s["marker"],
             linestyle=s["ls"],
             color=s["color"],
@@ -499,17 +501,30 @@ def generate_figures(
             markersize=5,
             linewidth=1.5,
         )
+        # Annotate backends with very low memory (< 10 MB at max T)
+        if mems_mb and mems_mb[-1] < 10:
+            raw_mb = ok[b][-1].peak_allocated_gb * 1024
+            label_text = f"{raw_mb:.1f} MB" if raw_mb >= 1 else f"{raw_mb * 1024:.0f} KB"
+            ax.annotate(
+                label_text,
+                (Ts[-1], mems_mb[-1]),
+                textcoords="offset points",
+                xytext=(8, 0),
+                fontsize=8,
+                color=s["color"],
+                fontweight="bold",
+            )
 
     # Theoretical O(TKC^2) exact backend reference
     all_Ts = sorted({r.T for r in results if r.status == "success"})
     if all_Ts:
-        exact_gb = [B * T * K * C * C * 4 / (1024**3) for T in all_Ts]
+        exact_mb = [B * T * K * C * C * 4 / (1024**2) for T in all_Ts]
         ax.plot(
             all_Ts,
-            exact_gb,
+            exact_mb,
             "--",
             color=THEORY_COLOR,
-            label="Exact O(TKC^2) theoretical",
+            label=r"O(TKC$^2$) edge tensor",
             linewidth=1.5,
         )
 
@@ -523,7 +538,7 @@ def generate_figures(
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("Sequence length T")
-    ax.set_ylabel("Peak allocated GPU memory (GB)")
+    ax.set_ylabel("Peak allocated GPU memory (MB)")
     ax.set_title(f"Memory Scaling  (K={K}, C={C}, B={B})")
     ax.legend(loc="upper left")
     ax.grid(True, which="both", alpha=0.25)
@@ -593,6 +608,58 @@ def generate_figures(
             fig.savefig(outdir / "fig_speedup_vs_T.png", bbox_inches="tight")
             plt.close(fig)
             print("  Saved fig_speedup_vs_T.pdf/png")
+
+    # -- Fig 4: Throughput vs T ----------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for b in active:
+        s = BACKEND_STYLE.get(b, {"color": "gray", "marker": "o", "ls": "-", "label": b})
+        Ts = [r.T for r in ok[b]]
+        # positions per second = T / (time_ms / 1000) = T * 1000 / time_ms
+        throughput = [r.T * 1000 / r.time_ms_median for r in ok[b]]
+        ax.plot(
+            Ts,
+            throughput,
+            marker=s["marker"],
+            linestyle=s["ls"],
+            color=s["color"],
+            label=s["label"],
+            markersize=5,
+            linewidth=1.5,
+        )
+        # Annotate last point with throughput value
+        if throughput:
+            val = throughput[-1]
+            if val >= 1e6:
+                label_text = f"{val / 1e6:.1f}M"
+            elif val >= 1e3:
+                label_text = f"{val / 1e3:.1f}K"
+            else:
+                label_text = f"{val:.0f}"
+            ax.annotate(
+                f"{label_text} pos/s",
+                (Ts[-1], val),
+                textcoords="offset points",
+                xytext=(8, 0),
+                fontsize=8,
+                color=s["color"],
+                fontweight="bold",
+            )
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Sequence length T")
+    ax.set_ylabel("Throughput (positions / second)")
+    ax.set_title(f"Throughput vs Sequence Length  (K={K}, C={C}, B={B})")
+    ax.legend(loc="best")
+    ax.grid(True, which="both", alpha=0.25)
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(fmt_T))
+
+    fig.tight_layout()
+    fig.savefig(outdir / "fig_throughput_vs_T.pdf", bbox_inches="tight")
+    fig.savefig(outdir / "fig_throughput_vs_T.png", bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved fig_throughput_vs_T.pdf/png")
 
 
 # ======================================================================
