@@ -1386,7 +1386,7 @@ class TestTritonBackwardDebug:
         2. Which class indices have the largest errors
         3. Whether the error pattern is systematic or random
 
-        Key insight: For K=1, the backward kernel processes segments of length 1
+        Important observation: For K=1, the backward kernel processes segments of length 1
         (t -> t+1). The bug manifests as 10^19 magnitude errors, suggesting:
         - Uninitialized memory access, OR
         - Incorrect logsumexp accumulation across tiles

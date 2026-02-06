@@ -5,7 +5,7 @@ Calibration Evaluation Module for Semi-CRF vs Linear CRF Uncertainty Comparison
 This module provides metrics to evaluate whether Semi-CRF boundary uncertainties
 are better calibrated than those derived from linear CRFs.
 
-Key insight: Both semi-CRFs and linear CRFs can produce uncertainty estimates,
+Important observation: Both semi-CRFs and linear CRFs can produce uncertainty estimates,
 but semi-CRFs reason about segments natively while linear CRFs derive segment
 information post-hoc from position-level predictions. This should lead to
 better-calibrated uncertainties from semi-CRFs.

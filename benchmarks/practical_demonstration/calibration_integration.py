@@ -6,7 +6,7 @@ This file shows how to integrate the calibration module with the existing
 Gencode and TIMIT benchmarks. These are code snippets to be added to the
 respective benchmark files, not a standalone script.
 
-The key insight is that we need to:
+The important observation is that we need to:
 1. Get boundary probabilities from the semi-CRF (native)
 2. Derive boundary probabilities from the linear CRF (from position marginals)
 3. Compare calibration metrics between them
@@ -389,7 +389,7 @@ Confidence Interval Coverage (closer to nominal is better):
 
 ======================================================================
 
-Key insights:
+Important observations:
 - Semi-CRF has lower ECE: its confidence scores are more reliable
 - Semi-CRF has higher uncertainty-error correlation: when it's uncertain, it's actually wrong
 - Semi-CRF confidence intervals achieve closer to nominal coverage with smaller widths

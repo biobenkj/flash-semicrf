@@ -11,7 +11,7 @@ Two approaches are supported:
 2. **Exact** (:math:`T < 10K`): Uses :meth:`SemiMarkov.marginals` and
    :class:`~torch_semimarkov.semirings.EntropySemiring` with pre-computed edges
 
-Key insight: The gradient of :math:`\log Z` w.r.t. cumulative scores gives marginal
+Important observation: The gradient of :math:`\log Z` w.r.t. cumulative scores gives marginal
 information via the forward-backward algorithm. This works with the streaming API
 for any sequence length.
 

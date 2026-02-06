@@ -69,7 +69,7 @@ Encoder (BiLSTM or Mamba)
     +-- Semi-CRF (K=500 or K=30)
 ```
 
-**Key insight:** `torch-semimarkov` with `max_duration=1` degenerates to a standard linear CRF. This enables truly apples-to-apples comparison using identical code paths.
+**Important observation:** `torch-semimarkov` with `max_duration=1` degenerates to a standard linear CRF. This enables truly apples-to-apples comparison using identical code paths.
 
 ```python
 # Linear CRF baseline
