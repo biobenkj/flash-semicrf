@@ -34,6 +34,8 @@ NOT:
 import pytest
 import torch
 
+from tests.conftest import force_clear_triton_cache
+
 # Skip all tests if CUDA is not available
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA required for Triton tests"
@@ -311,7 +313,11 @@ class TestTritonMarginalsEdgeCases:
         )
 
     def test_triton_marginals_small_batch(self, cuda_device):
-        """Test with batch=1."""
+        """Test with batch=1.
+
+        This test is sensitive to Triton cache contamination, particularly
+        with batch=1 configurations. Clear cache to ensure clean compilation.
+        """
         from torch_semimarkov.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
@@ -321,6 +327,8 @@ class TestTritonMarginalsEdgeCases:
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
+
+        force_clear_triton_cache()
 
         torch.manual_seed(42)
         if torch.cuda.is_available():
