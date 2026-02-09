@@ -16,6 +16,21 @@
 
 K should cover the vast majority of segments in your data without being wasteful. If 99% of exons are shorter than 500 bp, setting K=500 is reasonable. Setting K=50,000 because one intron is that long wastes memory and compute. Instead, cap long segments and let the model produce multiple consecutive segments of the same label. The library's duration bias parameters can encode that splitting behavior.
 
+### Q: Which duration distribution should I use?
+
+Start with `"learned"` (the default). It allocates K × C free parameters and can represent any duration pattern. Switch to a parametric distribution (`"geometric"`, `"poisson"`, `"negative_binomial"`) if you have limited training data relative to K × C, or if you have domain knowledge about how segment lengths behave. Important observation: when K is large (say K=3000 for introns), `"learned"` has thousands of parameters per class for rare long durations that may get little gradient signal — a parametric form acts as a regularizer.
+
+| Scenario | Recommended distribution |
+| -------- | ----------------------- |
+| Plenty of data, no strong prior | `"learned"` (default) |
+| Short segments dominate, exponential decay | `"geometric"` |
+| Each class has a characteristic length | `"poisson"` |
+| Peaked lengths with varying spread per class | `"negative_binomial"` |
+| Ablation baseline (duration shouldn't matter) | `"uniform"` |
+| External histograms or domain priors | `CallableDuration` |
+
+See the [parameter guide](../guides/parameter_guide.md#choosing-a-duration-distribution) for a full decision flowchart and code examples.
+
 ### Q: What are semirings and why are there so many?
 
 A semiring is a way to swap out the arithmetic in the dynamic program without rewriting the algorithm. The **LogSemiring** computes the partition function (for training). The **MaxSemiring** finds the best path (for prediction). The **EntropySemiring** measures uncertainty. The **KMaxSemiring** gives you the top-k segmentations. Same code, different questions answered.
