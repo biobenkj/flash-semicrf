@@ -202,7 +202,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
 
         # Cast partition back to input dtype for return, but keep float64 for backward
         partition_f64 = partition  # Keep float64 for backward pass
-        partition_return = partition.to(cum_scores.dtype)  # Return float32 to user
+        partition_return = partition.to(cum_scores.dtype)  # Return in input dtype to user
 
         # Save float64 version for backward
         ctx.save_for_backward(
@@ -221,7 +221,7 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         ctx.checkpoint_interval = actual_checkpoint_interval
         ctx.num_warps = num_warps
 
-        return partition_return  # <-- float32 for user
+        return partition_return  # <-- in input dtype for user
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -515,7 +515,8 @@ def semi_crf_streaming_forward(
     - **K≥3**: Triton streaming kernel on GPU, PyTorch fallback on CPU.
 
     .. warning::
-        ``cum_scores`` **MUST** be float32 for numerical stability at T > 100K.
+        ``cum_scores`` **MUST** be float32 or float64 for numerical stability at T > 100K.
+        Float64 is recommended as all Triton kernels compute internally in float64.
         Zero-centering before cumsum is critical to prevent precision loss.
 
     .. note::
@@ -524,8 +525,8 @@ def semi_crf_streaming_forward(
 
     Args:
         cum_scores (Tensor): Cumulative projected scores of shape
-            :math:`(\text{batch}, T+1, C)`. Must be float32 and zero-centered
-            before cumsum for numerical stability.
+            :math:`(\text{batch}, T+1, C)`. Must be float32 or float64 (float64
+            recommended) and zero-centered before cumsum for numerical stability.
         transition (Tensor): Label transition scores of shape :math:`(C, C)` for
             static transitions, or :math:`(K, C, C)` for duration-dependent
             transitions. ``transition[c_src, c_dest]`` is the score for
@@ -565,9 +566,9 @@ def semi_crf_streaming_forward(
         >>> # CRITICAL: Zero-center before cumsum
         >>> projected = projected - projected.mean(dim=1, keepdim=True)
         >>>
-        >>> # Cumsum in float32
-        >>> cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float32)
-        >>> cum_scores[:, 1:, :] = torch.cumsum(projected.float(), dim=1)
+        >>> # Cumsum in float64
+        >>> cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float64)
+        >>> cum_scores[:, 1:, :] = torch.cumsum(projected.double(), dim=1)
         >>>
         >>> # Model parameters
         >>> transition = torch.randn(C, C) * 0.1

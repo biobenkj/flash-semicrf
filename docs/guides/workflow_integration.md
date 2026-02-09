@@ -619,25 +619,35 @@ def extract_segments(labels):
    partition.sum().backward()  # Hand-written Triton backward kernel
    ```
 
-3. **Use `triton_scan` only for inference with pre-computed edges**:
+3. **Use `SemiMarkov.logpartition` for pre-computed edge tensors**:
    ```python
-   from torch_semimarkov.triton_scan import semi_crf_triton_forward
+   from torch_semimarkov import SemiMarkov
+   from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
 
-   # Only use if you already have edge tensor from external source
-   log_Z = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+   # If you have a pre-computed edge tensor (batch, T-1, K, C, C)
+   crf = SemiMarkov(LogSemiring)
+   log_Z, _ = crf.logpartition(edge, lengths=lengths)
 
    # Viterbi decoding (max semiring)
-   viterbi = semi_crf_triton_forward(edge.cuda(), lengths.cuda(), semiring="max")
+   crf_max = SemiMarkov(MaxSemiring)
+   best_score, _ = crf_max.logpartition(edge, lengths=lengths)
+
+   # Access ALL 7 semirings (not possible with streaming API)
+   crf_ent = SemiMarkov(EntropySemiring)
+   entropy, _ = crf_ent.logpartition(edge, lengths=lengths)
    ```
 
-   > **Warning**: Do NOT use triton_scan for training. Use `SemiMarkovCRFHead` or the streaming API instead.
+   > **Note**: The streaming API (tips 1-2) only supports log and max semirings.
+   > For entropy, KL divergence, cross-entropy, counting, or K-best, use
+   > `SemiMarkov.logpartition` with pre-computed edge tensors. This requires
+   > the edge tensor to fit in memory.
 
 4. **Choose K carefully**: Memory and compute scale with K. Use empirical
    quantiles (p95/p99) of segment lengths rather than maximum.
 
-3. **Batch similar lengths together** to minimize padding waste.
+5. **Batch similar lengths together** to minimize padding waste.
 
-4. **First training call overhead**: The first call with `requires_grad=True`
+6. **First training call overhead**: The first call with `requires_grad=True`
    incurs a one-time `torch.compile` overhead (a few seconds). Subsequent
    calls reuse the cached compiled kernel.
 

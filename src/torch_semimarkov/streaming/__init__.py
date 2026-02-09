@@ -5,46 +5,34 @@ edge potentials are computed on-the-fly from pre-projected cumulative scores,
 eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
 
 .. important::
-    **When to use this module vs. triton_scan:**
+    **When to use this module vs. pre-computed edges:**
 
     Use ``streaming`` (this module) for:
-        - **Training** (always) - hand-written Triton backward kernels
-        - **Inference** (recommended) - faster than triton_scan even when edge fits
-        - **Very long sequences** (T = 10K - 400K+) - edge tensor cannot fit
+        - **Training and inference** (default) - hand-written Triton forward and backward kernels
+        - **Very long sequences** (T = 10K - 400K+) - edge tensor cannot fit in memory
+        - **Semirings**: log and max only
 
-    Use ``triton_scan`` module only when:
-        - Edge tensor is pre-computed from an external source
-        - Inference only (no gradients needed)
-        - Edge tensor already fits in GPU memory
+    Use ``SemiMarkov.logpartition`` with pre-computed edge tensors when:
+        - Edge tensor fits in GPU memory (O(T x K x C²))
+        - You need semirings beyond log/max (entropy, KL divergence, cross-entropy, counting, K-best)
+        - You have pre-computed edges from an external source
 
     **Memory comparison:**
 
     +-----------------------+------------------+-------------------+
     | Scenario              | edge tensor size | cum_scores size   |
     +=======================+==================+===================+
-    | T=1K, K=32, C=24      | 18 MB            | 96 KB             |
+    | T=1K, K=32, C=24      | 18 MB            | 192 KB            |
     +-----------------------+------------------+-------------------+
-    | T=10K, K=100, C=24    | 5.5 GB           | 960 KB            |
+    | T=10K, K=100, C=24    | 5.5 GB           | 1.9 MB            |
     +-----------------------+------------------+-------------------+
-    | T=400K, K=3K, C=24    | **2.76 TB**      | 38 MB             |
+    | T=400K, K=3K, C=24    | **2.76 TB**      | 76 MB             |
     +-----------------------+------------------+-------------------+
 
     For the T=400K case, the edge tensor cannot fit in memory. This module
     computes edges on-the-fly from O(TxC) cumulative scores instead.
 
-    **Performance comparison (forward-only, NVIDIA L40S):**
-
-    Streaming beats triton_scan on both speed AND memory:
-
-    +-----------------------+---------------------+---------------------+-------------------+
-    | Configuration         | triton_scan         | streaming           | Streaming wins by |
-    +=======================+=====================+=====================+===================+
-    | K=100, batch=64       | 127ms, 14GB         | 38ms, 6MB           | 3.35x faster      |
-    +-----------------------+---------------------+---------------------+-------------------+
-    | K=500, batch=32       | 330ms, 35GB         | 224ms, 3MB          | 1.48x faster      |
-    +-----------------------+---------------------+---------------------+-------------------+
-
-    Why streaming is faster:
+    Why streaming is faster than pre-computed edges:
 
     - **Memory bandwidth**: Loading O(TxKxC²) edges from memory is slower than
       computing O(TxC) edge blocks on-the-fly from cumulative scores
@@ -53,17 +41,18 @@ eliminating the need to materialize the full (batch, T-1, K, C, C) edge tensor.
 
     **Training advantages:**
 
-    - Hand-written Triton backward kernels (no torch.compile overhead)
+    - Hand-written Triton forward and backward kernels
     - No compilation latency (torch.compile takes 20+ minutes for T=1000)
     - No RecursionError from deep computational graphs
     - No OOM from compiled gradient buffers
 
 API Comparison
 --------------
-The ``triton_scan`` module takes a **pre-computed edge tensor**::
+``SemiMarkov.logpartition`` takes a **pre-computed edge tensor**::
 
     edge = model(x)  # shape: (batch, T-1, K, C, C) - must fit in GPU memory!
-    partition = semi_crf_triton_forward(edge, lengths)
+    crf = SemiMarkov(LogSemiring)
+    log_Z, _ = crf.logpartition(edge, lengths=lengths)
 
 This module takes **cumulative scores** and computes edges on-the-fly::
 
@@ -72,7 +61,7 @@ This module takes **cumulative scores** and computes edges on-the-fly::
 
 Memory Complexity
 -----------------
-- Pre-computed edge API (triton_scan): O(T x K x C²) - 2.76 TB for T=400K, K=3K, C=24
+- Pre-computed edge API (``SemiMarkov``): O(T x K x C²) - 2.76 TB for T=400K, K=3K, C=24
 - Streaming API (this module): O(T x C + K x C + C²) - ~50 MB for same dimensions
 
 Streaming Edge Computation
@@ -83,7 +72,7 @@ BEFORE the kernel (loop-invariant projection), then compute edges on-the-fly ins
     # Outside kernel (parallel, efficient)
     projected = h @ W_content                    # (batch, T, C)
     projected = projected - projected.mean(dim=1, keepdim=True)  # Zero-center!
-    cum_scores = cumsum(projected.float(), dim=1)  # (batch, T+1, C) in float32
+    cum_scores = cumsum(projected.double(), dim=1)  # (batch, T+1, C) in float64
 
     # Inside kernel (just vector ops, no matmuls)
     content_score = cum_scores[:, t+k, :] - cum_scores[:, t, :]  # (batch, C)
@@ -102,8 +91,10 @@ Numerical Stability
 -------------------
 Two critical requirements for T=400K+ sequences:
 
-1. **Float32 cumsum**: Cumsum must be float32 to avoid precision loss.
-   Float16 loses all precision at T=400K magnitudes.
+1. **Float64 cumsum**: Cumsum must be float64 for numerical stability.
+   Float16 loses all precision at T=400K magnitudes. Float32 is acceptable
+   but float64 matches the kernel's internal precision.
+   All Triton kernels (forward and backward) compute internally in float64.
 
 2. **Zero-centering**: Without centering, cumsum drifts to ~T magnitude.
    At T=400K, float32 epsilon at that magnitude is ~0.04 - any signal
@@ -135,8 +126,8 @@ Usage
 >>> h = encoder(x)  # (batch, T, hidden_dim)
 >>> projected = h @ W_content
 >>> projected = projected - projected.mean(dim=1, keepdim=True)  # Zero-center!
->>> cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float32)
->>> cum_scores[:, 1:, :] = torch.cumsum(projected.float(), dim=1)
+>>> cum_scores = torch.zeros(batch, T+1, C, dtype=torch.float64)
+>>> cum_scores[:, 1:, :] = torch.cumsum(projected.double(), dim=1)
 >>>
 >>> # Streaming forward (edges computed on-the-fly)
 >>> partition = semi_crf_streaming_forward(
@@ -145,8 +136,7 @@ Usage
 
 See Also
 --------
-:mod:`torch_semimarkov.triton_scan` : Inference only, when edge tensor is pre-computed externally
-:class:`torch_semimarkov.SemiMarkov` : High-level API with marginals and sampling
+:class:`torch_semimarkov.SemiMarkov` : Pre-computed edge tensor API with all 7 semirings
 """
 
 from .autograd import (

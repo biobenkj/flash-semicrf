@@ -67,9 +67,8 @@ class BenchmarkResult:
 
     # Timing (all runs)
     time_ms_median: float
-    time_ms_iqr_low: float  # 25th percentile (Q1)
-    time_ms_iqr_high: float  # 75th percentile (Q3)
-    time_ms_std: float  # standard deviation
+    time_ms_iqr_low: float
+    time_ms_iqr_high: float
     time_per_position_ms: float  # time_ms_median / T
 
     # Memory in GB (consistent units)
@@ -141,7 +140,6 @@ def run_single_benchmark(
             time_ms_median=float("nan"),
             time_ms_iqr_low=float("nan"),
             time_ms_iqr_high=float("nan"),
-            time_ms_std=float("nan"),
             time_per_position_ms=float("nan"),
             peak_allocated_gb=float("nan"),
             peak_reserved_gb=float("nan"),
@@ -205,9 +203,7 @@ def _run_edge_tensor_benchmark(
                 # Use CheckpointShardSemiring to reduce peak memory at cost of time
                 from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
 
-                ShardedSemiring = CheckpointShardSemiring(
-                    type(struct_to_use.semiring), max_size=10000
-                )
+                ShardedSemiring = CheckpointShardSemiring(struct_to_use.semiring, max_size=10000)
                 struct_sharded = SemiMarkov(ShardedSemiring)
                 v, _, _ = struct_sharded._dp_binary_tree(edge_input, lengths, force_grad=True)
                 return v
@@ -277,21 +273,17 @@ def _run_edge_tensor_benchmark(
             gc.collect()
 
         # Compute statistics
-        median = statistics.median(times_ms)
-        std = statistics.stdev(times_ms) if len(times_ms) > 1 else 0.0
-        # Use proper quartiles (n=4 gives [Q1, Q2, Q3])
-        if len(times_ms) >= 2:
-            quantiles = statistics.quantiles(times_ms, n=4)
-            q1, q3 = quantiles[0], quantiles[2]
-        else:
-            q1, q3 = times_ms[0], times_ms[0]
+        times_sorted = sorted(times_ms)
+        n = len(times_sorted)
+        median = statistics.median(times_sorted)
+        q1 = times_sorted[n // 4] if n >= 4 else times_sorted[0]
+        q3 = times_sorted[3 * n // 4] if n >= 4 else times_sorted[-1]
 
         return BenchmarkResult(
             **result_base,
             time_ms_median=round(median, 2),
             time_ms_iqr_low=round(q1, 2),
             time_ms_iqr_high=round(q3, 2),
-            time_ms_std=round(std, 2),
             time_per_position_ms=round(median / T, 4),
             peak_allocated_gb=bytes_to_gb(peak_allocated),
             peak_reserved_gb=bytes_to_gb(peak_reserved),
@@ -309,7 +301,6 @@ def _run_edge_tensor_benchmark(
                 time_ms_median=float("nan"),
                 time_ms_iqr_low=float("nan"),
                 time_ms_iqr_high=float("nan"),
-                time_ms_std=float("nan"),
                 time_per_position_ms=float("nan"),
                 peak_allocated_gb=float("nan"),
                 peak_reserved_gb=float("nan"),
@@ -326,7 +317,6 @@ def _run_edge_tensor_benchmark(
                 time_ms_median=float("nan"),
                 time_ms_iqr_low=float("nan"),
                 time_ms_iqr_high=float("nan"),
-                time_ms_std=float("nan"),
                 time_per_position_ms=float("nan"),
                 peak_allocated_gb=float("nan"),
                 peak_reserved_gb=float("nan"),
@@ -339,7 +329,6 @@ def _run_edge_tensor_benchmark(
             time_ms_median=float("nan"),
             time_ms_iqr_low=float("nan"),
             time_ms_iqr_high=float("nan"),
-            time_ms_std=float("nan"),
             time_per_position_ms=float("nan"),
             peak_allocated_gb=float("nan"),
             peak_reserved_gb=float("nan"),
@@ -374,7 +363,6 @@ def _run_streaming_benchmark(
             time_ms_median=float("nan"),
             time_ms_iqr_low=float("nan"),
             time_ms_iqr_high=float("nan"),
-            time_ms_std=float("nan"),
             time_per_position_ms=float("nan"),
             peak_allocated_gb=float("nan"),
             peak_reserved_gb=float("nan"),
@@ -471,21 +459,17 @@ def _run_streaming_benchmark(
             gc.collect()
 
         # Compute statistics
-        median = statistics.median(times_ms)
-        std = statistics.stdev(times_ms) if len(times_ms) > 1 else 0.0
-        # Use proper quartiles (n=4 gives [Q1, Q2, Q3])
-        if len(times_ms) >= 2:
-            quantiles = statistics.quantiles(times_ms, n=4)
-            q1, q3 = quantiles[0], quantiles[2]
-        else:
-            q1, q3 = times_ms[0], times_ms[0]
+        times_sorted = sorted(times_ms)
+        n = len(times_sorted)
+        median = statistics.median(times_sorted)
+        q1 = times_sorted[n // 4] if n >= 4 else times_sorted[0]
+        q3 = times_sorted[3 * n // 4] if n >= 4 else times_sorted[-1]
 
         return BenchmarkResult(
             **result_base,
             time_ms_median=round(median, 2),
             time_ms_iqr_low=round(q1, 2),
             time_ms_iqr_high=round(q3, 2),
-            time_ms_std=round(std, 2),
             time_per_position_ms=round(median / T, 4),
             peak_allocated_gb=bytes_to_gb(peak_allocated),
             peak_reserved_gb=bytes_to_gb(peak_reserved),
@@ -503,7 +487,6 @@ def _run_streaming_benchmark(
                 time_ms_median=float("nan"),
                 time_ms_iqr_low=float("nan"),
                 time_ms_iqr_high=float("nan"),
-                time_ms_std=float("nan"),
                 time_per_position_ms=float("nan"),
                 peak_allocated_gb=float("nan"),
                 peak_reserved_gb=float("nan"),
@@ -520,7 +503,6 @@ def _run_streaming_benchmark(
                 time_ms_median=float("nan"),
                 time_ms_iqr_low=float("nan"),
                 time_ms_iqr_high=float("nan"),
-                time_ms_std=float("nan"),
                 time_per_position_ms=float("nan"),
                 peak_allocated_gb=float("nan"),
                 peak_reserved_gb=float("nan"),
@@ -533,7 +515,6 @@ def _run_streaming_benchmark(
             time_ms_median=float("nan"),
             time_ms_iqr_low=float("nan"),
             time_ms_iqr_high=float("nan"),
-            time_ms_std=float("nan"),
             time_per_position_ms=float("nan"),
             peak_allocated_gb=float("nan"),
             peak_reserved_gb=float("nan"),

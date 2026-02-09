@@ -110,6 +110,14 @@ def CheckpointShardSemiring(cls, max_size, min_size=0):
     .. warning::
         Sharded checkpointing has significant overhead. Only use when necessary
         to avoid OOM on the binary tree algorithm with large state spaces.
+
+    .. note::
+        The shard step is computed as ``max_size // (KC * KC)`` which controls
+        the batch dimension only. However, the semiring matmul creates a cubic
+        intermediate of shape ``(step, KC, KC, KC)`` via broadcasting, so peak
+        memory per shard is O(KC^3), not O(KC^2). For large state spaces
+        (e.g. KC > ~500), even ``step=1`` may OOM. This matches the upstream
+        pytorch-struct implementation.
     """
 
     class _Check(torch.autograd.Function):

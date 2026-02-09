@@ -181,7 +181,7 @@ class UncertaintyMixin:
             scores = hidden_states
 
         # Zero-center scores to match exact method preprocessing (see nn.py _build_edge_tensor)
-        scores_float = scores.float().detach()
+        scores_float = scores.double().detach()
         if T > 1:
             scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
 
@@ -190,7 +190,7 @@ class UncertaintyMixin:
             batch,
             T + 1,
             self.num_classes,
-            dtype=torch.float32,
+            dtype=torch.float64,
             device=scores.device,
         )
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
@@ -312,7 +312,7 @@ class UncertaintyMixin:
             scores_for_grad = scores.detach().requires_grad_(True)
 
             # Zero-center scores to match exact method preprocessing (see nn.py _build_edge_tensor)
-            scores_centered = scores_for_grad.float()
+            scores_centered = scores_for_grad.double()
             if T > 1:
                 scores_centered = scores_centered - scores_centered.mean(dim=1, keepdim=True)
 
@@ -321,7 +321,7 @@ class UncertaintyMixin:
                 batch,
                 T + 1,
                 self.num_classes,
-                dtype=torch.float32,
+                dtype=torch.float64,
                 device=scores_for_grad.device,
             )
             cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)

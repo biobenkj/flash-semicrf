@@ -115,7 +115,7 @@ class SemiMarkovCRFHead(nn.Module):
         >>> loss.backward()
 
     .. note::
-        For T > 100K, use float32 precision for numerical stability.
+        For T > 100K, use float64 precision for numerical stability.
     """
 
     def __init__(
@@ -162,8 +162,8 @@ class SemiMarkovCRFHead(nn.Module):
         K = self.max_duration
         C = self.num_classes
 
-        # Edge tensor size in bytes: T * K * C * C * 4 (float32)
-        edge_tensor_bytes = T * K * C * C * 4
+        # Edge tensor size in bytes: T * K * C * C * 8 (float64)
+        edge_tensor_bytes = T * K * C * C * 8
 
         return edge_tensor_bytes > self.edge_memory_threshold
 
@@ -194,15 +194,15 @@ class SemiMarkovCRFHead(nn.Module):
         # Cumulative scores for content computation
         # Zero-center before cumsum to match streaming preprocessing
         # Skip for T=1 since mean of single value zeros out content scores
-        scores_float = scores.float()
+        scores_float = scores.double()
         if T > 1:
             scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float32, device=scores.device)
+        cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float64, device=scores.device)
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
         # Build edge tensor with T positions (streaming can access positions 0 to T-1)
         edge = torch.full(
-            (batch, T, K, C, C), float("-inf"), dtype=torch.float32, device=scores.device
+            (batch, T, K, C, C), float("-inf"), dtype=torch.float64, device=scores.device
         )
 
         for n in range(T):
@@ -334,14 +334,14 @@ class SemiMarkovCRFHead(nn.Module):
             )
 
         # Build cumulative scores for prefix-sum edge retrieval
-        # CRITICAL: Use float32 for numerical stability at T > 100K
+        # CRITICAL: Use float64 for numerical stability at T > 100K
         # Zero-center before cumsum to prevent magnitude drift at long sequences
         # Skip for T=1 since mean of single value zeros out content scores
-        scores_float = scores.float()
+        scores_float = scores.double()
         if T > 1:
             scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(
-            batch, T + 1, self.num_classes, dtype=torch.float32, device=scores.device
+            batch, T + 1, self.num_classes, dtype=torch.float64, device=scores.device
         )
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
@@ -507,11 +507,11 @@ class SemiMarkovCRFHead(nn.Module):
         # Build cumulative scores
         # Zero-center before cumsum to prevent magnitude drift at long sequences
         # Skip for T=1 since mean of single value zeros out content scores
-        scores_float = scores.float()
+        scores_float = scores.double()
         if T > 1:
             scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
         cum_scores = torch.zeros(
-            batch, T + 1, self.num_classes, dtype=torch.float32, device=scores.device
+            batch, T + 1, self.num_classes, dtype=torch.float64, device=scores.device
         )
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
@@ -576,10 +576,10 @@ class SemiMarkovCRFHead(nn.Module):
         # Build cumulative scores
         # Zero-center before cumsum to prevent magnitude drift at long sequences
         # Skip for T=1 since mean of single value zeros out content scores
-        scores_float = scores.float()
+        scores_float = scores.double()
         if T > 1:
             scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, self.num_classes, dtype=torch.float32, device=device)
+        cum_scores = torch.zeros(batch, T + 1, self.num_classes, dtype=torch.float64, device=device)
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
         # Select backend
@@ -630,7 +630,7 @@ class SemiMarkovCRFHead(nn.Module):
                             torch.tensor(
                                 sum(seg.score for seg in segments),
                                 device=device,
-                                dtype=torch.float32,
+                                dtype=torch.float64,
                             )
                         )
                     else:
@@ -708,7 +708,7 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Allocate alpha table and backpointers
         # alpha[t, c] = best score to reach position t ending in state c
-        alpha = torch.full((seq_len + 1, C), NEG_INF, device=device, dtype=torch.float32)
+        alpha = torch.full((seq_len + 1, C), NEG_INF, device=device, dtype=torch.float64)
         alpha[0, :] = 0.0  # Start: all states equally valid
 
         # Backpointers: for each (t, c), store (best_k, best_c_src)

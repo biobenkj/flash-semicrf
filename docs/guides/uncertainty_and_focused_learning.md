@@ -51,24 +51,30 @@ P(boundary at position t) = Σ_{segmentations with boundary at t} P(segmentation
 
 This is computed efficiently via the forward-backward algorithm, which is built into the semi-CRF inference.
 
-### Gradient-based marginals for streaming
+### Streaming marginals via forward-backward
 
-For clinical-scale sequences (T >= 10K), materializing the full edge tensor for exact marginals would require terabytes of memory. Instead, we use **gradient-based marginals**:
+For clinical-scale sequences (T >= 10K), materializing the full edge tensor for exact marginals would require terabytes of memory. Instead, the streaming API computes **exact boundary marginals** using the forward-backward algorithm with O(KC) memory:
 
-The important observation is that the gradient of the log partition function with respect to the input scores encodes marginal information:
+```
+P(boundary at position t) = Σ_{k, c_dst, c_src} P(segment[t, k, c_dst, c_src])
+```
+
+This is computed by `compute_boundary_marginals()` using the streaming forward-backward algorithm (`semi_crf_streaming_marginals_pytorch`), which scales to any sequence length.
+
+For **per-position label marginals**, the gradient-based approach is used:
 
 ```
 ∂(log Z) / ∂(cum_scores[t, c]) ∝ P(label c used at position t)
 ```
 
-This gradient is computed during the backward pass of the streaming algorithm, so it works at any sequence length with O(KC) memory.
+This is computed by `compute_position_marginals()` using autograd on the streaming forward pass.
 
 ### Streaming vs exact methods
 
 | Method | Memory | Sequence Length | API |
 |--------|--------|-----------------|-----|
-| **Streaming** (gradient-based) | O(KC) | Any (T >= 10K+) | `backend="streaming"` |
-| **Exact** (forward-backward) | O(T×K×C²) | T < 10K | `backend="exact"` |
+| **Streaming** (forward-backward) | O(KC) | Any (T >= 10K+) | `backend="streaming"` |
+| **Exact** (edge tensor marginals) | O(T×K×C²) | T < 10K | `backend="exact"` |
 | **Auto** (recommended) | varies | Any | `backend="auto"` (default) |
 
 For clinical applications, **streaming is the default** because it scales to any sequence length. The `backend="auto"` option automatically selects the best backend based on memory heuristics.
@@ -382,10 +388,10 @@ exon_intron_uncertainty = extract_boundary_uncertainty(
 
 For long sequences (T > 100K):
 
-1. **Always use float32** for cumulative scores:
+1. **Always use float64** for cumulative scores (all Triton kernels compute internally in float64):
    ```python
-   cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float32)
-   cum_scores[:, 1:] = torch.cumsum(scores.float(), dim=1)
+   cum_scores = torch.zeros(batch, T + 1, C, dtype=torch.float64)
+   cum_scores[:, 1:] = torch.cumsum(scores.double(), dim=1)
    ```
 
 2. **Zero-center before cumsum** to prevent precision loss:
@@ -440,9 +446,9 @@ boundary_probs = model.compute_boundary_marginals(hidden, lengths, backend="stre
 **Problem**: NaN or Inf values in marginals or entropy.
 
 **Solutions**:
-1. Ensure cumulative scores are float32:
+1. Ensure cumulative scores are float64:
    ```python
-   cum_scores = cum_scores.float()
+   cum_scores = cum_scores.double()
    ```
 
 2. Check for extreme input values:
@@ -487,4 +493,3 @@ entropy = model.compute_entropy_exact(hidden, lengths)
 
 - [Integration with upstream encoders](workflow_integration.md) — using semi-CRF with transformers and Mamba
 - [Semirings](semirings.md) — LogSemiring, MaxSemiring, EntropySemiring
-- [Streaming API](streaming_edge_api_roadmap.md) — technical details on O(KC) memory streaming

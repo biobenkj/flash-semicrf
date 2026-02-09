@@ -1,8 +1,8 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `6c463c3`
-- `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `7120f0f`
+- `src/torch_semimarkov/semimarkov.py` @ commit `f9298c5`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 
@@ -14,14 +14,14 @@ The torch-semimarkov library provides two API families:
 
 2. **Non-Streaming API** (`SemiMarkov.logpartition`) - Operates on pre-computed edge tensors. Multiple algorithm variants. Entry point: `semimarkov.py:35`
 
-**Note on Duration Indexing:** The two APIs currently use different indexing conventions by design (benchmarking phase):
+**Duration Indexing:** The APIs use a mixed convention (see non-streaming-backends.md for details):
 
-| API               | Convention | Index Range | Example                      |
-|-------------------|------------|-------------|------------------------------|
-| **Streaming**     | 0-based    | 0 to K-1    | Duration k uses `edge[k-1]`  |
-| **Non-streaming** | 1-based    | 1 to K-1    | Duration k uses `edge[k]`    |
-
-The streaming (0-based) convention is the production target and will be adopted universally post-benchmarking.
+| API / Algorithm Family | Convention | Access Pattern |
+|------------------------|------------|----------------|
+| **Streaming** (all paths) | 0-based | `dur_idx = k - 1` |
+| **Non-streaming** linear scan family | 0-based | `dur_idx = dur - 1` or `arange(0, k_eff)` |
+| **Non-streaming** binary tree family | 1-based | `lp[:, :, 1:K]` (index 0 unused) |
+| **Utilities** (`to_parts`/`from_parts`) | 0-based | Updated at commit `f9298c5` |
 
 ## Active Assumptions
 
@@ -127,6 +127,20 @@ K_C_product = K * C
 use_linear_scan = K_C_product > 200
 ```
 
+## Semiring Availability
+
+| API Level | Available Semirings | How Selected |
+|-----------|---------------------|--------------|
+| `SemiMarkovCRFHead` (nn.py) | log, max only | Implicit: forward/loss=log, decode=max |
+| `semi_crf_streaming_forward` (autograd.py) | log, max only | `semiring` parameter ("log" or "max") |
+| Triton kernel K>=3 | log, max only | Two kernels: `scan_kernel` (log), `scan_kernel_max` (max) |
+| PyTorch reference K>=3 | log, max only | Runtime branch: `if semiring == "log"` |
+| PyTorch reference K=1 | log, max only | Separate functions: `forward` (log), `viterbi` (max) |
+| PyTorch reference K=2 | log, max only | Separate functions: `forward` (log), `viterbi` (max) |
+| `SemiMarkov.logpartition` (semimarkov.py) | **All 7 semirings** | `SemiMarkov(semiring_class)` constructor |
+
+The non-streaming API supports Log, Max, Std, KMax, Entropy, CrossEntropy, and KLDivergence semirings. See non-streaming-backends.md for details on each.
+
 ## Streaming Dispatch Conditions
 
 ### can_use_triton (line 641)
@@ -216,11 +230,12 @@ needs_grad = (
 
 ## Critical Invariants
 
-### Duration Indexing (divergent during benchmarking)
+### Duration Indexing (mixed convention)
 
-- [ ] **Streaming**: `dur_idx = k - 1` for duration value `k` (0-based, production target)
-- [ ] **Non-streaming**: `dur_idx = k` for duration value `k` (1-based, legacy)
-- [ ] `duration_bias` shape: `(K, C)` - index semantics differ by API
+- [ ] **Streaming** (all paths): `dur_idx = k - 1` for duration value `k` (0-based)
+- [ ] **Non-streaming** linear scan family: `dur_idx = dur - 1` (0-based, matches streaming)
+- [ ] **Non-streaming** binary tree family: `lp[:, :, 1:K]` (1-based, index 0 unused)
+- [ ] `duration_bias` shape: `(K, C)` - 0-based in streaming, mixed in non-streaming
 - [ ] Edge tensor last dims: `(c_dst, c_src)` - destination first (consistent)
 
 ### Streaming API
@@ -228,7 +243,7 @@ needs_grad = (
 - [ ] K>=3 required for ring buffer architecture (Triton kernel constraint)
 - [ ] K=1/K=2 fast paths do NOT support boundary projections
 - [ ] Boundary projections force fallback to K>=3 path even for K=1/K=2
-- [ ] `cum_scores` MUST be float32 for numerical stability
+- [ ] `cum_scores` MUST be float32 or float64 (float64 recommended; matches Triton kernel precision)
 
 ### Non-Streaming API
 
@@ -256,6 +271,8 @@ needs_grad = (
 
 ## Version History
 
+- **2026-02-09**: Updated autograd.py commit (STAGED): float32→float64 in docstrings, cum_scores invariant relaxed to accept float64
+- **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Availability table; updated semimarkov.py to commit `f9298c5`
 - **2026-02-05**: Updated autograd.py to commit `6c463c3`; no dispatch logic changes (added checkpoint_interval parameter and dtype conversion handling)
 - **2026-02-01**: Updated line numbers for autograd.py changes (log_norm_checkpoints support)
 - **2026-01-28**: Documented dual indexing scheme divergence (streaming 0-based vs non-streaming 1-based)

@@ -295,8 +295,8 @@ class TestSemiMarkovCRFHead:
         result = crf(scores, lengths, use_triton=False)
 
         # Manual computation (must apply same zero-centering as CRFHead)
-        scores_centered = scores.float() - scores.float().mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, num_classes, dtype=torch.float32)
+        scores_centered = scores.double() - scores.double().mean(dim=1, keepdim=True)
+        cum_scores = torch.zeros(batch, T + 1, num_classes, dtype=torch.float64)
         cum_scores[:, 1:] = torch.cumsum(scores_centered, dim=1)
 
         partition_manual = semi_crf_streaming_forward(
