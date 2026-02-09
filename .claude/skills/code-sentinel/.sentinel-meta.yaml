@@ -4,9 +4,10 @@
 version: 2.0
 last_global_verification: 2026-02-05T00:00:00Z
 
-# Note: Dual indexing scheme active during benchmarking phase
-# - Streaming backends: 0-based (dur_idx = k - 1) - production target
-# - Non-streaming backends: 1-based (dur_idx = k) - legacy
+# Note: Mixed duration indexing convention
+# - Streaming backends: 0-based (dur_idx = k - 1)
+# - Non-streaming linear scan family: 0-based (dur_idx = dur - 1)
+# - Non-streaming binary tree family: 1-based (lp[:, :, 1:K])
 # See dispatch-overview.md and non-streaming-backends.md for details
 
 sentinels:
@@ -35,7 +36,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: 26119fa
+    verified_commit: f9298c5
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
       - src/torch_semimarkov/semimarkov.py
@@ -128,7 +129,7 @@ sentinels:
     depends_on: []
 
   non-streaming-backends:
-    verified_commit: 26119fa
+    verified_commit: f9298c5
     source_files:
       - src/torch_semimarkov/semimarkov.py
     assumptions_mechanical: []

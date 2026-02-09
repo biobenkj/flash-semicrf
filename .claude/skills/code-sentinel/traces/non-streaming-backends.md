@@ -1,6 +1,6 @@
 # Sentinel: Non-Streaming Backends
 
-**Verified against:** `src/torch_semimarkov/semimarkov.py` @ commit `26119fa`
+**Verified against:** `src/torch_semimarkov/semimarkov.py` @ commit `f9298c5`
 **Linked tests:** `tests/test_semimarkov.py`
 
 ## Summary
@@ -23,6 +23,26 @@ SemiMarkov(semiring).logpartition(
 ```
 
 **Location:** `semimarkov.py:35-83`
+
+## Semiring Support
+
+The non-streaming API supports **all 7 semirings** via the `_Struct` base class. The semiring is passed at construction time and determines the DP operations used throughout:
+
+| Semiring | Class | `sum` (reduce) | `times` (combine) | Size | Use Case |
+|----------|-------|----------------|-------------------|------|----------|
+| LogSemiring | `LogSemiring` | `logsumexp` | `+` | 1 | Partition function; gradients give marginals |
+| MaxSemiring | `MaxSemiring` | `max` | `+` | 1 | Viterbi (MAP); gradients give argmax |
+| StdSemiring | `StdSemiring` | `+` | `*` | 1 | Standard counting |
+| KMaxSemiring(k) | `KMaxSemiring(k)` | k-best `max` | `+` | k | K-best structures |
+| EntropySemiring | `EntropySemiring` | entropy-weighted sum | structured | 2 | Shannon entropy H(P) |
+| CrossEntropySemiring | `CrossEntropySemiring` | cross-entropy sum | structured | 3 | Cross-entropy H(P,Q) |
+| KLDivergenceSemiring | `KLDivergenceSemiring` | KL-weighted sum | structured | 3 | KL divergence D_KL(P\|\|Q) |
+
+**Construction:** `SemiMarkov(LogSemiring)`, `SemiMarkov(MaxSemiring)`, etc.
+
+**Multi-valued semirings** (size > 1) add an extra first dimension to all tensors via `semiring.convert()`. The `ssize = semiring.size()` variable tracks this throughout.
+
+**Note:** The streaming API (via `nn.py` or `semi_crf_streaming_forward`) only supports `log` and `max` semirings. For entropy, KL divergence, cross-entropy, counting, or K-best, use the non-streaming API with pre-computed edge tensors.
 
 ## Algorithm Selection Decision Tree
 
@@ -66,20 +86,17 @@ use_linear_scan = K_C_product > 200
 
 ## Duration Indexing Convention
 
-**Non-streaming backends use 1-based duration indexing** (differs from streaming):
+Non-streaming backends use a **mixed** duration indexing convention. The binary tree family and linear scan family access the edge tensor's duration dimension differently:
 
-| Duration value | Array index | Access pattern              |
-|----------------|-------------|-----------------------------|
-| k = 1          | 1           | `edge[:, :, n, 1, :, :]`    |
-| k = 2          | 2           | `edge[:, :, n, 2, :, :]`    |
-| ...            | ...         | ...                         |
-| k = K-1        | K-1         | `edge[:, :, n, K-1, :, :]`  |
+### Binary Tree Family (1-based: indices 1 to K-1)
 
-**Formula:** `dur_idx = k` (direct indexing, index 0 unused)
+The binary tree, block-triangular, and banded algorithms operate on a flattened `(K-1)*C` state space. They slice `lp[:, :, 1:K]`, skipping index 0 and using indices 1 through K-1.
 
-Note: This differs from streaming backends which use 0-based indexing (`dur_idx = k - 1`). The streaming convention is the production target and will be adopted post-benchmarking.
-
-### Evidence in Code
+| Algorithm | Access Pattern | Code Evidence |
+|-----------|---------------|---------------|
+| `_dp_binary_tree` | `lp[:, :, 1:K]` | semimarkov.py:123 |
+| `_dp_blocktriangular` | `lp[:, :, 1:K]` | semimarkov.py:372 |
+| `_dp_banded` | `lp[:, :, 1:K]` | semimarkov.py:542 |
 
 **Binary tree** (`semimarkov.py:122-124`):
 ```python
@@ -88,7 +105,17 @@ c[:, :, : K - 1, 0] = semiring.sum(
 )
 ```
 
-**Ring buffer scan** (`semimarkov.py:202-206`):
+### Linear Scan Family (0-based: indices 0 to K-1)
+
+The ring buffer scan, standard scan, and vectorized scan use 0-based indexing where duration `k` maps to index `k-1`.
+
+| Algorithm | Access Pattern | Code Evidence |
+|-----------|---------------|---------------|
+| `_dp_scan_streaming` | `dur_idx = dur - 1` | semimarkov.py:203 |
+| `_dp_standard` | `f2 = arange(0, len(f1))` | semimarkov.py:266 |
+| `_dp_standard_vectorized` | `dur_indices = arange(0, ...)` | semimarkov.py:312 |
+
+**Ring buffer scan** (`semimarkov.py:202-204`):
 ```python
 # Duration k uses edge index k-1
 dur_idx = dur - 1
@@ -102,6 +129,26 @@ t = max(n - K - 1, -1)
 f1 = torch.arange(n - 1, t, -1)  # time positions [n-1, n-2, ..., n-K]
 f2 = torch.arange(0, len(f1))    # duration indices [0, 1, ..., K-1]
 ```
+
+### Utility Functions (0-based, updated)
+
+`to_parts` and `from_parts` were recently updated to 0-based indexing:
+
+**to_parts** (`semimarkov.py:633`):
+```python
+labels[b, last, n - last - 1, new_c, c] = 1  # 0-based: duration d -> index d-1
+```
+
+**from_parts** (`semimarkov.py:650`):
+```python
+labels[on[i][0], on[i][1] + on[i][2] + 1] = on[i][3]  # dur_idx d-1 -> actual duration d
+```
+
+### Why the Mixture?
+
+The binary tree family works in a flattened `(K-1)*C x (K-1)*C` matrix space for parallel prefix reduction. The chart initialization uses `lp[:, :, 1:K]` to populate the first column of the state matrix, where K-1 duration slots map to matrix rows. This 1-based slice is intrinsic to how the binary tree encodes duration states, not an arbitrary convention.
+
+The linear scan family directly iterates over durations and uses 0-based indexing matching the streaming API convention.
 
 ## Edge Tensor Semantics
 
@@ -248,19 +295,19 @@ def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
 | **Input**                          | Pre-computed `edge (batch, N-1, K, C, C)`  | `cum_scores (batch, T+1, C)` + params |
 | **Edge computation**               | User/upstream responsibility               | On-the-fly prefix-sum               |
 | **Memory (T=1000, K=100, C=24)**   | ~19.2 GB                                   | ~92 KB                              |
-| **Duration indexing**              | `dur_idx = k` (1-based)                    | `dur_idx = k - 1` (0-based)         |
+| **Duration indexing**              | Mixed: binary tree 1-based, scan 0-based   | `dur_idx = k - 1` (0-based)         |
 | **Transition semantics**           | `edge[..., c_dst, c_src]`                  | `edge_block[c_dst, c_src]`          |
 | **Gradient support**               | Via autograd on edge tensor                | Custom backward kernels             |
 | **Use case**                       | Small sequences, pre-computed edges        | Training, long sequences            |
 
 ## Critical Invariants
 
-- [ ] Duration index `k` for duration value `k` (1-based storage, indices 1 to K-1)
+- [ ] Duration indexing is mixed: binary tree family uses `lp[:, :, 1:K]` (1-based); linear scan family uses `dur_idx = dur - 1` (0-based)
 - [ ] Edge tensor last two dims are `(c_dst, c_src)` - destination first
 - [ ] Ring buffer uses `(head - (dur - 1)) % ring_len` for history access
 - [ ] Auto-selection threshold: `K*C > 200` triggers linear scan
 - [ ] All algorithms produce identical partition values (up to numerical precision)
-- [ ] Indexing differs from streaming API (0-based) - will be unified post-benchmarking
+- [ ] `to_parts`/`from_parts` use 0-based indexing (updated at commit `f9298c5`)
 
 ## Known Issues
 
@@ -272,5 +319,6 @@ def hsmm(init_z_1, transition_z_to_z, transition_z_to_l, emission_n_l_z):
 
 ## Version History
 
+- **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Support section listing all 7 semirings; updated to_parts/from_parts docs for 0-based change; updated to commit `f9298c5`
 - **2026-01-28**: Updated to document 1-based duration indexing (benchmarking divergence from streaming)
 - **2026-01-28**: Initial trace @ commit `26119fa`

@@ -74,6 +74,19 @@ These require human/agent judgment when loading the trace.
    - exact -> `_forward_exact()` via `SemiMarkov.logpartition`
    - binary_tree_sharded -> `_forward_binary_tree_sharded()`
 
+## Semiring Restriction
+
+The `SemiMarkovCRFHead` public API does **not** expose semiring selection. It is hardcoded per method:
+
+| Method | Semiring | Purpose |
+|--------|----------|---------|
+| `forward()` | "log" | Partition function for training loss |
+| `compute_loss()` | "log" | NLL = log(Z) - score(y*) |
+| `decode()` | "max" | Viterbi best-path score |
+| `decode_with_traceback()` | "max" | Viterbi score + segment reconstruction |
+
+For other semirings (Entropy, KL Divergence, Cross-Entropy, StdSemiring, KMaxSemiring), use the `SemiMarkov` class directly with pre-computed edge tensors. See non-streaming-backends.md for the full semiring list.
+
 ## Backend Selection (_select_backend)
 
 **Location:** lines 170-187
@@ -147,4 +160,5 @@ def _should_use_streaming(self, T: int) -> bool:
 
 ## Version History
 
+- **2026-02-09**: Added Semiring Restriction section documenting that nn.py only exposes log/max semirings
 - **2026-01-28**: Initial trace @ commit `6d6c535`
