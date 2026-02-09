@@ -1,6 +1,6 @@
 # Sentinel: CRF Heads (nn.py)
 
-**Verified against:** `src/torch_semimarkov/nn.py` @ commit `6d6c535`
+**Verified against:** `src/torch_semimarkov/nn.py` @ commit `7120f0f`
 
 **Linked tests:** `tests/test_semimarkov.py`, `tests/test_streaming_triton.py::TestTritonBasic`
 
@@ -10,7 +10,7 @@ The `SemiMarkovCRFHead` class provides the user-facing API for semi-Markov CRF
 sequence labeling. It wraps streaming/exact backends with:
 
 1. **Automatic backend selection** based on memory heuristics
-2. **Numerical stability** via zero-centering and float32 conversion
+2. **Numerical stability** via zero-centering and float64 conversion
 3. **NaN validation** at projection and cumsum stages
 4. **Unified interface** for training (`compute_loss`) and inference (`decode`)
 
@@ -23,7 +23,7 @@ These are verified automatically via `python3 verify-assumptions.py crf-heads`.
 | ID | Assumption | Verification |
 |----|------------|--------------|
 | N1 | Zero-centering applied before cumsum | anchor: ZERO_CENTER |
-| N2 | Float32 conversion for numerical stability | anchor: FLOAT32_CONVERT |
+| N2 | Float64 conversion for numerical stability | anchor: FLOAT64_CONVERT |
 | N3 | NaN check after projection exists | anchor: NAN_CHECK_PROJECTION |
 | N4 | NaN check after cumsum exists | anchor: NAN_CHECK_CUMSUM |
 | N5 | Streaming forward called for partition | anchor: STREAMING_FORWARD_CALL |
@@ -60,7 +60,7 @@ These require human/agent judgment when loading the trace.
 
 5. **Cumulative scores** (lines 340-346)
    ```python
-   scores_float = scores.float()  # Float32 for stability
+   scores_float = scores.double()  # Float64 for stability (matches Triton kernel precision)
    if T > 1:
        scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)  # Zero-center
    cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
@@ -97,11 +97,11 @@ For other semirings (Entropy, KL Divergence, Cross-Entropy, StdSemiring, KMaxSem
 | Edge tensor <= 8GB | exact | False |
 | Semiring not log/max | exact | False (error if OOM) |
 
-**Edge tensor size formula:** `T * K * C * C * 4` bytes
+**Edge tensor size formula:** `T * K * C * C * 8` bytes (float64)
 
 ```python
 def _should_use_streaming(self, T: int) -> bool:
-    edge_tensor_bytes = T * K * C * C * 4
+    edge_tensor_bytes = T * K * C * C * 8
     return edge_tensor_bytes > self.edge_memory_threshold  # default 8GB
 ```
 
@@ -128,7 +128,7 @@ def _should_use_streaming(self, T: int) -> bool:
 ## Critical Invariants
 
 - [ ] Zero-centering MUST be skipped for T=1 (single position has no variance)
-- [ ] Float32 REQUIRED for T > 100K sequences (prevents cumsum overflow)
+- [ ] Float64 used for cumulative scores (matches Triton kernel internal precision)
 - [ ] NaN checks MUST come after projection and cumsum (early detection)
 - [ ] Duration bias shape: (K, C) where index 0 = duration 1
 - [ ] Transition matrix convention: `transition[i, j]` = FROM label i TO label j
@@ -160,5 +160,6 @@ def _should_use_streaming(self, T: int) -> bool:
 
 ## Version History
 
+- **2026-02-09**: Updated float32→float64 throughout: cum_scores construction, edge tensor sizing (4→8 bytes), invariants. Renamed anchor FLOAT32_CONVERT→FLOAT64_CONVERT. Updated assumption N2.
 - **2026-02-09**: Added Semiring Restriction section documenting that nn.py only exposes log/max semirings
 - **2026-01-28**: Initial trace @ commit `6d6c535`

@@ -932,8 +932,8 @@ For large K, streaming is faster even with the extra computation.
 
 ### Benchmark Comparison (NVIDIA L40S)
 
-| Configuration | triton_scan (pre-computed) | streaming | Advantage |
-|---------------|---------------------------|-----------|-----------|
+| Configuration | pre-computed edges | streaming | Advantage |
+|---------------|-------------------|-----------|-----------|
 | K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35× faster, 2,393× less memory |
 | K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48× faster, 11,795× less memory |
 

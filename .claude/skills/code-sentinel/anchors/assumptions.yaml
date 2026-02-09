@@ -92,10 +92,10 @@ assumptions:
       mechanical: true
 
     - id: N2
-      description: "Float32 conversion for numerical stability"
+      description: "Float64 conversion for numerical stability"
       verification:
         type: anchor
-        ref: FLOAT32_CONVERT
+        ref: FLOAT64_CONVERT
       mechanical: true
 
     - id: N3

@@ -570,73 +570,30 @@ from torch_semimarkov.semirings.checkpoint import (
 )
 ```
 
-## Triton Fused Scan (Inference Only)
+## Pre-computed Edge Tensor API
 
-Direct access to the Triton kernel for **inference only** when you have pre-computed edge tensors.
+For pre-computed edge tensors, use `SemiMarkov.logpartition` directly. This unlocks
+all 7 semirings (not just log/max as in the streaming API).
 
-> **Note:** Even for inference, the streaming API is typically faster because computing
-> edges on-the-fly from O(TxC) data is faster than loading O(TxKxC²) pre-computed edges.
-> Use this API only when edge tensors are pre-computed from an external source.
-
-```python
-from torch_semimarkov.triton_scan import semi_crf_triton_forward
-
-def semi_crf_triton_forward(
-    edge,            # (batch, T-1, K, C, C) potentials
-    lengths,         # (batch,) sequence lengths
-    use_triton=True,
-    validate=False,  # Use float64 PyTorch for validation
-    semiring="log",  # "log" (partition) or "max" (Viterbi)
-    use_compile=True,
-) -> Tensor:
-    """
-    Semi-Markov CRF forward scan optimized for inference.
-
-    Primary use case: Fast forward pass with pre-computed edge tensors.
-    For training, prefer the streaming API (semi_crf_streaming_forward).
-
-    Returns:
-        partition: (batch,) log partition function or Viterbi score
-    """
-```
-
-**Performance comparison (forward-only, NVIDIA L40S):**
-
-Even when the edge tensor fits in memory, streaming is faster:
-
-| Configuration | triton_scan | streaming | Streaming Advantage |
-|---------------|-------------|-----------|---------------------|
-| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35x faster, 2,393x less memory |
-| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48x faster, 11,795x less memory |
-
-**Routing behavior:**
-
-| Context | Execution Path | Recommendation |
-|---------|----------------|----------------|
-| `requires_grad=False` + CUDA | Custom Triton kernel | OK for inference if edges pre-exist |
-| `requires_grad=True` + CUDA | `torch.compile` fallback | **Not recommended** - see warning |
-| CPU or Triton unavailable | PyTorch reference | Use streaming API instead |
-
-> **Warning: torch.compile limitations for training**
->
-> The `torch.compile` path for backward passes has critical limitations at production scales:
-> - **RecursionError**: Sequences longer than T≈1000 exceed Python's recursion limit in inductor
-> - **OOM during backward**: Compiled graphs require 2x+ memory for gradient buffers
-> - **Compilation time**: 20+ minutes for T=1000, essentially unusable
->
-> For training, use `SemiMarkovCRFHead` or `semi_crf_streaming_forward`, which have
-> hand-written Triton backward kernels (no compilation overhead).
-
-**Example usage:**
+> **Note:** For most use cases, the streaming API (`SemiMarkovCRFHead` or
+> `semi_crf_streaming_forward`) is recommended — it computes edges on-the-fly
+> with O(KC) memory and supports both training and inference.
 
 ```python
-from torch_semimarkov.triton_scan import semi_crf_triton_forward
+from torch_semimarkov import SemiMarkov
+from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
 
-# GPU inference: fast custom Triton kernel (primary use case)
-partition = semi_crf_triton_forward(edge.cuda(), lengths.cuda())
+# Pre-computed edge tensor (batch, T-1, K, C, C) - must fit in memory
+crf = SemiMarkov(LogSemiring)
+log_Z, _ = crf.logpartition(edge, lengths=lengths)
 
 # Viterbi score (max semiring)
-viterbi = semi_crf_triton_forward(edge.cuda(), lengths.cuda(), semiring="max")
+crf_max = SemiMarkov(MaxSemiring)
+best_score, _ = crf_max.logpartition(edge, lengths=lengths)
+
+# Entropy (not available via streaming API)
+crf_ent = SemiMarkov(EntropySemiring)
+entropy, _ = crf_ent.logpartition(edge, lengths=lengths)
 ```
 
 ## Helper Types
@@ -829,9 +786,9 @@ perm = snake_ordering(10, 3)
 
 | Use case | API | Why |
 |----------|-----|-----|
-| Training (any T) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | Hand-written backward kernels, no torch.compile |
-| Inference (recommended) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | Faster AND less memory than triton_scan |
-| Inference with pre-existing edges | `semi_crf_triton_forward` | Only if edges already materialized externally |
+| Training (any T) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | Hand-written Triton forward and backward kernels |
+| Inference (recommended) | `SemiMarkovCRFHead` or `semi_crf_streaming_forward` | O(KC) memory, faster than pre-computed edges |
+| Pre-computed edges / all semirings | `SemiMarkov.logpartition` | All 7 semirings, edge tensor must fit in memory |
 | Very long sequences (T > 10K) | Streaming API | Edge tensor cannot fit in memory |
 
 ## See Also

@@ -36,7 +36,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: f9298c5
+    verified_commit: 7120f0f
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
       - src/torch_semimarkov/semimarkov.py
@@ -55,7 +55,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: 6c463c3
+    verified_commit: 7120f0f
     source_files:
       - src/torch_semimarkov/streaming/autograd.py
     assumptions_mechanical: []
@@ -140,7 +140,7 @@ sentinels:
     depends_on: []
 
   crf-heads:
-    verified_commit: 6d6c535
+    verified_commit: 7120f0f
     source_files:
       - src/torch_semimarkov/nn.py
     assumptions_mechanical: [N1, N2, N3, N4, N5]
@@ -150,7 +150,7 @@ sentinels:
       - INIT_METHOD
       - FORWARD_METHOD
       - ZERO_CENTER
-      - FLOAT32_CONVERT
+      - FLOAT64_CONVERT
       - NAN_CHECK_PROJECTION
       - NAN_CHECK_CUMSUM
       - BACKEND_SELECT

@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `6c463c3`
+**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `7120f0f`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -64,7 +64,7 @@ Same tensors saved, minus `num_warps`.
 All input tensors must be:
 1. **Contiguous** - Kernel calls `.contiguous()` on all inputs
 2. **Same device** - All on CPU or all on CUDA
-3. **Same dtype** - Typically float32 for inputs (float16 causes overflow)
+3. **Same dtype** - Float32 or float64 for inputs (float64 recommended; float16 causes overflow)
 
 ### Dtype Handling (Triton Only)
 
@@ -78,15 +78,15 @@ partition, ring_checkpoints, actual_checkpoint_interval, log_norm_checkpoints = 
 
 # Cast partition back to input dtype for return, but keep float64 for backward
 partition_f64 = partition  # Keep float64 for backward pass
-partition_return = partition.to(cum_scores.dtype)  # Return float32 to user
+partition_return = partition.to(cum_scores.dtype)  # Return in input dtype to user
 
 # Save float64 version for backward (line 214)
 ctx.save_for_backward(..., partition_f64, ...)  # <-- float64
 
-return partition_return  # <-- float32 for user
+return partition_return  # <-- in input dtype for user
 ```
 
-**Why**: Kernels compute in float64 for numerical stability at extreme T. The user sees float32 output (matches input dtype), but backward uses float64 internally for precision.
+**Why**: Kernels compute in float64 for numerical stability at extreme T. The user sees output matching their input dtype, but backward uses float64 internally for precision. With float64 cum_scores (now recommended), there is no dtype conversion on the return path.
 
 ### Output Guarantees
 
@@ -216,7 +216,7 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 |-------|----------|---------|------------|
 | Missing `.detach()` in forward | Critical | Double backward errors | Always detach inputs to kernel |
 | Wrong checkpoint_interval | Critical | Incorrect gradients | Use same interval in forward/backward |
-| float16 overflow | High | NaN in long sequences | Use float32 for cum_scores |
+| float16 overflow | High | NaN in long sequences | Use float64 (recommended) or float32 for cum_scores |
 | Non-contiguous input | Medium | Kernel crash or wrong results | Always call `.contiguous()` |
 
 ## Debugging: Interface Violations
@@ -237,7 +237,8 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
-- **2026-02-05**: Added dtype handling documentation for Triton path (partition computed in float64, returned as float32); added checkpoint_interval parameter to forward methods; updated to commit `6c463c3`
+- **2026-02-09**: Updated dtype docs: float32→float64 recommended for cum_scores; docstring now says "float32 or float64"; return comment updated to "input dtype" instead of "float32"
+- **2026-02-05**: Added dtype handling documentation for Triton path (partition computed in float64, returned as input dtype); added checkpoint_interval parameter to forward methods; updated to commit `6c463c3`
 - **2026-02-02**: Updated line numbers throughout; clarified per-batch gradient convention
 - **2026-02-01**: Added log_norm_checkpoints to save_for_backward and kernel interfaces for T=100k+ numerical stability
 - **2026-01-27**: Initial trace @ commit `40fe66b`

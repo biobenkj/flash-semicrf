@@ -1,7 +1,7 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `6c463c3`
+- `src/torch_semimarkov/streaming/autograd.py` @ commit `7120f0f`
 - `src/torch_semimarkov/semimarkov.py` @ commit `f9298c5`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
@@ -243,7 +243,7 @@ needs_grad = (
 - [ ] K>=3 required for ring buffer architecture (Triton kernel constraint)
 - [ ] K=1/K=2 fast paths do NOT support boundary projections
 - [ ] Boundary projections force fallback to K>=3 path even for K=1/K=2
-- [ ] `cum_scores` MUST be float32 for numerical stability
+- [ ] `cum_scores` MUST be float32 or float64 (float64 recommended; matches Triton kernel precision)
 
 ### Non-Streaming API
 
@@ -271,6 +271,7 @@ needs_grad = (
 
 ## Version History
 
+- **2026-02-09**: Updated autograd.py commit (STAGED): float32→float64 in docstrings, cum_scores invariant relaxed to accept float64
 - **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Availability table; updated semimarkov.py to commit `f9298c5`
 - **2026-02-05**: Updated autograd.py to commit `6c463c3`; no dispatch logic changes (added checkpoint_interval parameter and dtype conversion handling)
 - **2026-02-01**: Updated line numbers for autograd.py changes (log_norm_checkpoints support)

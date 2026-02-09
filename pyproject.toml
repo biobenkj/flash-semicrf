@@ -116,7 +116,6 @@ markers = [
 [tool.coverage.run]
 omit = [
     "src/torch_semimarkov/_genbmm/*",
-    "src/torch_semimarkov/triton_scan.py",
     "src/torch_semimarkov/streaming/triton_forward.py",
     "src/torch_semimarkov/streaming/triton_backward.py",
 ]

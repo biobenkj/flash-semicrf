@@ -42,7 +42,7 @@ dispatch-overview:
   CAN_USE_TRITON:
     file: src/torch_semimarkov/streaming/autograd.py
     pattern: can_use_triton = HAS_TRITON and use_triton
-    expected_line: 657
+    expected_line: 658
     drift_tolerance: 30
   STREAMING_ENTRY:
     file: src/torch_semimarkov/streaming/autograd.py
@@ -52,17 +52,17 @@ dispatch-overview:
   K1_DISPATCH:
     file: src/torch_semimarkov/streaming/autograd.py
     pattern: return LinearCRFStreaming.apply(
-    expected_line: 611
+    expected_line: 612
     drift_tolerance: 30
   K2_DISPATCH:
     file: src/torch_semimarkov/streaming/autograd.py
     pattern: return SemiCRFK2Streaming.apply(
-    expected_line: 637
+    expected_line: 638
     drift_tolerance: 30
   TRITON_DISPATCH:
     file: src/torch_semimarkov/streaming/autograd.py
     pattern: return SemiCRFStreamingTriton.apply(
-    expected_line: 663
+    expected_line: 664
     drift_tolerance: 30
 autograd-kernel-interface:
   TRITON_FORWARD_CLASS:
@@ -100,9 +100,9 @@ crf-heads:
     after: def forward(
     expected_line: 342
     drift_tolerance: 20
-  FLOAT32_CONVERT:
+  FLOAT64_CONVERT:
     file: src/torch_semimarkov/nn.py
-    pattern: scores_float = scores.float()
+    pattern: scores_float = scores.double()
     after: def forward(
     expected_line: 340
     drift_tolerance: 20

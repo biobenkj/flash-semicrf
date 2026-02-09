@@ -4,11 +4,10 @@ This project provides GPU-accelerated semi-CRF inference backends using custom T
 
 ## Backend summary
 
-| Backend | Time | DP memory | Best for |
-|---------|------|-----------|----------|
-| `streaming` (recommended) | O(TKC²) | O(KC) | **Default** - Training and inference |
-| `exact` | O(TKC²) | O(TKC²) | Full semiring support via `SemiMarkov` class |
-| `triton_scan` | O(TKC²) | O(TKC²) | Inference only, when edge tensor pre-exists |
+| Backend | Time | DP memory | Semirings | Best for |
+|---------|------|-----------|-----------|----------|
+| `streaming` (recommended) | O(TKC²) | O(KC) | log, max | **Default** - Training and inference |
+| `exact` | O(TKC²) | O(TKC²) | All 7 | Full semiring support via `SemiMarkov` class |
 
 ## Selecting Backends via SemiMarkovCRFHead
 
@@ -38,101 +37,59 @@ The automatic backend selection uses a memory threshold (default 8GB) to decide:
 **Default: Streaming API** (`semi_crf_streaming_forward` or `SemiMarkovCRFHead`)
 
 - O(KC) memory via ring buffer (edges computed on-the-fly)
-- Hand-written Triton backward kernels (no torch.compile overhead)
-- Faster than triton_scan even when edge tensor fits in memory
+- Hand-written Triton forward and backward kernels (no torch.compile overhead)
+- Supports log and max semirings
 
-**Use triton_scan only** when you have pre-computed edge tensors from an external source
-and need inference only (no gradients).
+**Use the exact backend** (`SemiMarkov.logpartition`) when you have pre-computed edge
+tensors and need access to all 7 semirings (entropy, KL divergence, cross-entropy,
+counting, K-best — in addition to log and max).
 
 ## Streaming Triton Kernel (Recommended)
 
 The streaming API computes edge potentials on-the-fly from O(TxC) cumulative scores,
 eliminating the need for the O(TxKxC²) edge tensor.
 
-**Performance comparison (forward-only, NVIDIA L40S):**
-
-| Configuration | triton_scan | streaming | Streaming Advantage |
-|---------------|-------------|-----------|---------------------|
-| K=100, batch=64 | 127ms, 14GB | 38ms, 6MB | 3.35x faster, 2,393x less memory |
-| K=500, batch=32 | 330ms, 35GB | 224ms, 3MB | 1.48x faster, 11,795x less memory |
-
-**Why streaming is faster:**
+**Why streaming is faster than pre-computed edges:**
 - Memory bandwidth is the bottleneck, not compute
 - Computing edges on-the-fly from O(TxC) cumulative scores is faster than loading
   O(TxKxC²) pre-computed edges from memory
 - Linear batch scaling: memory grows as O(batchxTxC), not O(batchxTxKxC²)
 
 **Training advantages:**
-- Hand-written Triton backward kernels (no compilation overhead)
-- No torch.compile latency (which takes 20+ minutes for T=1000)
+- Hand-written Triton forward and backward kernels (no compilation overhead)
+- No torch.compile latency
 - No RecursionError from deep computational graphs
 - No OOM from compiled gradient buffers
 
-## triton_scan Module (Inference Only)
-
-> **Warning: Do NOT use triton_scan for training.**
->
-> The triton_scan module uses `torch.compile` for backward passes, which has
-> critical limitations at production scales:
->
-> - **RecursionError**: T > 1000 exceeds Python recursion limit in inductor
-> - **OOM during backward**: Compiled graphs need 2x+ memory for gradient buffers
-> - **Compilation time**: 20+ minutes for T=1000, essentially unusable
->
-> **Always use the streaming API for training.**
-
-### Execution paths
-
-| Context | Path | Status |
-|---------|------|--------|
-| **Inference** (`requires_grad=False`) | Custom Triton kernel | Works, but streaming is faster |
-| **Training** (`requires_grad=True`) | `torch.compile` | **Broken at scale** (see warning) |
-| **CPU fallback** | PyTorch reference | Use streaming API instead |
-
-### When to use triton_scan
-
-The **only** valid use case for `semi_crf_triton_forward`:
-- You have pre-computed edge tensors from an external source
-- You need inference only (no gradients)
-- The edge tensor already fits in GPU memory
-
-For all other cases, use the streaming API.
-
 ### Supported semirings
 
-Both APIs support **Log** and **Max** semirings:
+The streaming API supports **Log** and **Max** semirings:
 
 - `semiring="log"` (default): Log partition function (sum-product)
 - `semiring="max"`: Viterbi score (max-product)
 
-### Parameters (triton_scan)
+For all 7 semirings (including entropy, KL divergence, cross-entropy, counting, K-best),
+use `SemiMarkov.logpartition` with pre-computed edge tensors via the `exact` backend.
+
+## Exact Backend (Pre-computed Edge Tensors)
+
+Use `SemiMarkov.logpartition` when you have pre-computed edge tensors and need access
+to semirings beyond log/max:
 
 ```python
-semi_crf_triton_forward(
-    edge,              # (batch, T-1, K, C, C) potentials
-    lengths,           # (batch,) sequence lengths
-    use_triton=True,   # Use Triton kernel for inference when available
-    validate=False,    # Use float64 PyTorch for numerical validation
-    semiring="log",    # "log" for partition function, "max" for Viterbi
-    use_compile=True,  # Use torch.compile for training backward pass
-)
+from torch_semimarkov import SemiMarkov
+from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
+
+# Pre-computed edge tensor (batch, T-1, K, C, C) - must fit in memory
+crf = SemiMarkov(LogSemiring)
+log_Z, _ = crf.logpartition(edge, lengths=lengths)
+
+# Access all 7 semirings
+crf_ent = SemiMarkov(EntropySemiring)
+entropy, _ = crf_ent.logpartition(edge, lengths=lengths)
 ```
 
-### Examples
-
-```python
-from torch_semimarkov.triton_scan import semi_crf_triton_forward
-
-# GPU inference with pre-computed edges (only use case)
-edge = edge.cuda()  # (batch, T-1, K, C, C) - must already exist!
-lengths = lengths.cuda()
-partition = semi_crf_triton_forward(edge, lengths)
-
-# Viterbi score (max semiring)
-viterbi_score = semi_crf_triton_forward(edge, lengths, semiring="max")
-```
-
-For training, use the streaming API instead:
+### Streaming API example
 
 ```python
 from torch_semimarkov.streaming import semi_crf_streaming_forward

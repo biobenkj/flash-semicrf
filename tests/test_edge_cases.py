@@ -189,8 +189,10 @@ class TestMinimalSequences:
         # alpha[1] = 1 + 1 + log(2) ≈ 2.69
         # partition = logsumexp([3.69, 2.69]) ≈ 4.00
         C = 2
-        log_C = torch.tensor(C).float().log()
-        expected = torch.logsumexp(torch.tensor([2.0 + 1.0 + log_C, 1.0 + 1.0 + log_C]), dim=0)
+        log_C = torch.tensor(C, dtype=torch.float64).log()
+        expected = torch.logsumexp(
+            torch.tensor([2.0 + 1.0 + log_C, 1.0 + 1.0 + log_C], dtype=torch.float64), dim=0
+        )
         assert torch.allclose(result["partition"], expected.unsqueeze(0), atol=1e-3)
 
     def test_t2_all_valid_segmentations(self):

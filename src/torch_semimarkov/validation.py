@@ -124,7 +124,7 @@ def validate_cum_scores(
     Args:
         cum_scores (Tensor): Cumulative scores of shape :math:`(\text{batch}, T+1, C)`.
         name (str, optional): Name for error messages. Default: ``"cum_scores"``
-        warn_dtype (bool, optional): Warn if not float32. Default: ``True``
+        warn_dtype (bool, optional): Warn if not float32/float64. Default: ``True``
         check_leading_zeros (bool, optional): Warn if ``[:, 0, :]`` not zero. Default: ``False``
 
     Raises:
@@ -137,10 +137,11 @@ def validate_cum_scores(
     if T_plus_1 < 2:
         raise ValueError(f"{name} T+1 dimension must be >= 2 (need at least T=1), got {T_plus_1}")
 
-    if warn_dtype and cum_scores.dtype != torch.float32:
+    if warn_dtype and cum_scores.dtype not in (torch.float32, torch.float64):
         warnings.warn(
-            f"{name} should be float32 for numerical stability at long sequences, "
-            f"got {cum_scores.dtype}",
+            f"{name} should be float32 or float64 for numerical stability at long sequences, "
+            f"got {cum_scores.dtype}. Float64 is recommended; all Triton kernels compute "
+            f"internally in float64.",
             UserWarning,
             stacklevel=3,
         )
