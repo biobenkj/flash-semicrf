@@ -1530,7 +1530,7 @@ if HAS_TRITON:
 
         See Also:
             :func:`launch_streaming_triton_backward`: Full backward pass with gradients.
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+            :func:`~flash_semicrf.streaming.semi_crf_streaming_marginals_pytorch`:
                 PyTorch reference implementation (CPU compatible).
 
         .. note::
@@ -1559,7 +1559,7 @@ if HAS_TRITON:
 
         See Also:
             :func:`launch_streaming_triton_backward`: Full backward pass with gradients
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+            :func:`~flash_semicrf.streaming.semi_crf_streaming_marginals_pytorch`:
                 PyTorch reference implementation (CPU compatible)
         """
         batch = cum_scores.shape[0]

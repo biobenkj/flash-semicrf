@@ -16,11 +16,11 @@ An atomic operation is a memory write that is guaranteed to complete without int
 
 ### Q: What is a Triton kernel?
 
-Triton is a compiler and programming language by OpenAI for writing GPU kernels in Python-like syntax. A "kernel" is a function that runs on the GPU. torch-semimarkov uses Triton to write custom kernels for the forward and backward passes of the semi-CRF DP, which is more efficient than relying on PyTorch's general-purpose operations because the kernel fuses many small operations into one GPU launch and controls memory access patterns precisely.
+Triton is a compiler and programming language by OpenAI for writing GPU kernels in Python-like syntax. A "kernel" is a function that runs on the GPU. flash-semicrf uses Triton to write custom kernels for the forward and backward passes of the semi-CRF DP, which is more efficient than relying on PyTorch's general-purpose operations because the kernel fuses many small operations into one GPU launch and controls memory access patterns precisely.
 
 ### Q: What is tiling?
 
-Tiling means processing data in small blocks (tiles) that fit in the GPU's fast on-chip memory (registers and shared memory) rather than reading from slow global memory repeatedly. In torch-semimarkov, the label dimension C is processed in tiles when C is large enough that the full C×C transition matrix wouldn't fit in registers. The library automatically selects tile sizes based on C:
+Tiling means processing data in small blocks (tiles) that fit in the GPU's fast on-chip memory (registers and shared memory) rather than reading from slow global memory repeatedly. In flash-semicrf, the label dimension C is processed in tiles when C is large enough that the full C×C transition matrix wouldn't fit in registers. The library automatically selects tile sizes based on C:
 
 | Padded C (C_PAD) | Tile Size (τ) | Iterations | Rationale |
 |-------------------|---------------|------------|-----------|
@@ -32,13 +32,13 @@ Tiling means processing data in small blocks (tiles) that fit in the GPU's fast 
 
 ### Q: What does "register pressure" or "register spilling" mean?
 
-Each GPU thread has a limited number of fast local variables called registers. If a kernel needs more registers than are available, the excess "spills" to slower local memory, which can dramatically reduce performance. The tiling strategy in torch-semimarkov is specifically designed to keep register usage under the spilling threshold (~120 registers per thread, enabling 4–8 warps without spilling).
+Each GPU thread has a limited number of fast local variables called registers. If a kernel needs more registers than are available, the excess "spills" to slower local memory, which can dramatically reduce performance. The tiling strategy in flash-semicrf is specifically designed to keep register usage under the spilling threshold (~120 registers per thread, enabling 4–8 warps without spilling).
 
 ## Algorithmic Concepts
 
 ### Q: What is a ring buffer?
 
-A ring buffer is a fixed-size array that wraps around: when you reach the end, you start overwriting from the beginning. In torch-semimarkov, the forward pass only needs the K most recent forward messages (because a segment can be at most K positions long). Instead of storing all T messages, a ring buffer of size K stores them at index `t mod K`. Position 0 goes to slot 0, position K goes to slot 0 again (overwriting), and so on. This is what makes memory O(KC) instead of O(TC).
+A ring buffer is a fixed-size array that wraps around: when you reach the end, you start overwriting from the beginning. In flash-semicrf, the forward pass only needs the K most recent forward messages (because a segment can be at most K positions long). Instead of storing all T messages, a ring buffer of size K stores them at index `t mod K`. Position 0 goes to slot 0, position K goes to slot 0 again (overwriting), and so on. This is what makes memory O(KC) instead of O(TC).
 
 ```
 Time:     0   1   2   3   4   5   6   7   8   ...
@@ -73,7 +73,7 @@ When computing cumulative sums over 100,000+ positions, the running total can dr
 
 ### Q: What is a semiring (in code)?
 
-In torch-semimarkov, a semiring is a Python object that defines two operations: `combine` (how to merge candidates at a position, e.g., logsumexp or max) and `extend` (how to add a new segment's score, typically addition in log-space). The DP loop calls these operations without knowing which semiring it's using. Swapping the semiring object changes the question the DP answers, with no changes to the DP code itself.
+In flash-semicrf, a semiring is a Python object that defines two operations: `combine` (how to merge candidates at a position, e.g., logsumexp or max) and `extend` (how to add a new segment's score, typically addition in log-space). The DP loop calls these operations without knowing which semiring it's using. Swapping the semiring object changes the question the DP answers, with no changes to the DP code itself.
 
 ### Q: What is NEG_INF and why isn't it negative infinity?
 

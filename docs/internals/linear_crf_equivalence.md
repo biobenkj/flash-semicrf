@@ -1,6 +1,6 @@
 # Linear CRF Implementation Comparison
 
-**pytorch-crf vs torch-semimarkov K=1**
+**pytorch-crf vs flash-semicrf K=1**
 
 This document explains the mathematical differences between two linear CRF implementations and demonstrates their functional equivalence for sequence labeling tasks.
 
@@ -52,7 +52,7 @@ $$
 \text{score}(\mathbf{y}) = \pi_{y_1}^{\text{start}} + \sum_{t=1}^{T} \text{emit}_t(y_t) + \sum_{t=2}^{T} \text{trans}(y_{t-1}, y_t)
 $$
 
-### torch-semimarkov K=1: Uniform Initialization
+### flash-semicrf K=1: Uniform Initialization
 
 Initializes all states with zero log-probability:
 
@@ -94,7 +94,7 @@ In other words, if pytorch-crf's start transitions are set to the column-wise lo
 | Approach | Pros | Cons |
 |----------|------|------|
 | **pytorch-crf** | Standard in CRF literature (Lafferty et al., 2001); can learn asymmetric start preferences | Extra parameters ($C$ start transitions) |
-| **torch-semimarkov** | Simpler (fewer parameters); consistent with semi-CRF generalization | Assumes uniform "virtual" start distribution |
+| **flash-semicrf** | Simpler (fewer parameters); consistent with semi-CRF generalization | Assumes uniform "virtual" start distribution |
 
 \newpage
 
@@ -148,7 +148,7 @@ This creates a dataset where:
 - Epochs: 100
 - No regularization (to isolate CRF behavior)
 - pytorch-crf: `start_transitions` and `end_transitions` initialized to zero
-- torch-semimarkov: K=1, uniform duration distribution, `emission_proj = Identity()`
+- flash-semicrf: K=1, uniform duration distribution, `emission_proj = Identity()`
 
 **Evaluation:**
 - Viterbi decode both models on the training data
@@ -159,12 +159,12 @@ This creates a dataset where:
 | Model | Final Accuracy |
 |-------|----------------|
 | pytorch-crf | **100.0%** (640/640) |
-| torch-semimarkov K=1 | **100.0%** (640/640) |
+| flash-semicrf K=1 | **100.0%** (640/640) |
 
 *Note: Final loss values are intentionally omitted because:*
 
 1. *The two implementations define different probability distributions (see Mathematical Background)*
-2. *torch-semimarkov applies **zero-centering** to emission scores before computing cumulative sums (for numerical stability with sequences >100K frames). This shifts the absolute scale of both partition function and gold score. Because logsumexp is nonlinear, this centering affects them differently—causing the reported loss to become negative after training on easy data. This does NOT indicate invalid probabilities, just a shifted internal representation.*
+2. *flash-semicrf applies **zero-centering** to emission scores before computing cumulative sums (for numerical stability with sequences >100K frames). This shifts the absolute scale of both partition function and gold score. Because logsumexp is nonlinear, this centering affects them differently—causing the reported loss to become negative after training on easy data. This does NOT indicate invalid probabilities, just a shifted internal representation.*
 
 *Accuracy is the only meaningful comparison metric.*
 
@@ -218,9 +218,9 @@ The differences vary in both sign and magnitude because:
 
 ---
 
-## Implications for torch-semimarkov
+## Implications for flash-semicrf
 
-The K=1 mode of torch-semimarkov is a **valid linear CRF** that:
+The K=1 mode of flash-semicrf is a **valid linear CRF** that:
 
 1. Implements the standard forward-backward algorithm
 2. Uses a simpler initialization scheme (no extra parameters)
@@ -257,7 +257,7 @@ For inclusion in paper supplementary material:
         \tilde{\alpha}_{t-1}(c') + \text{trans}(c', c)\bigr) \quad t > 1
 \end{align}
 
-\textbf{torch-semimarkov K=1 (uniform initialization):}
+\textbf{flash-semicrf K=1 (uniform initialization):}
 \begin{align}
     \tilde{\alpha}_0(c) &= 0 \quad \forall c \in \{1, \ldots, C\} \\
     \tilde{\alpha}_t(c) &= \text{emit}_t(c) + \log \sum_{c'=1}^{C} \exp\bigl(

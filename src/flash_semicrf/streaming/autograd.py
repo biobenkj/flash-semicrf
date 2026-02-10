@@ -553,7 +553,7 @@ def semi_crf_streaming_forward(
     Examples::
 
         >>> import torch
-        >>> from torch_semimarkov.streaming import semi_crf_streaming_forward
+        >>> from flash_semicrf.streaming import semi_crf_streaming_forward
         >>>
         >>> # Encoder output
         >>> batch, T, hidden_dim, C, K = 2, 100, 64, 4, 8

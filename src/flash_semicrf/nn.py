@@ -64,7 +64,7 @@ class SemiMarkovCRFHead(nn.Module):
             - ``"negative_binomial"`` or ``"negbin"``: Negative binomial distribution
             - ``"poisson"``: Poisson-like distribution
             - ``"uniform"``: Uniform (no duration preference)
-            - A :class:`~torch_semimarkov.duration.DurationDistribution` instance
+            - A :class:`~flash_semicrf.duration.DurationDistribution` instance
 
             Default: ``None`` (uses learned duration bias)
         edge_memory_threshold (float, optional): Memory threshold in bytes for
@@ -89,7 +89,7 @@ class SemiMarkovCRFHead(nn.Module):
     Examples::
 
         >>> import torch
-        >>> from torch_semimarkov import SemiMarkovCRFHead
+        >>> from flash_semicrf import SemiMarkovCRFHead
         >>>
         >>> # Create CRF head with default learned duration
         >>> crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, hidden_dim=512)

@@ -293,11 +293,11 @@ def main():
     print("=" * 70)
 
     try:
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         # PyTorch reference
         pytorch_marginals, log_Z_pytorch = semi_crf_streaming_marginals_pytorch(

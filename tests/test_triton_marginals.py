@@ -55,12 +55,12 @@ class TestTritonMarginalsBasic:
 
     def test_triton_marginals_matches_pytorch(self, cuda_device):
         """Triton marginals should match PyTorch reference."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -132,12 +132,12 @@ class TestTritonMarginalsBasic:
         This test is sensitive to Triton cache contamination with variable
         length configurations. Clear cache to ensure clean compilation.
         """
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -201,12 +201,12 @@ class TestTritonMarginalsEdgeCases:
 
     def test_triton_marginals_k_equals_1(self, cuda_device):
         """Test with K=1 (only duration-1 segments)."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -261,12 +261,12 @@ class TestTritonMarginalsEdgeCases:
 
     def test_triton_marginals_t_equals_k(self, cuda_device):
         """Test with T=K (sequence length equals max duration)."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -326,12 +326,12 @@ class TestTritonMarginalsEdgeCases:
         This test is sensitive to Triton cache contamination, particularly
         with batch=1 configurations. Clear cache to ensure clean compilation.
         """
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -388,12 +388,12 @@ class TestTritonMarginalsEdgeCases:
 
     def test_triton_marginals_large_k(self, cuda_device):
         """Test with large K (many possible durations)."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             launch_streaming_triton_marginals,
             semi_crf_streaming_marginals_pytorch,
         )
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -452,12 +452,12 @@ class TestTritonMarginalsIntegration:
 
     def test_uncertainty_mixin_uses_triton_on_cuda(self, cuda_device):
         """UncertaintyMixin should use Triton kernel on CUDA."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov import UncertaintySemiMarkovCRFHead
+        from flash_semicrf import UncertaintySemiMarkovCRFHead
 
         torch.manual_seed(42)
         if torch.cuda.is_available():
@@ -489,12 +489,12 @@ class TestTritonMarginalsIntegration:
 
     def test_streaming_matches_exact_on_cuda(self, cuda_device):
         """Streaming and exact backends should match on CUDA."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov import UncertaintySemiMarkovCRFHead
+        from flash_semicrf import UncertaintySemiMarkovCRFHead
 
         torch.manual_seed(42)
         if torch.cuda.is_available():
@@ -533,11 +533,11 @@ class TestBackwardCompatibility:
 
     def test_backward_still_computes_gradients(self, cuda_device):
         """Backward kernel should still compute gradients correctly."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
         )
-        from torch_semimarkov.streaming.triton_backward import launch_streaming_triton_backward
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming.triton_backward import launch_streaming_triton_backward
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -598,9 +598,9 @@ class TestBackwardCompatibility:
 
     def test_backward_with_marginals_still_computes_gradients(self, cuda_device):
         """Backward kernel with marginals should still compute gradients."""
-        from torch_semimarkov.streaming import HAS_TRITON
-        from torch_semimarkov.streaming.triton_backward import launch_streaming_triton_backward
-        from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+        from flash_semicrf.streaming import HAS_TRITON
+        from flash_semicrf.streaming.triton_backward import launch_streaming_triton_backward
+        from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")

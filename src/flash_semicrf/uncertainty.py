@@ -1,7 +1,7 @@
 r"""Uncertainty quantification for Semi-Markov CRF.
 
 This module provides uncertainty quantification methods for the
-:class:`~torch_semimarkov.nn.SemiMarkovCRFHead`, enabling clinical applications
+:class:`~flash_semicrf.nn.SemiMarkovCRFHead`, enabling clinical applications
 where boundary confidence is critical.
 
 Two approaches are supported:
@@ -9,7 +9,7 @@ Two approaches are supported:
 1. **Streaming-compatible** (:math:`T \geq 10K`): Uses gradient-based marginals
    from backward pass
 2. **Exact** (:math:`T < 10K`): Uses :meth:`SemiMarkov.marginals` and
-   :class:`~torch_semimarkov.semirings.EntropySemiring` with pre-computed edges
+   :class:`~flash_semicrf.semirings.EntropySemiring` with pre-computed edges
 
 Important observation: The gradient of :math:`\log Z` w.r.t. cumulative scores gives marginal
 information via the forward-backward algorithm. This works with the streaming API
@@ -46,7 +46,7 @@ class UncertaintyMixin:
     - :meth:`compute_boundary_marginals`: :math:`P(\text{boundary at position } t)` for each position
     - :meth:`compute_position_marginals`: Per-position label distributions
     - :meth:`compute_entropy_streaming`: Approximate entropy from marginal distribution
-    - :meth:`compute_entropy_exact`: Exact entropy via :class:`~torch_semimarkov.semirings.EntropySemiring`
+    - :meth:`compute_entropy_exact`: Exact entropy via :class:`~flash_semicrf.semirings.EntropySemiring`
       (:math:`T < 10K` only)
     - :meth:`compute_loss_uncertainty_weighted`: Uncertainty-weighted NLL loss
 
@@ -165,7 +165,7 @@ class UncertaintyMixin:
             torch.Size([2, 100])
 
         See Also:
-            :func:`~torch_semimarkov.streaming.semi_crf_streaming_marginals_pytorch`:
+            :func:`~flash_semicrf.streaming.semi_crf_streaming_marginals_pytorch`:
                 Underlying implementation
             :meth:`_compute_boundary_marginals_exact`: Exact method (requires edge tensor)
         """
@@ -221,7 +221,7 @@ class UncertaintyMixin:
 
         Compute boundary marginals via exact edge marginals.
 
-        Uses :meth:`~torch_semimarkov.SemiMarkov.marginals` to compute exact
+        Uses :meth:`~flash_semicrf.SemiMarkov.marginals` to compute exact
         posterior marginals over all edge potentials, then aggregates to get
         the probability of a segment boundary at each position.
 
@@ -357,7 +357,7 @@ class UncertaintyMixin:
 
         Approximate entropy from marginal distribution.
 
-        For very long sequences where :class:`~torch_semimarkov.semirings.EntropySemiring`
+        For very long sequences where :class:`~flash_semicrf.semirings.EntropySemiring`
         isn't available. Computes:
 
         .. math::
@@ -395,7 +395,7 @@ class UncertaintyMixin:
     ) -> Tensor:
         r"""compute_entropy_exact(hidden_states, lengths) -> Tensor
 
-        Compute exact entropy via :class:`~torch_semimarkov.semirings.EntropySemiring` (:math:`T < 10K` only).
+        Compute exact entropy via :class:`~flash_semicrf.semirings.EntropySemiring` (:math:`T < 10K` only).
 
         Computes the exact Shannon entropy of the segmentation distribution:
 
@@ -536,7 +536,7 @@ class UncertaintyMixin:
 class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead, UncertaintyMixin):
     r"""SemiMarkovCRFHead with uncertainty quantification methods.
 
-    Combines the base :class:`~torch_semimarkov.nn.SemiMarkovCRFHead` functionality
+    Combines the base :class:`~flash_semicrf.nn.SemiMarkovCRFHead` functionality
     with :class:`UncertaintyMixin` methods for clinical applications requiring
     boundary confidence estimates.
 
@@ -560,7 +560,7 @@ class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead, UncertaintyMixin):
             - ``"negative_binomial"`` or ``"negbin"``: Negative binomial distribution
             - ``"poisson"``: Poisson-like distribution
             - ``"uniform"``: Uniform (no duration preference)
-            - A :class:`~torch_semimarkov.duration.DurationDistribution` instance
+            - A :class:`~flash_semicrf.duration.DurationDistribution` instance
 
             Default: ``None`` (uses learned duration bias)
         edge_memory_threshold (float, optional): Memory threshold in bytes for
@@ -612,9 +612,9 @@ class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead, UncertaintyMixin):
         ... )
 
     See Also:
-        :class:`~torch_semimarkov.nn.SemiMarkovCRFHead`: Base CRF head without uncertainty
+        :class:`~flash_semicrf.nn.SemiMarkovCRFHead`: Base CRF head without uncertainty
         :class:`UncertaintyMixin`: Mixin providing uncertainty methods
-        :mod:`torch_semimarkov.duration`: Available duration distributions
+        :mod:`flash_semicrf.duration`: Available duration distributions
     """
 
     pass  # All functionality inherited from SemiMarkovCRFHead and UncertaintyMixin

@@ -13,7 +13,7 @@ Also includes regression tests for bugs discovered during development.
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 
 class TestEdgeCaseConfigurations:

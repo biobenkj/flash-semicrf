@@ -1,6 +1,6 @@
 # Integration with upstream encoders
 
-This guide shows how to use `torch-semimarkov` as a structured prediction layer
+This guide shows how to use `flash-semicrf` as a structured prediction layer
 on top of upstream encoders like transformers, Mamba SSMs, CNNs, or any
 sequence model.
 
@@ -103,11 +103,11 @@ class DirectEdgeHead(nn.Module):
         return edge_flat.view(batch, T - 1, self.K, self.C, self.C)
 ```
 
-**Using it with torch-semimarkov:**
+**Using it with flash-semicrf:**
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 # Build model
 head = DirectEdgeHead(hidden_dim=256, K=8, C=5)
@@ -116,7 +116,7 @@ crf = SemiMarkov(LogSemiring)
 # Forward pass: encoder -> head -> semi-CRF
 hidden_states = encoder(x)              # your encoder
 edge = head(hidden_states)              # project to edge potentials
-log_Z, _ = crf.logpartition(edge, lengths=lengths)  # <-- torch-semimarkov
+log_Z, _ = crf.logpartition(edge, lengths=lengths)  # <-- flash-semicrf
 ```
 
 **Variant: Context window for edge prediction**
@@ -211,7 +211,7 @@ This factorization has two practical advantages:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_semimarkov import SemiMarkov
+from flash_semicrf import SemiMarkov
 
 class HSMMHead(nn.Module):
     """HSMM-factorized projection head for semi-CRF."""
@@ -242,16 +242,16 @@ class HSMMHead(nn.Module):
         trans_z = F.log_softmax(self.trans_logits, dim=-1)
         dur_z = F.log_softmax(self.dur_logits, dim=-1)
 
-        # Combine into edge potentials using torch-semimarkov helper
-        edge = SemiMarkov.hsmm(init_z, trans_z, dur_z, emission)  # <-- torch-semimarkov
+        # Combine into edge potentials using flash-semicrf helper
+        edge = SemiMarkov.hsmm(init_z, trans_z, dur_z, emission)  # <-- flash-semicrf
         return edge
 ```
 
-**Using it with torch-semimarkov:**
+**Using it with flash-semicrf:**
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 # Build model
 head = HSMMHead(hidden_dim=256, K=8, C=5)
@@ -260,7 +260,7 @@ crf = SemiMarkov(LogSemiring)
 # Forward pass: encoder -> head -> semi-CRF
 hidden_states = encoder(x)              # your encoder
 edge = head(hidden_states)              # project to edge potentials (uses SemiMarkov.hsmm)
-log_Z, _ = crf.logpartition(edge, lengths=lengths)  # <-- torch-semimarkov
+log_Z, _ = crf.logpartition(edge, lengths=lengths)  # <-- flash-semicrf
 ```
 
 **Inspecting a trained model**
@@ -311,8 +311,8 @@ This might reveal, for example:
 
 ```python
 from transformers import AutoModel
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 class BERTSemiCRF(nn.Module):
     def __init__(self, model_name, K, C):
@@ -335,7 +335,7 @@ class BERTSemiCRF(nn.Module):
 
     def decode(self, input_ids, attention_mask, lengths):
         """Viterbi decoding for inference."""
-        from torch_semimarkov.semirings import MaxSemiring
+        from flash_semicrf.semirings import MaxSemiring
 
         outputs = self.encoder(input_ids, attention_mask=attention_mask)
         hidden = outputs.last_hidden_state
@@ -538,8 +538,8 @@ for epoch in range(num_epochs):
 To get the most likely segmentation (Viterbi decoding), use `MaxSemiring`:
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import MaxSemiring
 
 def decode(model, x, lengths):
     """Get the most likely segmentation."""
@@ -593,7 +593,7 @@ def extract_segments(labels):
 
 1. **Use `SemiMarkovCRFHead` for most use cases** (recommended):
    ```python
-   from torch_semimarkov import SemiMarkovCRFHead
+   from flash_semicrf import SemiMarkovCRFHead
 
    # Create CRF head with automatic backend selection
    crf = SemiMarkovCRFHead(num_classes=C, max_duration=K, hidden_dim=hidden_dim)
@@ -612,7 +612,7 @@ def extract_segments(labels):
 
 2. **For very long sequences (T > 10K)**, the streaming API is essential:
    ```python
-   from torch_semimarkov.streaming import semi_crf_streaming_forward
+   from flash_semicrf.streaming import semi_crf_streaming_forward
 
    # Streaming: compute edges on-the-fly (O(KC) memory)
    partition = semi_crf_streaming_forward(cum_scores, transition, duration_bias, lengths, K)
@@ -621,8 +621,8 @@ def extract_segments(labels):
 
 3. **Use `SemiMarkov.logpartition` for pre-computed edge tensors**:
    ```python
-   from torch_semimarkov import SemiMarkov
-   from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
+   from flash_semicrf import SemiMarkov
+   from flash_semicrf.semirings import LogSemiring, MaxSemiring, EntropySemiring
 
    # If you have a pre-computed edge tensor (batch, T-1, K, C, C)
    crf = SemiMarkov(LogSemiring)
@@ -728,8 +728,8 @@ This is valuable for:
 The `marginals()` method computes posterior probabilities over edges:
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 model = SemiMarkov(LogSemiring)
 log_Z, edge_marginals = model.marginals(edge, lengths=lengths)
@@ -767,7 +767,7 @@ The Viterbi path (via `MaxSemiring`) gives you the single most probable
 segmentation, but it discards uncertainty information:
 
 ```python
-from torch_semimarkov.semirings import MaxSemiring
+from flash_semicrf.semirings import MaxSemiring
 
 # Viterbi: single best path (no uncertainty)
 model_max = SemiMarkov(MaxSemiring)
@@ -788,7 +788,7 @@ For a single scalar measure of segmentation uncertainty, you can compute the
 entropy of the posterior distribution using `EntropySemiring`:
 
 ```python
-from torch_semimarkov.semirings import EntropySemiring
+from flash_semicrf.semirings import EntropySemiring
 
 model_ent = SemiMarkov(EntropySemiring)
 entropy, _ = model_ent.logpartition(edge, lengths=lengths)

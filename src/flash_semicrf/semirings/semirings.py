@@ -16,7 +16,7 @@ quantities by changing the semiring operations.
 
 Examples::
 
-    >>> from torch_semimarkov.semirings import LogSemiring, MaxSemiring
+    >>> from flash_semicrf.semirings import LogSemiring, MaxSemiring
     >>> # LogSemiring computes partition function, gradients give marginals
     >>> model = SemiMarkov(LogSemiring)
     >>> # MaxSemiring computes Viterbi score, gradients give argmax

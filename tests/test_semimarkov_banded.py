@@ -1,13 +1,13 @@
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.banded_utils import (
+from flash_semicrf import SemiMarkov
+from flash_semicrf.banded_utils import (
     apply_permutation,
     measure_effective_bandwidth,
     snake_ordering,
 )
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf.semirings import LogSemiring
 
 
 def test_banded_logpartition_matches_binary_tree():

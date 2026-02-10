@@ -16,12 +16,12 @@ class TestTritonCacheIsolation:
 
     def test_cache_baseline_small(self):
         """First test with small configuration to populate cache."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             launch_streaming_triton_kernel,
             semi_crf_streaming_forward_pytorch,
         )
@@ -57,7 +57,7 @@ class TestTritonCacheIsolation:
         If the cache isn't cleared between tests, this might fail due to
         reusing kernels compiled with parameters from test_cache_baseline_small.
         """
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -65,7 +65,7 @@ class TestTritonCacheIsolation:
         # Explicitly clear cache to demonstrate the helper function usage
         force_clear_triton_cache()
 
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             launch_streaming_triton_kernel,
             semi_crf_streaming_forward_pytorch,
         )
@@ -102,12 +102,12 @@ class TestTritonCacheIsolation:
         are identical (not just close, but exactly the same). This would fail
         if there's any non-determinism in the kernel or cache behavior.
         """
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov.streaming import launch_streaming_triton_kernel
+        from flash_semicrf.streaming import launch_streaming_triton_kernel
 
         torch.manual_seed(42)
         if torch.cuda.is_available():

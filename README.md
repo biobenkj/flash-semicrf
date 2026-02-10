@@ -1,16 +1,16 @@
 <div align="center">
 
-# torch-semimarkov
+# flash-semicrf
 
 Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
-[![CI](https://github.com/biobenkj/torch-semimarkov/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/biobenkj/torch-semimarkov/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/biobenkj/torch-semimarkov/branch/main/graph/badge.svg)](https://codecov.io/gh/biobenkj/torch-semimarkov)
+[![CI](https://github.com/biobenkj/flash-semicrf/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/biobenkj/flash-semicrf/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/biobenkj/flash-semicrf/branch/main/graph/badge.svg)](https://codecov.io/gh/biobenkj/flash-semicrf)
 
-[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [Examples](examples/) | [GitHub](https://github.com/biobenkj/torch-semimarkov)
+[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [Examples](examples/) | [GitHub](https://github.com/biobenkj/flash-semicrf)
 
 </div>
 
@@ -24,7 +24,7 @@ Streaming the linear scan reduces DP working memory to $O(KC)$, avoiding the $O(
 
 This makes Semi-Markov CRF inference practical for long sequences—chromosome-scale genomics, multi-hour clinical recordings, or large document collections—without architectural compromises.
 
-**torch-semimarkov** provides:
+**flash-semicrf** provides:
 
 - **Streaming Semi-CRF inference** with $O(KC)$ memory via ring buffer and on-the-fly edge computation
   - PyTorch reference implementation (CPU/GPU, always available)
@@ -68,11 +68,11 @@ Each domain benefits from explicit duration modeling and valid-by-construction s
 
 ```bash
 # Basic installation
-pip install torch-semimarkov
+pip install flash-semicrf
 
 # Development installation
-git clone https://github.com/biobenkj/torch-semimarkov.git
-cd torch-semimarkov
+git clone https://github.com/biobenkj/flash-semicrf.git
+cd flash-semicrf
 pip install -e ".[dev]"
 
 # Optional Triton kernel for GPU acceleration
@@ -83,7 +83,7 @@ pip install triton
 
 ```python
 import torch
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 # Create Semi-CRF decoder (integrates with Transformer, Mamba, CNN, etc.)
 crf = SemiMarkovCRFHead(
@@ -143,7 +143,7 @@ This library follows **destination-first** convention for edge tensors, where `e
 
 ### GPU Acceleration (Triton)
 
-When Triton is installed, torch-semimarkov uses custom GPU kernels with fused edge computation that significantly accelerate both forward and backward passes.
+When Triton is installed, flash-semicrf uses custom GPU kernels with fused edge computation that significantly accelerate both forward and backward passes.
 
 **How it works:**
 
@@ -171,7 +171,7 @@ The `SemiMarkovCRFHead` uses Triton automatically when available—pass `use_tri
 For direct access to the streaming kernel:
 
 ```python
-from torch_semimarkov.streaming import semi_crf_streaming_forward
+from flash_semicrf.streaming import semi_crf_streaming_forward
 
 # Cumulative scores from encoder (see docs for zero-centering requirements)
 partition = semi_crf_streaming_forward(
@@ -183,9 +183,9 @@ For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md
 
 ## Documentation
 
-- [Integration guide](docs/guides/workflow_integration.md) — how to use torch-semimarkov with BERT, Mamba, CNNs, and other encoders
+- [Integration guide](docs/guides/workflow_integration.md) — how to use flash-semicrf with BERT, Mamba, CNNs, and other encoders
 - [Parameter guide: T, K, C](docs/guides/parameter_guide.md) — understanding sequence length, duration, and state dimensions
-- [Semirings guide](docs/guides/semirings.md) — context and intuition for semirings used in torch-semimarkov
+- [Semirings guide](docs/guides/semirings.md) — context and intuition for semirings used in flash-semicrf
 - [Uncertainty and focused learning](docs/guides/uncertainty_and_focused_learning.md) — boundary confidence, active learning, and clinical applications
 - [Backends and Triton kernel](docs/reference/backends.md) — algorithm selection and GPU acceleration
 - [API reference](docs/reference/api.md) — detailed API documentation
@@ -196,7 +196,7 @@ For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md
 
 ```bash
 pytest tests/ -v
-pytest tests/ --cov=torch_semimarkov --cov-report=term-missing
+pytest tests/ --cov=flash_semicrf --cov-report=term-missing
 ```
 
 Tests run CPU-only by default. GPU tests require CUDA and are skipped in CI.

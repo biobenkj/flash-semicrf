@@ -1,6 +1,6 @@
 import torch
 
-from torch_semimarkov.banded import BandedMatrix
+from flash_semicrf.banded import BandedMatrix
 
 
 def _band_mask(n, lu, ld):

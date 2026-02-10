@@ -1,8 +1,8 @@
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.helpers import _Struct
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.helpers import _Struct
+from flash_semicrf.semirings import LogSemiring
 
 
 def test_get_dimension_list_sets_grad():

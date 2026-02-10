@@ -7,15 +7,15 @@ Validates the Triton implementation against the PyTorch reference.
 import pytest
 import torch
 
-from tests.conftest import force_clear_triton_cache
-from torch_semimarkov.streaming import (
+from flash_semicrf.streaming import (
     HAS_TRITON,
     semi_crf_streaming_forward_pytorch,
 )
+from tests.conftest import force_clear_triton_cache
 
 # Conditionally import Triton functions
 if HAS_TRITON:
-    from torch_semimarkov.streaming import (
+    from flash_semicrf.streaming import (
         launch_streaming_triton_backward,
         launch_streaming_triton_kernel,
     )
@@ -329,7 +329,7 @@ class TestTritonStreamingKernel:
 
     def test_triton_k1_gradients_match_pytorch(self):
         """Verify K=1 Triton gradients match PyTorch reference via autograd."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 1, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -375,7 +375,7 @@ class TestTritonStreamingKernel:
         If this test fails, the bug is in the tiling logic for K=1 + C_PAD > C.
         If this test passes, the bug may be data-dependent.
         """
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         # Match TIMIT configuration
         batch, T, K, C = 4, 150, 1, 39  # C=39 -> C_PAD=64
@@ -421,7 +421,7 @@ class TestTritonStreamingTraining:
 
     def test_triton_forward_with_gradients(self):
         """Verify Triton forward works when gradients are needed."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 50, 6, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -444,7 +444,7 @@ class TestTritonStreamingTraining:
 
     def test_triton_gradients_match_pytorch(self):
         """Verify Triton path gradients match PyTorch reference."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -478,7 +478,7 @@ class TestTritonStreamingTraining:
 
     def test_dispatch_inference_vs_training(self):
         """Verify correct dispatch based on requires_grad."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 50, 6, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -540,7 +540,7 @@ class TestTritonStreamingTraining:
 
     def test_triton_gradients_variable_lengths(self):
         """Verify Triton gradients handle variable sequence lengths."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 4, 50, 6, 4
         cum_scores, transition, duration_bias, _ = create_streaming_inputs(
@@ -669,7 +669,7 @@ class TestTritonStreamingBoundaries:
 
     def test_triton_with_boundaries_gradients(self):
         """Verify Triton backward with boundaries matches PyTorch."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths, proj_start, proj_end = (
@@ -795,7 +795,7 @@ class TestTritonStreamingBoundaries:
 
     def test_triton_boundaries_variable_lengths(self):
         """Verify boundaries handle variable sequence lengths."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 4, 50, 6, 4
         cum_scores, transition, duration_bias, _, proj_start, proj_end = (
@@ -963,7 +963,7 @@ class TestDurationDependentTransitions:
 
     def test_triton_duration_transitions_gradients(self):
         """Verify Triton backward gradients match PyTorch for (K, C, C) transitions."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = self.create_duration_transition_inputs(
@@ -996,7 +996,7 @@ class TestDurationDependentTransitions:
 
     def test_duration_transitions_gradient_shape(self):
         """Verify gradient shape is (K, C, C) for duration-dependent transitions."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = self.create_duration_transition_inputs(
@@ -1020,7 +1020,7 @@ class TestDurationDependentTransitions:
 
     def test_duration_transitions_with_boundaries(self):
         """Verify (K, C, C) transitions work together with boundary projections."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = self.create_duration_transition_inputs(
@@ -1119,7 +1119,7 @@ class TestGradientScalingBugFix:
 
     def test_heterogeneous_grad_output_shared_params(self):
         """Verify shared parameter gradients with non-uniform grad_output."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1163,7 +1163,7 @@ class TestGradientScalingBugFix:
 
     def test_gradient_linearity_in_grad_output(self):
         """Verify that gradients scale linearly with grad_output."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1202,7 +1202,7 @@ class TestGradientScalingBugFix:
         When grad_output[1] = 0, the second batch element should contribute
         NOTHING to the shared parameter gradients.
         """
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         T, K, C = 30, 5, 4
 
@@ -1250,7 +1250,7 @@ class TestGradientScalingBugFix:
 
     def test_duration_dependent_gradient_scaling(self):
         """Verify gradient scaling works correctly with (K, C, C) transitions."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 30, 5, 4
         torch.manual_seed(42)
@@ -1307,7 +1307,7 @@ class TestTritonBackwardDebug:
 
     def test_triton_backward_debug_minimal(self):
         """Minimal debug test with tiny config to compare gradient values."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         # Tiny config for easy debugging
         batch, T, K, C = 1, 5, 2, 2
@@ -1391,7 +1391,7 @@ class TestTritonBackwardDebug:
         - Uninitialized memory access, OR
         - Incorrect logsumexp accumulation across tiles
         """
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         # Use the failing config: K=1, C=39 -> C_PAD=64, 4 tiles
         batch, T, K, C = 2, 50, 1, 39
@@ -1516,7 +1516,7 @@ class TestTritonBackwardDebug:
         If 2-tile also fails, the bug is in tile accumulation.
         If only 4-tile fails, the bug may be in higher-tile handling.
         """
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         test_cases = [
             (4, 4, 1, "1 tile"),  # C=4 -> C_PAD=4
@@ -1569,7 +1569,7 @@ class TestTritonBackwardDebug:
         If K=2 with C=39 (4 tiles) passes, the bug is specific to K=1.
         If K=2 with C=39 also fails, the bug is in general multi-tile logic.
         """
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 50, 2, 39  # K=2, same C as TIMIT
 
@@ -1614,7 +1614,7 @@ class TestTritonBackwardDebug:
 
     def test_triton_backward_debug_larger(self):
         """Larger debug test matching the actual failing test config."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         # Same config as test_triton_gradients_match_pytorch
         batch, T, K, C = 2, 30, 5, 4
@@ -1694,8 +1694,8 @@ class TestKBasedDispatch:
 
     def test_k1_forward_matches_generic(self):
         """K=1 fast path produces same results as generic implementation."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
-        from torch_semimarkov.streaming.pytorch_reference import (
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.pytorch_reference import (
             linear_crf_forward_pytorch,
             semi_crf_streaming_forward_pytorch,
         )
@@ -1723,7 +1723,7 @@ class TestKBasedDispatch:
 
     def test_k1_backward_gradients(self):
         """K=1 fast path gradients are correct (numerical gradient check)."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 20, 1, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1759,8 +1759,8 @@ class TestKBasedDispatch:
         2. Partition > K=1 partition (more paths summed)
         3. Dispatch routes to K=2 path
         """
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
-        from torch_semimarkov.streaming.pytorch_reference import (
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.pytorch_reference import (
             linear_crf_forward_pytorch,
             semi_crf_k2_forward_pytorch,
         )
@@ -1795,7 +1795,7 @@ class TestKBasedDispatch:
 
     def test_k2_backward_gradients(self):
         """K=2 specialized path gradients are correct."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
 
         batch, T, K, C = 2, 20, 2, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1823,8 +1823,8 @@ class TestKBasedDispatch:
     @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
     def test_k3_uses_triton_on_cuda(self):
         """K>=3 routes to Triton kernel on CUDA."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
-        from torch_semimarkov.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
 
         batch, T, K, C = 2, 30, 5, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1847,7 +1847,7 @@ class TestKBasedDispatch:
 
     def test_k1_viterbi_decoding(self):
         """K=1 Viterbi decoding works correctly."""
-        from torch_semimarkov.streaming.pytorch_reference import linear_crf_viterbi_pytorch
+        from flash_semicrf.streaming.pytorch_reference import linear_crf_viterbi_pytorch
 
         batch, T, K, C = 2, 20, 1, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1869,7 +1869,7 @@ class TestKBasedDispatch:
 
     def test_k2_viterbi_decoding(self):
         """K=2 Viterbi decoding works correctly."""
-        from torch_semimarkov.streaming.pytorch_reference import semi_crf_k2_viterbi_pytorch
+        from flash_semicrf.streaming.pytorch_reference import semi_crf_k2_viterbi_pytorch
 
         batch, T, K, C = 2, 20, 2, 4
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
@@ -1894,7 +1894,7 @@ class TestKBasedDispatch:
 
     def test_k1_variable_lengths(self):
         """K=1 fast path handles variable sequence lengths."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
 
         batch, T, K, C = 4, 30, 1, 4
         cum_scores, transition, duration_bias, _ = create_streaming_inputs(
@@ -1919,7 +1919,7 @@ class TestKBasedDispatch:
 
     def test_k2_variable_lengths(self):
         """K=2 specialized path handles variable sequence lengths."""
-        from torch_semimarkov.streaming.autograd import semi_crf_streaming_forward
+        from flash_semicrf.streaming.autograd import semi_crf_streaming_forward
 
         batch, T, K, C = 4, 30, 2, 4
         cum_scores, transition, duration_bias, _ = create_streaming_inputs(

@@ -1,6 +1,6 @@
 # Sentinel: K=1 Linear CRF Fast Path
 
-**Verified against:** `src/torch_semimarkov/streaming/pytorch_reference.py` @ commit `52c3f9e`
+**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `52c3f9e`
 **Linked tests:** `tests/test_streaming.py::TestStreamingK1::test_streaming_k1_gradient_flow`
 
 ## Summary

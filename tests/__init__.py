@@ -1,1 +1,1 @@
-# Tests for torch_semimarkov
+# Tests for flash_semicrf

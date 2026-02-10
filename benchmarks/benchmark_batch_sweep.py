@@ -59,7 +59,7 @@ from lib.runner import (
 )
 
 try:
-    from torch_semimarkov.streaming import HAS_TRITON
+    from flash_semicrf.streaming import HAS_TRITON
 except ImportError:
     HAS_TRITON = False
 

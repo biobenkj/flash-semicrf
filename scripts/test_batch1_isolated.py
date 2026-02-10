@@ -2,12 +2,12 @@
 
 import torch
 
-from torch_semimarkov.streaming import (
+from flash_semicrf.streaming import (
     HAS_TRITON,
     launch_streaming_triton_marginals,
     semi_crf_streaming_marginals_pytorch,
 )
-from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
 if not HAS_TRITON:
     print("Triton not available")

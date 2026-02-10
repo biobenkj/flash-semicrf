@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel", "torch>=2.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "torch-semimarkov"
+name = "flash-semicrf"
 version = "0.2.0"
 description = "Efficient Semi-Markov CRF Inference for PyTorch"
 readme = "README.md"
@@ -62,16 +62,16 @@ benchmarks = [
 cuda = []  # CUDA extension is optional, built separately
 
 [project.urls]
-Homepage = "https://github.com/benjohnson/torch-semimarkov"
-Documentation = "https://github.com/benjohnson/torch-semimarkov#readme"
-Repository = "https://github.com/benjohnson/torch-semimarkov"
-Issues = "https://github.com/benjohnson/torch-semimarkov/issues"
+Homepage = "https://github.com/biobenkj/flash-semicrf"
+Documentation = "https://github.com/biobenkj/flash-semicrf#readme"
+Repository = "https://github.com/biobenkj/flash-semicrf"
+Issues = "https://github.com/biobenkj/flash-semicrf/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"torch_semimarkov._genbmm.csrc" = ["*.cpp", "*.cu"]
+"flash_semicrf._genbmm.csrc" = ["*.cpp", "*.cu"]
 
 [tool.black]
 line-length = 100
@@ -115,9 +115,9 @@ markers = [
 
 [tool.coverage.run]
 omit = [
-    "src/torch_semimarkov/_genbmm/*",
-    "src/torch_semimarkov/streaming/triton_forward.py",
-    "src/torch_semimarkov/streaming/triton_backward.py",
+    "src/flash_semicrf/_genbmm/*",
+    "src/flash_semicrf/streaming/triton_forward.py",
+    "src/flash_semicrf/streaming/triton_backward.py",
 ]
 
 [tool.coverage.report]

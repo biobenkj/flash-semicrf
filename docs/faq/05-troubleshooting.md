@@ -32,7 +32,7 @@ This is expected when using the Triton backward kernel. The variance is caused b
 If you need exact reproducibility for an ablation study, use the pure PyTorch reference backend, which is deterministic but slower:
 
 ```python
-from torch_semimarkov.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
+from flash_semicrf.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
 ```
 
 ### Q: Training loss went negative. Is something wrong?
@@ -68,7 +68,7 @@ This compares the Triton kernel's forward partition and all gradients against th
 
 Compute is O(TKC²), so halving K roughly halves runtime. If most of your segments are much shorter than K, you can retrain with a smaller K (based on data quantiles) with minimal accuracy loss. In practice, the model rarely uses the full K range because the duration bias learns to penalize very long segments.
 
-### Q: NLL values differ between torch-semimarkov and pytorch-crf. Which is wrong?
+### Q: NLL values differ between flash-semicrf and pytorch-crf. Which is wrong?
 
 Neither. The two implementations define slightly different probability models (different handling of the first position — see [Linear CRF Equivalence](../linear_crf_equivalence.md)). Both are valid. **Compare accuracy, not NLL values**, when benchmarking across implementations.
 

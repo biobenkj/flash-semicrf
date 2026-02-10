@@ -8,7 +8,7 @@ invariants like associativity and identity elements.
 import pytest
 import torch
 
-from torch_semimarkov.semirings import (
+from flash_semicrf.semirings import (
     CrossEntropySemiring,
     EntropySemiring,
     KLDivergenceSemiring,
@@ -17,7 +17,7 @@ from torch_semimarkov.semirings import (
     MaxSemiring,
     StdSemiring,
 )
-from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
+from flash_semicrf.semirings.checkpoint import CheckpointShardSemiring
 
 # =============================================================================
 # Semiring Algebraic Property Tests

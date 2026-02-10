@@ -12,10 +12,10 @@ for small configurations to verify partition computation.
 import pytest
 import torch
 
-from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
+from flash_semicrf.streaming import HAS_TRITON, semi_crf_streaming_forward
 
 # Import reference implementations for dispatch verification
-from torch_semimarkov.streaming.pytorch_reference import (
+from flash_semicrf.streaming.pytorch_reference import (
     linear_crf_forward_pytorch,
     semi_crf_k2_forward_pytorch,
     semi_crf_k2_viterbi_pytorch,
@@ -23,7 +23,7 @@ from torch_semimarkov.streaming.pytorch_reference import (
 )
 
 if HAS_TRITON:
-    from torch_semimarkov.streaming import launch_streaming_triton_kernel
+    from flash_semicrf.streaming import launch_streaming_triton_kernel
 
 
 def create_streaming_inputs(batch, T, K, C, device="cpu", dtype=torch.float32, seed=42):

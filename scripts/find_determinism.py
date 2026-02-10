@@ -2,7 +2,7 @@
 """Find which parameter combinations trigger non-deterministic forward/backward.
 
 Usage:
-    python src/torch_semimarkov/streaming/find_determinism.py
+    python src/flash_semicrf/streaming/find_determinism.py
 
 To test with different num_warps values:
     1. Edit triton_backward.py line ~888: change `num_warps=2` to desired value
@@ -17,10 +17,10 @@ Expected behavior after loop tiling fix:
 
 import torch
 
-from torch_semimarkov.streaming.triton_backward import (
+from flash_semicrf.streaming.triton_backward import (
     launch_streaming_triton_backward,
 )
-from torch_semimarkov.streaming.triton_forward import (
+from flash_semicrf.streaming.triton_forward import (
     _compute_checkpoint_interval,
     _next_power_of_2,
     launch_streaming_triton_kernel,

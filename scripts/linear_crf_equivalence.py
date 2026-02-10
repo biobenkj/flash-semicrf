@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 r"""
-Linear CRF Implementation Comparison: pytorch-crf vs torch-semimarkov K=1
+Linear CRF Implementation Comparison: pytorch-crf vs flash-semicrf K=1
 =========================================================================
 
 This module provides a comprehensive comparison between two linear CRF
 implementations, intended to support academic review and validation of
-the torch-semimarkov library's K=1 mode as a correct linear CRF.
+the flash-semicrf library's K=1 mode as a correct linear CRF.
 
 Mathematical Background
 -----------------------
@@ -51,7 +51,7 @@ This is equivalent to defining a virtual "start state" :math:`y_0 = \text{START}
 
     \tilde{\psi}_1(\text{START}, c) = \pi_c^{\text{start}} + \text{emission}_1(c)
 
-**torch-semimarkov K=1 Approach** (Uniform Implicit Initialization):
+**flash-semicrf K=1 Approach** (Uniform Implicit Initialization):
 
 Initializes all states with zero log-probability and uses the standard transition:
 
@@ -78,7 +78,7 @@ of correctness depends on the modeling assumptions:
    some states are more likely to start sequences (e.g., BIO tagging where "O" or
    "B-*" are valid starts but "I-*" typically isn't).
 
-2. **torch-semimarkov's approach** treats all source states as equally likely at
+2. **flash-semicrf's approach** treats all source states as equally likely at
    position 1, then applies the learned transition matrix. This is:
    - Simpler (fewer parameters)
    - Consistent with the semi-Markov generalization (no special-casing for K=1)
@@ -138,7 +138,7 @@ except ImportError:
     HAS_TORCHCRF = False
     TorchCRF = None
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 # =============================================================================
 # Mathematical Verification Functions
@@ -192,7 +192,7 @@ def compute_forward_semimarkov_manual(
     emissions: torch.Tensor,
     transitions: torch.Tensor,
 ) -> torch.Tensor:
-    r"""Manual forward algorithm matching torch-semimarkov K=1 implementation.
+    r"""Manual forward algorithm matching flash-semicrf K=1 implementation.
 
     Computes log-partition function using uniform initialization.
 
@@ -267,7 +267,7 @@ def compute_gold_score_semimarkov_manual(
     transitions: torch.Tensor,
     labels: torch.Tensor,
 ) -> torch.Tensor:
-    r"""Manual gold score computation matching torch-semimarkov K=1.
+    r"""Manual gold score computation matching flash-semicrf K=1.
 
     .. math::
 
@@ -491,7 +491,7 @@ def test_training_convergence():
         1. pytorch-crf: Reports -log p(y|x) under its probability model (with
            explicit start_transitions). Values are always positive.
 
-        2. torch-semimarkov: Applies internal zero-centering of emission scores
+        2. flash-semicrf: Applies internal zero-centering of emission scores
            before computing cumulative sums (for numerical stability with long
            sequences). This shifts the absolute scale of both partition function
            and gold score. Because logsumexp is nonlinear, this centering affects
@@ -606,7 +606,7 @@ def test_training_convergence():
     print(f"semimarkov final loss:   {sm_losses[-1]:8.4f} (zero-centered, can be negative)")
 
     print("\nWhy semimarkov loss can be negative:")
-    print("  torch-semimarkov applies zero-centering to emission scores before")
+    print("  flash-semicrf applies zero-centering to emission scores before")
     print("  computing cumulative sums (for numerical stability with long sequences).")
     print("  This shifts both partition function and gold score, but logsumexp is")
     print("  nonlinear, so they shift by different amounts. After training on easy")
@@ -703,7 +703,7 @@ def generate_latex_summary():
         \tilde{\alpha}_{t-1}(c') + \text{trans}(c', c)\bigr) \quad t > 1
 \end{align}
 
-\textbf{torch-semimarkov K=1 (uniform initialization):}
+\textbf{flash-semicrf K=1 (uniform initialization):}
 \begin{align}
     \tilde{\alpha}_0(c) &= 0 \quad \forall c \in \{1, \ldots, C\} \\
     \tilde{\alpha}_t(c) &= \text{emit}_t(c) + \log \sum_{c'=1}^{C} \exp\bigl(
@@ -724,13 +724,13 @@ functions when:
         + \sum_{t=2}^{T} \text{trans}(y_{t-1}, y_t)
 \end{equation}
 
-\textbf{torch-semimarkov K=1:}
+\textbf{flash-semicrf K=1:}
 \begin{equation}
     \text{score}(\mathbf{y}) = \sum_{t=1}^{T} \text{emit}_t(y_t)
         + \sum_{t=2}^{T} \text{trans}(y_{t-1}, y_t)
 \end{equation}
 
-Note: The first position does not include a transition score in torch-semimarkov.
+Note: The first position does not include a transition score in flash-semicrf.
 """
     print(latex)
 
@@ -744,7 +744,7 @@ def main():
     """Run all comparison tests."""
     print("\n" + "=" * 70)
     print("LINEAR CRF EQUIVALENCE STUDY")
-    print("pytorch-crf vs torch-semimarkov K=1")
+    print("pytorch-crf vs flash-semicrf K=1")
     print("=" * 70)
 
     test_forward_algorithm_difference()
@@ -782,7 +782,7 @@ Key Findings:
    - Training speed - measures computational efficiency
    - Memory usage - measures scalability
 
-The torch-semimarkov K=1 mode is a valid linear CRF that:
+The flash-semicrf K=1 mode is a valid linear CRF that:
 - Matches standard CRF literature in its core forward/backward algorithms
 - Uses a simpler (fewer parameters) initialization scheme
 - Provides a clean generalization path to semi-CRF (K>1)

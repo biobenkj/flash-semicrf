@@ -1,6 +1,6 @@
 # Sentinel: CRF Heads (nn.py)
 
-**Verified against:** `src/torch_semimarkov/nn.py` @ commit `7120f0f`
+**Verified against:** `src/flash_semicrf/nn.py` @ commit `7120f0f`
 
 **Linked tests:** `tests/test_semimarkov.py`, `tests/test_streaming_triton.py::TestTritonBasic`
 

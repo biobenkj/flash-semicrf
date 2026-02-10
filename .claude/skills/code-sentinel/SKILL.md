@@ -1,7 +1,7 @@
 ---
 name: code-sentinel
 description: >
-  Expert system for torch-semimarkov. Manages persistent execution traces ("Sentinels")
+  Expert system for flash-semicrf. Manages persistent execution traces ("Sentinels")
   for Triton/PyTorch backends.
 
   MANDATORY: Invoke this skill BEFORE debugging NaN/Inf, shape mismatches,
@@ -22,7 +22,7 @@ allowed-tools: Read, Grep, Glob, Bash
 
 # Code Sentinel
 
-Persistent execution traces ("Sentinels") for torch-semimarkov backends. Prevents hallucinations about code execution paths by maintaining verified baseline documentation.
+Persistent execution traces ("Sentinels") for flash-semicrf backends. Prevents hallucinations about code execution paths by maintaining verified baseline documentation.
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ Persistent execution traces ("Sentinels") for torch-semimarkov backends. Prevent
 ./sentinel.py status
 
 # Scaffold a new trace from source
-./sentinel.py init src/torch_semimarkov/streaming/new_module.py
+./sentinel.py init src/flash_semicrf/streaming/new_module.py
 
 # Verify before debugging
 ./sentinel.py verify --trace triton-forward-k3plus
@@ -242,7 +242,7 @@ When code changes require sentinel updates:
 ./sentinel.py status
 
 # Scaffold a new trace
-./sentinel.py init src/torch_semimarkov/nn.py --name crf-heads
+./sentinel.py init src/flash_semicrf/nn.py --name crf-heads
 
 # Trace the Triton forward kernel
 ./sentinel.py verify --trace triton-forward-k3plus

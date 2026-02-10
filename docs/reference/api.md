@@ -8,7 +8,7 @@ The high-level module for most use cases. Uses the streaming Triton kernel inter
 which is the recommended approach for both training and inference:
 
 ```python
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 class SemiMarkovCRFHead(nn.Module):
     def __init__(
@@ -95,7 +95,7 @@ class SemiMarkovCRFHead(nn.Module):
 **Example usage:**
 
 ```python
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 # Create CRF head
 crf = SemiMarkovCRFHead(
@@ -200,18 +200,18 @@ hidden_states (batch, T, hidden_dim)
 
 | Component | File |
 | --------- | ---- |
-| CRF head module | [nn.py](../src/torch_semimarkov/nn.py) |
-| Streaming kernels | [streaming/autograd.py](../src/torch_semimarkov/streaming/autograd.py) |
-| Triton forward | [streaming/triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py) |
-| Triton backward | [streaming/triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py) |
-| Gold scoring | [helpers.py](../src/torch_semimarkov/helpers.py) |
+| CRF head module | [nn.py](../src/flash_semicrf/nn.py) |
+| Streaming kernels | [streaming/autograd.py](../src/flash_semicrf/streaming/autograd.py) |
+| Triton forward | [streaming/triton_forward.py](../src/flash_semicrf/streaming/triton_forward.py) |
+| Triton backward | [streaming/triton_backward.py](../src/flash_semicrf/streaming/triton_backward.py) |
+| Gold scoring | [helpers.py](../src/flash_semicrf/helpers.py) |
 
 ## UncertaintySemiMarkovCRFHead
 
 Extended CRF head with uncertainty quantification:
 
 ```python
-from torch_semimarkov import UncertaintySemiMarkovCRFHead
+from flash_semicrf import UncertaintySemiMarkovCRFHead
 
 class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead):
     """
@@ -298,7 +298,7 @@ class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead):
 **Example usage:**
 
 ```python
-from torch_semimarkov import UncertaintySemiMarkovCRFHead
+from flash_semicrf import UncertaintySemiMarkovCRFHead
 
 model = UncertaintySemiMarkovCRFHead(num_classes=24, max_duration=100, hidden_dim=512)
 
@@ -325,7 +325,7 @@ gradient computation.
 For very long sequences (T = 100K - 400K+) where edge tensor cannot fit in memory:
 
 ```python
-from torch_semimarkov import semi_crf_streaming_forward
+from flash_semicrf import semi_crf_streaming_forward
 
 def semi_crf_streaming_forward(
     cum_scores,       # (batch, T+1, C) cumulative projected scores
@@ -356,7 +356,7 @@ def semi_crf_streaming_forward(
 **Example usage:**
 
 ```python
-from torch_semimarkov import semi_crf_streaming_forward
+from flash_semicrf import semi_crf_streaming_forward
 
 # Pre-project features (outside kernel)
 projected = hidden @ W_content  # (batch, T, C)
@@ -381,7 +381,7 @@ Low-level components of the streaming API for advanced use cases.
 Compute edge potentials for a single (position, duration) pair on-the-fly:
 
 ```python
-from torch_semimarkov.streaming import compute_edge_block_streaming
+from flash_semicrf.streaming import compute_edge_block_streaming
 
 def compute_edge_block_streaming(
     cum_scores,      # (batch, T+1, C)
@@ -402,7 +402,7 @@ def compute_edge_block_streaming(
 PyTorch autograd functions for streaming Semi-CRF with custom backward passes:
 
 ```python
-from torch_semimarkov.streaming import SemiCRFStreaming, SemiCRFStreamingTriton
+from flash_semicrf.streaming import SemiCRFStreaming, SemiCRFStreamingTriton
 
 # Pure PyTorch (CPU or GPU without Triton)
 class SemiCRFStreaming(torch.autograd.Function):
@@ -427,10 +427,10 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
 When Triton is installed, these low-level kernel launchers are available:
 
 ```python
-from torch_semimarkov.streaming import HAS_TRITON
+from flash_semicrf.streaming import HAS_TRITON
 
 if HAS_TRITON:
-    from torch_semimarkov.streaming import (
+    from flash_semicrf.streaming import (
         launch_streaming_triton_kernel,      # Forward pass
         launch_streaming_triton_backward,    # Backward pass
         launch_streaming_triton_kernel_max_bp,  # Viterbi with backpointers
@@ -441,7 +441,7 @@ if HAS_TRITON:
 ### Constants
 
 ```python
-from torch_semimarkov.streaming import NEG_INF
+from flash_semicrf.streaming import NEG_INF
 
 NEG_INF  # Large negative value for log-space operations (-1e38)
 ```
@@ -451,7 +451,7 @@ NEG_INF  # Large negative value for log-space operations (-1e38)
 Flexible parameterization for segment duration priors:
 
 ```python
-from torch_semimarkov import (
+from flash_semicrf import (
     create_duration_distribution,
     LearnedDuration,
     GeometricDuration,
@@ -493,8 +493,8 @@ Use `GeometricDuration` as a stable alternative.
 Low-level API with semiring abstraction for advanced use cases:
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring, MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring, MaxSemiring
 
 class SemiMarkov(semiring):
     def logpartition(
@@ -554,7 +554,7 @@ class SemiMarkov(semiring):
 ## Semirings
 
 ```python
-from torch_semimarkov.semirings import (
+from flash_semicrf.semirings import (
     LogSemiring,           # Standard log-space (sum-product)
     MaxSemiring,           # Viterbi decoding (max-product)
     StdSemiring,           # Standard arithmetic
@@ -564,7 +564,7 @@ from torch_semimarkov.semirings import (
     CrossEntropySemiring,  # Cross-entropy H(P, Q)
 )
 
-from torch_semimarkov.semirings.checkpoint import (
+from flash_semicrf.semirings.checkpoint import (
     CheckpointSemiring,       # Gradient checkpointing
     CheckpointShardSemiring,  # Sharded checkpointing
 )
@@ -580,8 +580,8 @@ all 7 semirings (not just log/max as in the streaming API).
 > with O(KC) memory and supports both training and inference.
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring, MaxSemiring, EntropySemiring
 
 # Pre-computed edge tensor (batch, T-1, K, C, C) - must fit in memory
 crf = SemiMarkov(LogSemiring)
@@ -599,7 +599,7 @@ entropy, _ = crf_ent.logpartition(edge, lengths=lengths)
 ## Helper Types
 
 ```python
-from torch_semimarkov import Segment, ViterbiResult
+from flash_semicrf import Segment, ViterbiResult
 
 @dataclass
 class Segment:
@@ -625,7 +625,7 @@ structures. They are primarily used for benchmarking and experimentation.
 Lightweight banded matrix representation for CPU/PyTorch operations:
 
 ```python
-from torch_semimarkov import BandedMatrix
+from flash_semicrf import BandedMatrix
 
 @dataclass
 class BandedMatrix:
@@ -660,7 +660,7 @@ class BandedMatrix:
 **Example:**
 
 ```python
-from torch_semimarkov import BandedMatrix
+from flash_semicrf import BandedMatrix
 
 # Create banded matrix from dense
 dense = torch.randn(2, 10, 10)
@@ -676,7 +676,7 @@ reconstructed = banded.to_dense()
 Block-triangular sparse representation exploiting duration constraint `k1 + k2 <= span`:
 
 ```python
-from torch_semimarkov import BlockTriangularMatrix, block_triang_matmul
+from flash_semicrf import BlockTriangularMatrix, block_triang_matmul
 
 @dataclass
 class BlockTriangularMatrix:
@@ -705,7 +705,7 @@ def block_triang_matmul(left, right, semiring, span) -> BlockTriangularMatrix:
 **Example:**
 
 ```python
-from torch_semimarkov import BlockTriangularMatrix
+from flash_semicrf import BlockTriangularMatrix
 
 dense = torch.randn(2, 12, 12)  # K=4, C=3
 bt = BlockTriangularMatrix.from_dense(dense, K=4, C=3, span=4)
@@ -717,7 +717,7 @@ print(bt.values.shape)  # (2, 10, 3, 3) - only 10 blocks satisfy k1+k2 <= 4
 Utilities for analyzing and optimizing banded matrix structures:
 
 ```python
-from torch_semimarkov import (
+from flash_semicrf import (
     measure_effective_bandwidth,
     snake_ordering,
     rcm_ordering_from_adjacency,
@@ -762,7 +762,7 @@ def apply_permutation(potentials, perm) -> Tensor:
 **Example:**
 
 ```python
-from torch_semimarkov import measure_effective_bandwidth, snake_ordering
+from flash_semicrf import measure_effective_bandwidth, snake_ordering
 
 adj = torch.eye(5)
 print(measure_effective_bandwidth(adj))  # 0

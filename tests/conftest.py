@@ -1,5 +1,5 @@
 """
-Pytest configuration for torch-semimarkov tests.
+Pytest configuration for flash-semicrf tests.
 
 IMPORTANT: CPU-ONLY TESTING
 ---------------------------

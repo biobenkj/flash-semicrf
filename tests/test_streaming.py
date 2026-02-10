@@ -10,7 +10,7 @@ import warnings
 import pytest
 import torch
 
-from torch_semimarkov.streaming import (
+from flash_semicrf.streaming import (
     compute_edge_block_streaming,
     semi_crf_streaming_forward,
 )
