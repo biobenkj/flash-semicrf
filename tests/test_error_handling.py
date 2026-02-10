@@ -8,8 +8,8 @@ and produces meaningful error messages or handles edge cases correctly.
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 
 class TestInvalidDimensions:

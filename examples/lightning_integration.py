@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Example: Using SemiMarkovCRFHead with PyTorch Lightning.
 
-This example demonstrates how to integrate torch-semimarkov with PyTorch Lightning
+This example demonstrates how to integrate flash-semicrf with PyTorch Lightning
 for distributed training of sequence segmentation models.
 
 Key points:
@@ -36,7 +36,7 @@ except ImportError:
     HAS_LIGHTNING = False
     print("PyTorch Lightning not installed. Install with: pip install pytorch-lightning")
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 
 class SimpleEncoder(nn.Module):

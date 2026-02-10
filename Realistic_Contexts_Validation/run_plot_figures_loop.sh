@@ -15,8 +15,8 @@ set -euo pipefail
 module load bbc2/python3/python-3.13.7
 unset PYTHONHOME PYTHONPATH
 
-OUTER=/varidata/research/projects/jang/TommyGoralski/torch_semimarkov
-REPO=$OUTER/torch-semimarkov
+OUTER=/varidata/research/projects/jang/TommyGoralski/flash_semicrf
+REPO=$OUTER/flash-semicrf
 
 # UPDATED: point to the single sweep output directory (one benchmark_full.csv)
 RESULTS=$OUTER/results/realistic/human_exonK_from_stats_sweep

@@ -42,14 +42,14 @@ from dataclasses import dataclass
 
 import torch
 
-from torch_semimarkov.streaming.pytorch_reference import (
+from flash_semicrf.streaming.pytorch_reference import (
     semi_crf_streaming_backward_pytorch,
     semi_crf_streaming_forward_pytorch,
 )
-from torch_semimarkov.streaming.triton_backward import (
+from flash_semicrf.streaming.triton_backward import (
     launch_streaming_triton_backward,
 )
-from torch_semimarkov.streaming.triton_forward import (
+from flash_semicrf.streaming.triton_forward import (
     _compute_checkpoint_interval,
     _next_power_of_2,
     launch_streaming_triton_kernel,

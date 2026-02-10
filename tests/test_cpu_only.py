@@ -1,5 +1,5 @@
 """
-Tests verifying CPU-only operation of torch-semimarkov.
+Tests verifying CPU-only operation of flash-semicrf.
 
 This test suite ensures that all operations work correctly on CPU,
 which is the only supported device for CI/CD pipelines (due to GPU cost).
@@ -10,9 +10,9 @@ to pure PyTorch implementations when CUDA is not available.
 
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
-from torch_semimarkov.streaming import semi_crf_streaming_forward
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
+from flash_semicrf.streaming import semi_crf_streaming_forward
 
 
 class TestCPUOnlyOperation:

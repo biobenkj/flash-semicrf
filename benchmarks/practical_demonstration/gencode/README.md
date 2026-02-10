@@ -115,8 +115,8 @@ python gencode_exon_intron.py train \
 | Type | Description |
 |------|-------------|
 | `pytorch-crf` | External pytorch-crf baseline (requires `pip install pytorch-crf`) |
-| `linear` | torch-semimarkov with K=1 (linear CRF, no duration modeling) |
-| `semicrf` | torch-semimarkov with K>1 (full Semi-CRF with duration modeling) |
+| `linear` | flash-semicrf with K=1 (linear CRF, no duration modeling) |
+| `semicrf` | flash-semicrf with K>1 (full Semi-CRF with duration modeling) |
 
 **Encoder types (`--encoder`):**
 | Type | Description |
@@ -153,8 +153,8 @@ python gencode_exon_intron.py compare \
 
 This runs a 3-way comparison:
 1. **pytorch-crf**: External linear CRF baseline
-2. **linear (K=1)**: torch-semimarkov linear CRF
-3. **semicrf (K>1)**: torch-semimarkov Semi-CRF
+2. **linear (K=1)**: flash-semicrf linear CRF
+3. **semicrf (K>1)**: flash-semicrf Semi-CRF
 
 ---
 

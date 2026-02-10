@@ -16,7 +16,7 @@ IMPORTANT: MODEL REQUIREMENTS
 To use calibration evaluation, the Semi-CRF model MUST use
 UncertaintySemiMarkovCRFHead instead of SemiMarkovCRFHead:
 
-    from torch_semimarkov import UncertaintySemiMarkovCRFHead
+    from flash_semicrf import UncertaintySemiMarkovCRFHead
 
     self.crf = UncertaintySemiMarkovCRFHead(
         num_classes=num_classes,
@@ -346,11 +346,11 @@ UncertaintySemiMarkovCRFHead instead of SemiMarkovCRFHead.
 Change this in your model class:
 
     # Before
-    from torch_semimarkov import SemiMarkovCRFHead
+    from flash_semicrf import SemiMarkovCRFHead
     self.crf = SemiMarkovCRFHead(...)
 
     # After
-    from torch_semimarkov import UncertaintySemiMarkovCRFHead
+    from flash_semicrf import UncertaintySemiMarkovCRFHead
     self.crf = UncertaintySemiMarkovCRFHead(...)
 
 UncertaintySemiMarkovCRFHead inherits from SemiMarkovCRFHead and adds:

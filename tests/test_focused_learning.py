@@ -10,7 +10,7 @@ Tests verify:
 import pytest
 import torch
 
-from torch_semimarkov import UncertaintySemiMarkovCRFHead
+from flash_semicrf import UncertaintySemiMarkovCRFHead
 
 
 class TestUncertaintyWeightedLoss:

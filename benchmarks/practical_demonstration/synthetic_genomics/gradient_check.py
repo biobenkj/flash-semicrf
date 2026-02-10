@@ -33,14 +33,14 @@ import sys
 import torch
 
 # Import PyTorch reference implementations
-from torch_semimarkov.streaming.pytorch_reference import (
+from flash_semicrf.streaming.pytorch_reference import (
     semi_crf_streaming_backward_pytorch,
     semi_crf_streaming_forward_pytorch,
 )
-from torch_semimarkov.streaming.triton_backward import launch_streaming_triton_backward
+from flash_semicrf.streaming.triton_backward import launch_streaming_triton_backward
 
 # Import Triton kernel launchers
-from torch_semimarkov.streaming.triton_forward import launch_streaming_triton_kernel
+from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel
 
 
 def create_synthetic_inputs(

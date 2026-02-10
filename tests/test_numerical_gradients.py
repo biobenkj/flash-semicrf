@@ -8,8 +8,8 @@ backward pass implementation is mathematically correct.
 
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 
 def finite_difference_gradient(func, x, eps=1e-5):

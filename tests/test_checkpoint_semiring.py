@@ -1,7 +1,7 @@
 import torch
 
-from torch_semimarkov.semirings import LogSemiring
-from torch_semimarkov.semirings.checkpoint import CheckpointSemiring, CheckpointShardSemiring
+from flash_semicrf.semirings import LogSemiring
+from flash_semicrf.semirings.checkpoint import CheckpointSemiring, CheckpointShardSemiring
 
 
 def test_checkpoint_semiring_matmul_matches_logsemiring():

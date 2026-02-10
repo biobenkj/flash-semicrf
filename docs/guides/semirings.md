@@ -1,6 +1,6 @@
 # Understanding Semirings
 
-Semirings are a mathematical abstraction that lets you swap out the "arithmetic" used in dynamic programming (DP) algorithms. In `torch-semimarkov`, that means you can run the *same* forward/scan code to answer different questions (partition functions, Viterbi decoding, top-k, entropy, cross-entropy) just by changing the semiring.
+Semirings are a mathematical abstraction that lets you swap out the "arithmetic" used in dynamic programming (DP) algorithms. In `flash-semicrf`, that means you can run the *same* forward/scan code to answer different questions (partition functions, Viterbi decoding, top-k, entropy, cross-entropy) just by changing the semiring.
 
 ## Contents
 
@@ -49,7 +49,7 @@ Different questions correspond to different meanings:
 | Uncertainty (entropy) | entropy-aware sum | entropy-aware add |
 | Distillation / model comparison (cross-entropy) | cross-entropy-aware sum | cross-entropy-aware add |
 
-Without semirings, you'd write separate DP implementations for each row. With semirings, `torch-semimarkov` implements the scan once and you just swap the arithmetic.
+Without semirings, you'd write separate DP implementations for each row. With semirings, `flash-semicrf` implements the scan once and you just swap the arithmetic.
 
 ### What a semiring gives you
 
@@ -80,7 +80,7 @@ $$
 ## Available semirings
 
 ```python
-from torch_semimarkov.semirings import (
+from flash_semicrf.semirings import (
     LogSemiring,           # Partition function, marginals
     MaxSemiring,           # Viterbi (best path)
     KMaxSemiring,          # Top-k paths
@@ -108,8 +108,8 @@ This is what you need for CRF-style likelihoods and marginals.
 - `one` $= 0$
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 crf = SemiMarkov(LogSemiring)
 log_Z, _ = crf.logpartition(edge, lengths=lengths)
@@ -128,8 +128,8 @@ This swaps summation for maximization, giving the best score over all paths.
 - `one` $= 0$
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import MaxSemiring
 
 crf = SemiMarkov(MaxSemiring)
 best_score, _ = crf.logpartition(edge, lengths=lengths)
@@ -144,8 +144,8 @@ Note: in many DP libraries (including this style of implementation), "marginals"
 Instead of keeping a single score per state, this keeps the top-$k$ scores per state, merging them as the DP progresses.
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import KMaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import KMaxSemiring
 
 crf = SemiMarkov(KMaxSemiring(k=5))
 topk_scores, _ = crf.logpartition(edge, lengths=lengths)
@@ -165,8 +165,8 @@ $$
 High entropy means the model is unsure (lots of plausible segmentations). Low entropy means the model is confident.
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import EntropySemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import EntropySemiring
 
 crf = SemiMarkov(EntropySemiring)
 entropy, _ = crf.logpartition(edge, lengths=lengths)
@@ -190,15 +190,15 @@ $$
 
 You can always compute this "by hand" with `LogSemiring` as `log_Z - gold_score`. The motivation for `CrossEntropySemiring` is that it can compute a cross-entropy quantity *directly in the semiring*, which can be convenient and sometimes more numerically stable depending on the target representation.
 
-How to use it in `torch-semimarkov`:
+How to use it in `flash-semicrf`:
 
 - You pass **two sets of log edge potentials** (same shape as usual): one for *P* and one for *Q*.
 - Pass them as a Python **list**: `[edge_P, edge_Q]` (a tuple will *not* be treated as a pair by the current helper code).
 - `sum(...)` returns the cross-entropy in the third semiring component. If you want the tracked log-partitions too, request raw output.
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import CrossEntropySemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import CrossEntropySemiring
 
 crf = SemiMarkov(CrossEntropySemiring)
 
@@ -240,7 +240,7 @@ This is the usual sum-product semiring in real space. It's generally less numeri
 
 ## Backend compatibility
 
-`torch-semimarkov` typically has a "pure PyTorch" implementation and may have accelerated kernels (for example, Triton/CUDA) for some semirings. Accelerated support is usually best for the common scalar semirings and may fall back for structured semirings (entropy, top-k, etc.).
+`flash-semicrf` typically has a "pure PyTorch" implementation and may have accelerated kernels (for example, Triton/CUDA) for some semirings. Accelerated support is usually best for the common scalar semirings and may fall back for structured semirings (entropy, top-k, etc.).
 
 A typical situation looks like:
 
@@ -259,8 +259,8 @@ If an accelerated kernel doesn't support the semiring you chose, the library wil
 ### Training with LogSemiring (classic CRF NLL)
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 crf = SemiMarkov(LogSemiring)
 
@@ -278,8 +278,8 @@ def compute_loss(edge, lengths, gold_edges):
 ### Inference with MaxSemiring (Viterbi-style)
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import MaxSemiring
 
 crf_max = SemiMarkov(MaxSemiring)
 
@@ -293,8 +293,8 @@ def predict(edge, lengths):
 ### Getting top-k hypotheses
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import KMaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import KMaxSemiring
 
 crf_k = SemiMarkov(KMaxSemiring(k=5))
 
@@ -306,8 +306,8 @@ def topk(edge, lengths):
 ### Measuring uncertainty (entropy)
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import EntropySemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import EntropySemiring
 
 crf_ent = SemiMarkov(EntropySemiring)
 
@@ -320,8 +320,8 @@ def normalized_entropy(edge, lengths):
 
 ```python
 import torch.nn as nn
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring, MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring, MaxSemiring
 
 class MySemiCRFModel(nn.Module):
     def __init__(self, encoder, head):
@@ -347,12 +347,12 @@ class MySemiCRFModel(nn.Module):
 For large state spaces, the backward pass can get memory-hungry because DP needs saved intermediates for autograd. Checkpoint semirings trade compute for memory by recomputing some intermediates during the backward pass instead of storing everything.
 
 ```python
-from torch_semimarkov.semirings.checkpoint import (
+from flash_semicrf.semirings.checkpoint import (
     CheckpointSemiring,
     CheckpointShardSemiring,
 )
-from torch_semimarkov.semirings import LogSemiring
-from torch_semimarkov import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
 
 # Wrap any base semiring with checkpointing
 CheckpointedLog = CheckpointSemiring(LogSemiring)

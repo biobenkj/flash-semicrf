@@ -14,7 +14,7 @@ sentinels:
   triton-forward-k3plus:
     verified_commit: 9dfa110
     source_files:
-      - src/torch_semimarkov/streaming/triton_forward.py
+      - src/flash_semicrf/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
     assumptions_agent: [A4]
     anchors:
@@ -38,8 +38,8 @@ sentinels:
   dispatch-overview:
     verified_commit: 7120f0f
     source_files:
-      - src/torch_semimarkov/streaming/autograd.py
-      - src/torch_semimarkov/semimarkov.py
+      - src/flash_semicrf/streaming/autograd.py
+      - src/flash_semicrf/semimarkov.py
     assumptions_mechanical: [D1, D2, D3, D4]
     assumptions_agent: [D5]
     anchors:
@@ -57,7 +57,7 @@ sentinels:
   autograd-kernel-interface:
     verified_commit: 7120f0f
     source_files:
-      - src/torch_semimarkov/streaming/autograd.py
+      - src/flash_semicrf/streaming/autograd.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors:
@@ -72,7 +72,7 @@ sentinels:
   triton-backward-k3plus:
     verified_commit: 9dfa110
     source_files:
-      - src/torch_semimarkov/streaming/triton_backward.py
+      - src/flash_semicrf/streaming/triton_backward.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -86,7 +86,7 @@ sentinels:
   pytorch-forward-k3plus:
     verified_commit: 52c3f9e
     source_files:
-      - src/torch_semimarkov/streaming/pytorch_reference.py
+      - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -97,7 +97,7 @@ sentinels:
   pytorch-backward-k3plus:
     verified_commit: 52c3f9e
     source_files:
-      - src/torch_semimarkov/streaming/pytorch_reference.py
+      - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -109,7 +109,7 @@ sentinels:
   k1-linear-crf:
     verified_commit: 52c3f9e
     source_files:
-      - src/torch_semimarkov/streaming/pytorch_reference.py
+      - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -120,7 +120,7 @@ sentinels:
   k2-fast-path:
     verified_commit: 52c3f9e
     source_files:
-      - src/torch_semimarkov/streaming/pytorch_reference.py
+      - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -131,7 +131,7 @@ sentinels:
   non-streaming-backends:
     verified_commit: f9298c5
     source_files:
-      - src/torch_semimarkov/semimarkov.py
+      - src/flash_semicrf/semimarkov.py
     assumptions_mechanical: []
     assumptions_agent: []
     anchors: []
@@ -142,7 +142,7 @@ sentinels:
   crf-heads:
     verified_commit: 7120f0f
     source_files:
-      - src/torch_semimarkov/nn.py
+      - src/flash_semicrf/nn.py
     assumptions_mechanical: [N1, N2, N3, N4, N5]
     assumptions_agent: [N6, N7, N8]
     anchors:
@@ -167,25 +167,25 @@ sentinels:
 
 test_bindings:
   # Maps source files to tests that should run when they change
-  src/torch_semimarkov/streaming/triton_forward.py:
+  src/flash_semicrf/streaming/triton_forward.py:
     - tests/test_streaming_triton.py::TestTritonBasic
     - tests/test_streaming_triton.py::TestNumericalStability
     - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
-  src/torch_semimarkov/streaming/triton_backward.py:
+  src/flash_semicrf/streaming/triton_backward.py:
     - tests/test_streaming_triton.py::TestTritonBasic
     - tests/test_streaming_triton.py::TestGradients
     - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
-  src/torch_semimarkov/streaming/autograd.py:
+  src/flash_semicrf/streaming/autograd.py:
     - tests/test_streaming_triton.py::TestDispatch
     - tests/test_semimarkov.py
     - tests/test_streaming_k_boundaries.py::TestKBoundaryTransitions
-  src/torch_semimarkov/streaming/pytorch_reference.py:
+  src/flash_semicrf/streaming/pytorch_reference.py:
     - tests/test_semimarkov.py
     - tests/test_streaming_triton.py::TestTritonBasic
     - tests/test_streaming_k_boundaries.py::TestK1LinearCRFBoundary
     - tests/test_streaming_k_boundaries.py::TestK2SpecializedBoundary
-  src/torch_semimarkov/semimarkov.py:
+  src/flash_semicrf/semimarkov.py:
     - tests/test_semimarkov.py
-  src/torch_semimarkov/nn.py:
+  src/flash_semicrf/nn.py:
     - tests/test_semimarkov.py
     - tests/test_streaming_triton.py::TestTritonBasic

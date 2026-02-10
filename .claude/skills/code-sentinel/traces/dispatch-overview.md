@@ -1,14 +1,14 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/torch_semimarkov/streaming/autograd.py` @ commit `7120f0f`
-- `src/torch_semimarkov/semimarkov.py` @ commit `f9298c5`
+- `src/flash_semicrf/streaming/autograd.py` @ commit `7120f0f`
+- `src/flash_semicrf/semimarkov.py` @ commit `f9298c5`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 
 ## Summary
 
-The torch-semimarkov library provides two API families:
+The flash-semicrf library provides two API families:
 
 1. **Streaming API** (`semi_crf_streaming_forward`) - Computes edges on-the-fly from cumulative scores. Memory-efficient for long sequences. Entry point: `autograd.py:474`
 

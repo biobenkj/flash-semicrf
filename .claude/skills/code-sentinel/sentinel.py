@@ -2,7 +2,7 @@
 """
 Code Sentinel - Main CLI orchestrator for verification pipeline.
 
-Unified interface for all sentinel operations in torch-semimarkov.
+Unified interface for all sentinel operations in flash-semicrf.
 
 Usage:
     ./sentinel.py status                          # Show sentinel health
@@ -39,7 +39,7 @@ EXIT_CONSISTENCY_FAILED = 4
 EXIT_ASSUMPTION_FAILED = 5
 EXIT_GENERAL_ERROR = 10
 
-# Importance patterns for init command (domain-specific for torch-semimarkov)
+# Importance patterns for init command (domain-specific for flash-semicrf)
 CRITICAL_PATTERNS = [
     r"def forward\(",
     r"def backward\(",
@@ -1655,7 +1655,7 @@ def cmd_context(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Code Sentinel - Verification pipeline for torch-semimarkov",
+        description="Code Sentinel - Verification pipeline for flash-semicrf",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

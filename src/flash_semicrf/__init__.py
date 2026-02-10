@@ -1,5 +1,5 @@
 """
-torch-semimarkov: Efficient Semi-Markov CRF Inference for PyTorch
+flash-semicrf: Efficient Semi-Markov CRF Inference for PyTorch
 
 This package provides optimized implementations of Semi-Markov CRF inference
 algorithms for genomic sequence annotation at chromosome scale (T=400K+).

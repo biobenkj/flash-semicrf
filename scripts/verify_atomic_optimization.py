@@ -7,7 +7,7 @@ This script tests the atomic optimization at two scales:
 
 import torch
 
-from torch_semimarkov.streaming import (
+from flash_semicrf.streaming import (
     HAS_TRITON,
     launch_streaming_triton_backward,
     launch_streaming_triton_kernel,

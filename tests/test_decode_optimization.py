@@ -11,7 +11,7 @@ Phase 2: Tests for backpointer-based traceback (to be added)
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 
 def score_viterbi_path(bp_k, bp_c, final_labels, cum_scores, transition, duration_bias, lengths):
@@ -191,7 +191,7 @@ class TestDecodeTritonPerformance:
 
     def test_decode_triton_on_gpu(self, cuda_device):
         """Verify Triton decode works correctly on GPU."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -220,7 +220,7 @@ class TestDecodeTritonPerformance:
         The traceback still uses PyTorch loops, so the speedup is modest for Phase 1.
         Phase 2 (backpointer-based traceback) will provide larger speedups.
         """
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -386,7 +386,7 @@ class TestTritonBackpointers:
     )
     def test_triton_backpointers_match_pytorch(self, cuda_device, K, T, C, batch):
         """Verify Triton bp_k, bp_c, final_labels match PyTorch reference."""
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             HAS_TRITON,
             semi_crf_streaming_viterbi_with_backpointers,
         )
@@ -394,7 +394,7 @@ class TestTritonBackpointers:
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov.streaming import semi_crf_streaming_viterbi_triton
+        from flash_semicrf.streaming import semi_crf_streaming_viterbi_triton
 
         torch.manual_seed(42)
 
@@ -456,12 +456,12 @@ class TestTritonBackpointers:
 
     def test_triton_backpointers_variable_lengths(self, cuda_device):
         """Test Triton backpointers with variable length sequences."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
 
-        from torch_semimarkov.streaming import (
+        from flash_semicrf.streaming import (
             semi_crf_streaming_viterbi_triton,
             semi_crf_streaming_viterbi_with_backpointers,
         )
@@ -521,7 +521,7 @@ class TestTritonBackpointers:
 
     def test_decode_uses_triton_on_gpu(self, cuda_device):
         """Verify decode_with_traceback uses Triton path on CUDA."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")
@@ -562,7 +562,7 @@ class TestTritonBackpointers:
     )
     def test_triton_decode_segment_scores_sum_to_viterbi(self, cuda_device, K, T, C):
         """Verify segment scores sum to Viterbi score when using Triton."""
-        from torch_semimarkov.streaming import HAS_TRITON
+        from flash_semicrf.streaming import HAS_TRITON
 
         if not HAS_TRITON:
             pytest.skip("Triton not available")

@@ -75,9 +75,9 @@ The ring buffer and checkpoint machinery are designed for K≥3, where there are
 
 ### Q: How does this compare to pytorch-crf for linear CRF tasks?
 
-At K=1, torch-semimarkov is functionally equivalent to a linear-chain CRF like pytorch-crf. The two implementations produce the same accuracy on identical data. They define slightly different probability models (different handling of the first position), so their NLL values are not directly comparable, but this difference has no practical impact on prediction quality.
+At K=1, flash-semicrf is functionally equivalent to a linear-chain CRF like pytorch-crf. The two implementations produce the same accuracy on identical data. They define slightly different probability models (different handling of the first position), so their NLL values are not directly comparable, but this difference has no practical impact on prediction quality.
 
-The advantage of using torch-semimarkov even for K=1 is a clean upgrade path: when you later need K>1, the API stays the same. See the [Linear CRF Equivalence](../linear_crf_equivalence.md) document for the formal comparison and empirical validation.
+The advantage of using flash-semicrf even for K=1 is a clean upgrade path: when you later need K>1, the API stays the same. See the [Linear CRF Equivalence](../linear_crf_equivalence.md) document for the formal comparison and empirical validation.
 
 ### Q: What are the complexity characteristics of each backend?
 

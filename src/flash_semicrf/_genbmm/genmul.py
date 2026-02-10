@@ -19,7 +19,7 @@ The CUDA kernel supports four semiring modes via integer flags:
 
 Example:
     >>> import torch
-    >>> from torch_semimarkov._genbmm import logbmm
+    >>> from flash_semicrf._genbmm import logbmm
     >>> a = torch.randn(2, 3, 4, device="cuda")
     >>> b = torch.randn(2, 4, 5, device="cuda")
     >>> c = logbmm(a, b)  # (2, 3, 5) via logsumexp reduction

@@ -7,8 +7,8 @@ that can be used with the SemiMarkov inference algorithms.
 
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 
 class TestHSMMBasic:

@@ -10,8 +10,8 @@ Three-Way Model Comparison:
     This benchmark supports comparing three CRF implementations:
 
     1. **pytorch-crf** (optional): External linear CRF library baseline
-    2. **torch-semimarkov K=1**: Linear CRF via Triton streaming kernel
-    3. **torch-semimarkov K>1**: Full semi-CRF with duration modeling
+    2. **flash-semicrf K=1**: Linear CRF via Triton streaming kernel
+    3. **flash-semicrf K>1**: Full semi-CRF with duration modeling
 
     The comparison validates that:
     - K=1 Triton matches pytorch-crf accuracy (correctness)
@@ -937,7 +937,7 @@ class TIMITModel(nn.Module):
         self.max_duration = max_duration
 
         # Use UncertaintySemiMarkovCRFHead for calibration/uncertainty estimation
-        from torch_semimarkov import UncertaintySemiMarkovCRFHead
+        from flash_semicrf import UncertaintySemiMarkovCRFHead
 
         self.crf = UncertaintySemiMarkovCRFHead(
             num_classes=num_classes,
@@ -983,7 +983,7 @@ class TIMITModelPytorchCRF(nn.Module):
     TIMIT model using pytorch-crf for baseline comparison.
 
     Uses the same BiLSTMEncoder but replaces SemiMarkovCRFHead with torchcrf.CRF.
-    This enables fair comparison between pytorch-crf and torch-semimarkov K=1.
+    This enables fair comparison between pytorch-crf and flash-semicrf K=1.
     """
 
     def __init__(
@@ -1751,7 +1751,7 @@ def evaluate(
                 pred_labels = result[i][:seq_len]
             else:
                 # TIMITModel returns ViterbiResult with segments
-                # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
+                # NOTE: flash_semicrf.Segment uses INCLUSIVE end (end=5 means position 5 included)
                 # Convert to exclusive for iteration: range(start, end+1)
                 pred_labels = [0] * seq_len
                 for seg in result.segments[i]:
@@ -2095,7 +2095,7 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
 
     Models compared:
     1. pytorch-crf (optional): External linear CRF baseline
-    2. K=1 Triton: Linear CRF via torch-semimarkov streaming kernel
+    2. K=1 Triton: Linear CRF via flash-semicrf streaming kernel
     3. Semi-CRF PyTorch: K>1 with PyTorch streaming (reference baseline)
     4. Semi-CRF Triton: K>1 with Triton streaming kernel (optimized)
 
@@ -2118,9 +2118,9 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
         logger.warning("Install with: pip install pytorch-crf")
         logger.warning("=" * 60)
 
-    # 2. torch-semimarkov K=1 (linear CRF via Triton streaming)
+    # 2. flash-semicrf K=1 (linear CRF via Triton streaming)
     logger.info("=" * 60)
-    logger.info("Training LINEAR CRF (torch-semimarkov K=1, PyTorch)")
+    logger.info("Training LINEAR CRF (flash-semicrf K=1, PyTorch)")
     logger.info("=" * 60)
     _, linear_metrics = train_model(
         data_dir, model_type="linear", backend="streaming", use_triton=True, **kwargs

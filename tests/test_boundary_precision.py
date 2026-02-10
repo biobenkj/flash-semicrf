@@ -15,7 +15,7 @@ Tests verify:
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 
 class TestBoundaryExtraction:

@@ -13,7 +13,7 @@ This benchmark demonstrates where Semi-CRFs outperform linear CRFs:
 Experimental Design:
     Same encoder (BiLSTM or Mamba) with three CRF heads:
     1. pytorch-crf: External linear CRF baseline (optional, if installed)
-    2. Linear CRF: K=1 (torch-semimarkov, no duration modeling)
+    2. Linear CRF: K=1 (flash-semicrf, no duration modeling)
     3. Semi-CRF: K=500 (explicit duration distributions via Triton kernel)
 
 Data:
@@ -1200,7 +1200,7 @@ class ExonIntronModel(nn.Module):
         self.use_triton = use_triton
 
         # Use UncertaintySemiMarkovCRFHead for calibration/uncertainty estimation
-        from torch_semimarkov import UncertaintySemiMarkovCRFHead
+        from flash_semicrf import UncertaintySemiMarkovCRFHead
 
         self.crf = UncertaintySemiMarkovCRFHead(
             num_classes=num_classes,
@@ -1770,8 +1770,8 @@ def evaluate(
                 pred_labels = np.array(result[i][:seq_len], dtype=np.int64)
                 pred_segs = extract_segments(pred_labels)
             else:
-                # torch-semimarkov returns DecodeResult with segments
-                # NOTE: torch_semimarkov.Segment uses INCLUSIVE end (end=5 means position 5 included)
+                # flash-semicrf returns DecodeResult with segments
+                # NOTE: flash_semicrf.Segment uses INCLUSIVE end (end=5 means position 5 included)
                 # Convert to exclusive for numpy slicing: [start:end+1]
                 pred_labels = np.zeros(seq_len, dtype=np.int64)
                 for seg in result.segments[i]:
@@ -2060,8 +2060,8 @@ def compare_models(
 
     Models compared:
     1. pytorch-crf (optional): External linear CRF baseline
-    2. K=1 torch-semimarkov: Linear CRF via streaming kernel
-    3. K>1 torch-semimarkov: Full semi-CRF with duration modeling
+    2. K=1 flash-semicrf: Linear CRF via streaming kernel
+    3. K>1 flash-semicrf: Full semi-CRF with duration modeling
 
     All use the same encoder (BiLSTM or Mamba).
     """
@@ -2082,7 +2082,7 @@ def compare_models(
     else:
         logger.warning("pytorch-crf not installed, skipping baseline")
 
-    # 2. torch-semimarkov K=1 (linear CRF)
+    # 2. flash-semicrf K=1 (linear CRF)
     logger.info("=" * 60)
     logger.info(f"Training LINEAR CRF K=1 ({encoder_type} encoder)")
     logger.info("=" * 60)

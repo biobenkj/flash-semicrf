@@ -51,16 +51,16 @@ from dataclasses import dataclass
 import torch
 
 # ──────────────────────────────────────────────────────────────────────
-# Imports from torch_semimarkov
+# Imports from flash_semicrf
 # ──────────────────────────────────────────────────────────────────────
-from torch_semimarkov.streaming import semi_crf_streaming_forward
-from torch_semimarkov.streaming.triton_forward import (
+from flash_semicrf.streaming import semi_crf_streaming_forward
+from flash_semicrf.streaming.triton_forward import (
     HAS_TRITON,
     launch_streaming_triton_kernel,
 )
 
 if HAS_TRITON:
-    from torch_semimarkov.streaming.triton_backward import (
+    from flash_semicrf.streaming.triton_backward import (
         launch_streaming_triton_marginals,
     )
 
@@ -579,7 +579,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
 
         # Fresh model with identical initialization
         torch.manual_seed(456)
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         model = SemiMarkovCRFHead(
             num_classes=C,

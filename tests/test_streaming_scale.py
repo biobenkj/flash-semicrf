@@ -14,7 +14,7 @@ import gc
 import pytest
 import torch
 
-from torch_semimarkov.streaming import semi_crf_streaming_forward
+from flash_semicrf.streaming import semi_crf_streaming_forward
 
 
 def create_streaming_inputs(batch, T, K, C, device="cpu", dtype=torch.float32, seed=42):

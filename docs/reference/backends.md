@@ -14,7 +14,7 @@ This project provides GPU-accelerated semi-CRF inference backends using custom T
 The `SemiMarkovCRFHead` class supports automatic and manual backend selection via the `backend` parameter:
 
 ```python
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, hidden_dim=512)
 
@@ -77,8 +77,8 @@ Use `SemiMarkov.logpartition` when you have pre-computed edge tensors and need a
 to semirings beyond log/max:
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring, MaxSemiring, EntropySemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring, MaxSemiring, EntropySemiring
 
 # Pre-computed edge tensor (batch, T-1, K, C, C) - must fit in memory
 crf = SemiMarkov(LogSemiring)
@@ -92,7 +92,7 @@ entropy, _ = crf_ent.logpartition(edge, lengths=lengths)
 ### Streaming API example
 
 ```python
-from torch_semimarkov.streaming import semi_crf_streaming_forward
+from flash_semicrf.streaming import semi_crf_streaming_forward
 
 # Streaming: compute edges on-the-fly (recommended for both training and inference)
 cum_scores = cumsum(projected, dim=1)  # O(TxC) - much smaller!
