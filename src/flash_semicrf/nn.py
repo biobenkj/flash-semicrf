@@ -223,8 +223,16 @@ class SemiMarkovCRFHead(nn.Module):
 
         return edge
 
-    def _forward_exact(self, scores: Tensor, lengths: Tensor, semiring: str) -> Tensor:
-        """Compute partition via exact edge tensor. O(TKC²) memory."""
+    def _forward_exact(
+        self, scores: Tensor, lengths: Tensor, semiring: str, algorithm: str = "scan"
+    ) -> Tensor:
+        """Compute partition via exact edge tensor. O(TKC²) memory.
+
+        Args:
+            algorithm: DP algorithm to use on the materialized edge tensor.
+                ``"scan"`` uses ``_dp_scan_streaming`` (ring buffer, default).
+                ``"standard"`` uses ``_dp_standard`` (list comprehension reference).
+        """
         from .semimarkov import SemiMarkov
         from .semirings import LogSemiring, MaxSemiring
 
@@ -239,7 +247,10 @@ class SemiMarkovCRFHead(nn.Module):
         # Since our edge has T positions, SemiMarkov sees N = T + 1
         # We need to pass lengths + 1 to match
         model = SemiMarkov(semiring_cls)
-        result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
+        if algorithm == "standard":
+            result = model._dp_standard(edge, lengths=lengths + 1, force_grad=True)
+        else:
+            result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
         return result[0].squeeze(0)
 
     def _forward_binary_tree_sharded(
@@ -327,10 +338,12 @@ class SemiMarkovCRFHead(nn.Module):
             backend_type, use_triton_final = "exact", False
         elif backend == "binary_tree_sharded":
             backend_type, use_triton_final = "binary_tree_sharded", False
+        elif backend == "dp_standard":
+            backend_type, use_triton_final = "dp_standard", False
         else:
             raise ValueError(
                 f"Unknown backend: {backend}. "
-                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
+                "Use 'auto', 'streaming', 'exact', 'dp_standard', or 'binary_tree_sharded'."
             )
 
         # Build cumulative scores for prefix-sum edge retrieval
@@ -367,8 +380,11 @@ class SemiMarkovCRFHead(nn.Module):
         elif backend_type == "binary_tree_sharded":
             # Use sharded binary tree backend for memory-efficient reference implementation
             partition = self._forward_binary_tree_sharded(scores, lengths, "log")
+        elif backend_type == "dp_standard":
+            # Original pytorch-struct list-comprehension linear scan
+            partition = self._forward_exact(scores, lengths, "log", algorithm="standard")
         else:
-            # Use exact backend via semimarkov.py
+            # Use exact backend via semimarkov.py (_dp_scan_streaming)
             partition = self._forward_exact(scores, lengths, "log")
 
         return {"partition": partition, "cum_scores": cum_scores}
