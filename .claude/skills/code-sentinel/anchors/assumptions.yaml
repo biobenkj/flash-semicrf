@@ -130,7 +130,7 @@ assumptions:
       description: "T=1 skip for zero-centering documented"
       verification:
         type: manual
-        guidance: "Check `if T > 1:` guard before zero-centering (~line 341)"
+        guidance: "Check `if T > 1:` guard before zero-centering (~line 407)"
       mechanical: false
 
     - id: N8
@@ -139,3 +139,19 @@ assumptions:
         type: manual
         guidance: "Verify `dur_idx = k - 1` in `_build_edge_tensor` (~line 215)"
       mechanical: false
+
+    - id: N9
+      description: "_build_differentiable_edge uses finite sentinel -1e18 not -inf"
+      verification:
+        type: anchor
+        ref: NEGINF_SAFE_SENTINEL
+      mechanical: true
+
+    - id: N10
+      description: "_forward_exact routes algorithm=standard to _build_differentiable_edge"
+      verification:
+        type: pattern
+        file: src/flash_semicrf/nn.py
+        pattern: "_build_differentiable_edge"
+        after: "def _forward_exact("
+      mechanical: true

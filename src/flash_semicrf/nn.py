@@ -223,6 +223,59 @@ class SemiMarkovCRFHead(nn.Module):
 
         return edge
 
+    def _build_differentiable_edge(self, scores: Tensor, lengths: Tensor) -> Tensor:
+        """Build edge potentials via torch.stack (preserves autograd graph).
+
+        Unlike ``_build_edge_tensor`` which uses in-place assignment, this method
+        builds the edge tensor via ``torch.stack``, maintaining gradient flow from
+        the edge back to ``self.transition`` and ``self.duration_bias``. Required
+        for pytorch-struct DP methods that need proper autograd through the edge.
+
+        Uses a large negative finite sentinel (-1e18) instead of ``-inf`` for
+        invalid positions. This is critical: ``_dp_standard`` computes
+        ``logsumexp`` over ALL K durations including invalid ones. With true
+        ``-inf``, the backward pass encounters ``softmax([-inf,...,-inf])`` =
+        ``0/0 = NaN``. A finite sentinel avoids this while being numerically
+        equivalent (``exp(-1e18) = 0`` in float64).
+        """
+        batch, T, C = scores.shape
+        K = self.max_duration
+
+        scores_float = scores.double()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
+
+        # Build cum_scores without in-place ops to preserve autograd graph
+        cumsum_vals = torch.cumsum(scores_float, dim=1)
+        zero_pad = torch.zeros(batch, 1, C, dtype=torch.float64, device=scores.device)
+        cum_scores = torch.cat([zero_pad, cumsum_vals], dim=1)
+
+        # Use finite sentinel instead of -inf to avoid NaN gradient in logsumexp.
+        # _dp_standard processes ALL K durations per position (unlike _dp_scan_streaming
+        # which only processes valid durations). For invalid durations, all C_src entries
+        # are the sentinel value. logsumexp([-inf,...,-inf]) backward = softmax = 0/0 = NaN.
+        # With -1e18, softmax gives uniform 1/C, but the upstream gradient is ~0 (since
+        # exp(-1e18) = 0 in the outer logsumexp), so the gradient is clean.
+        _NEGINF_SAFE = -1e18
+        neg_inf = torch.full(
+            (batch, C, C), _NEGINF_SAFE, dtype=torch.float64, device=scores.device
+        )
+
+        edge_parts = []
+        for n in range(T):
+            k_parts = []
+            for k_idx in range(K):
+                end_pos = n + k_idx + 1
+                if end_pos <= T:
+                    content = cum_scores[:, end_pos, :] - cum_scores[:, n, :]
+                    segment = content + self.duration_bias[k_idx]
+                    edge_nk = segment.unsqueeze(-1) + self.transition.T.unsqueeze(0)
+                else:
+                    edge_nk = neg_inf
+                k_parts.append(edge_nk)
+            edge_parts.append(torch.stack(k_parts, dim=1))
+        return torch.stack(edge_parts, dim=1)
+
     def _forward_exact(
         self, scores: Tensor, lengths: Tensor, semiring: str, algorithm: str = "scan"
     ) -> Tensor:
@@ -239,22 +292,17 @@ class SemiMarkovCRFHead(nn.Module):
         SEMIRING_MAP = {"log": LogSemiring, "max": MaxSemiring}
         semiring_cls = SEMIRING_MAP[semiring]
 
-        # Build edge tensor (O(T*K*C^2) memory)
-        # Edge tensor has shape (batch, T, K, C, C) to match streaming API
-        edge = self._build_edge_tensor(scores, lengths)
-
         # SemiMarkov interprets edge shape (batch, N-1, K, C, C) as sequence of length N
         # Since our edge has T positions, SemiMarkov sees N = T + 1
-        # We need to pass lengths + 1 to match
         model = SemiMarkov(semiring_cls)
         if algorithm == "standard":
-            # Call _dp_standard directly with force_grad=False to preserve
-            # the autograd graph from _build_edge_tensor back to model params.
-            # (force_grad=True would create leaf charts that block gradient flow;
-            # _dp_standard_vectorized unconditionally sets edge.requires_grad_(True)
-            # which detaches it from model parameters.)
+            # Use differentiable edge construction (torch.stack, not in-place)
+            # so autograd flows from the edge back to model parameters.
+            edge = self._build_differentiable_edge(scores, lengths)
             result = model._dp_standard(edge, lengths=lengths + 1, force_grad=False)
         else:
+            # In-place edge construction is fine for _dp_scan_streaming
+            edge = self._build_edge_tensor(scores, lengths)
             result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
         return result[0].squeeze(0)
 

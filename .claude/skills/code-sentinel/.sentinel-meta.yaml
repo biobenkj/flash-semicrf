@@ -140,14 +140,18 @@ sentinels:
     depends_on: []
 
   crf-heads:
-    verified_commit: 7120f0f
+    verified_commit: 8b8e3ed
     source_files:
       - src/flash_semicrf/nn.py
-    assumptions_mechanical: [N1, N2, N3, N4, N5]
+    assumptions_mechanical: [N1, N2, N3, N4, N5, N9, N10]
     assumptions_agent: [N6, N7, N8]
     anchors:
       - CLASS_DEFINITION
       - INIT_METHOD
+      - BUILD_EDGE_TENSOR
+      - BUILD_DIFFERENTIABLE_EDGE
+      - NEGINF_SAFE_SENTINEL
+      - FORWARD_EXACT
       - FORWARD_METHOD
       - ZERO_CENTER
       - FLOAT64_CONVERT
