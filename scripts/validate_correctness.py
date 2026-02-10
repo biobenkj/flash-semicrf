@@ -650,7 +650,9 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         )
 
     # Compare all backends against the reference (first available)
-    ref_name = next((name for name in ["pytorch", "dp_standard", "dp_scan"] if name in results), None)
+    ref_name = next(
+        (name for name in ["pytorch", "dp_standard", "dp_scan"] if name in results), None
+    )
     if ref_name is None or len(results) < 2:
         print("  Cannot compare: need at least two backends")
         return False

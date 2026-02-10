@@ -257,9 +257,7 @@ class SemiMarkovCRFHead(nn.Module):
         # With -1e18, softmax gives uniform 1/C, but the upstream gradient is ~0 (since
         # exp(-1e18) = 0 in the outer logsumexp), so the gradient is clean.
         _NEGINF_SAFE = -1e18
-        neg_inf = torch.full(
-            (batch, C, C), _NEGINF_SAFE, dtype=torch.float64, device=scores.device
-        )
+        neg_inf = torch.full((batch, C, C), _NEGINF_SAFE, dtype=torch.float64, device=scores.device)
 
         edge_parts = []
         for n in range(T):
