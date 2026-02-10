@@ -155,8 +155,8 @@ SCALES = {
         conv_C=16,
         conv_K=50,
         conv_epochs=50,
-        # Aggressive checkpointing for numerical stability at genome scale
-        checkpoint_interval=100,  # = K, gives 500 checkpoints instead of 23
+        # Default checkpoint_interval now caps at max(K, 64), giving 500 ckpts
+        # (previously required manual override to checkpoint_interval=K)
     ),
 }
 
