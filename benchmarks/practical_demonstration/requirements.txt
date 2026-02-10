@@ -1,4 +1,4 @@
-# Core dependencies (should already be installed with torch-semimarkov)
+# Core dependencies (should already be installed with flash-semicrf)
 torch>=2.0
 numpy
 

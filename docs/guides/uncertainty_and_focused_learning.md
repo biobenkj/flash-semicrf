@@ -86,7 +86,7 @@ For clinical applications, **streaming is the default** because it scales to any
 The `UncertaintySemiMarkovCRFHead` automatically selects the appropriate method based on sequence length and available resources:
 
 ```python
-from torch_semimarkov import UncertaintySemiMarkovCRFHead
+from flash_semicrf import UncertaintySemiMarkovCRFHead
 
 model = UncertaintySemiMarkovCRFHead(
     num_classes=5,
@@ -128,7 +128,7 @@ The streaming method is essential for clinical-scale data.
 Extended CRF head with uncertainty quantification methods for clinical applications.
 
 ```python
-from torch_semimarkov import UncertaintySemiMarkovCRFHead
+from flash_semicrf import UncertaintySemiMarkovCRFHead
 
 model = UncertaintySemiMarkovCRFHead(
     num_classes=24,      # Number of segment labels

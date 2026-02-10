@@ -1,7 +1,7 @@
 import torch
 
-from torch_semimarkov.banded import BandedMatrix
-from torch_semimarkov.banded_utils import (
+from flash_semicrf.banded import BandedMatrix
+from flash_semicrf.banded_utils import (
     apply_permutation,
     measure_effective_bandwidth,
     rcm_ordering_from_adjacency,

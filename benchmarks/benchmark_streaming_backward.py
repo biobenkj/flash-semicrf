@@ -100,7 +100,7 @@ def benchmark_triton_backward(
     repeats: int = 10,
 ) -> BenchmarkResult:
     """Benchmark the Triton streaming backward kernel."""
-    from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
+    from flash_semicrf.streaming import HAS_TRITON, semi_crf_streaming_forward
 
     if not HAS_TRITON:
         return BenchmarkResult(
@@ -204,7 +204,7 @@ def benchmark_pytorch_backward(
     repeats: int = 10,
 ) -> BenchmarkResult:
     """Benchmark the PyTorch reference backward pass."""
-    from torch_semimarkov.streaming import semi_crf_streaming_forward
+    from flash_semicrf.streaming import semi_crf_streaming_forward
 
     try:
         # Create inputs with gradients

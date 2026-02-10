@@ -126,7 +126,7 @@ def benchmark_triton_forward(
     Returns:
         Tuple of (mean_ms, peak_memory_mb)
     """
-    from torch_semimarkov.streaming.triton_forward import (
+    from flash_semicrf.streaming.triton_forward import (
         HAS_TRITON,
         launch_streaming_triton_kernel,
     )
@@ -191,11 +191,11 @@ def benchmark_triton_backward(
     Returns:
         Tuple of (mean_ms, peak_memory_mb)
     """
-    from torch_semimarkov.streaming.triton_backward import (
+    from flash_semicrf.streaming.triton_backward import (
         HAS_TRITON,
         launch_streaming_triton_backward,
     )
-    from torch_semimarkov.streaming.triton_forward import (
+    from flash_semicrf.streaming.triton_forward import (
         launch_streaming_triton_kernel,
     )
 
@@ -282,7 +282,7 @@ def benchmark_pytorch_forward(
     Returns:
         Tuple of (mean_ms, peak_memory_mb)
     """
-    from torch_semimarkov.streaming.pytorch_reference import (
+    from flash_semicrf.streaming.pytorch_reference import (
         semi_crf_streaming_forward_pytorch,
     )
 
@@ -339,7 +339,7 @@ def benchmark_pytorch_backward(
     Returns:
         Tuple of (mean_ms, peak_memory_mb)
     """
-    from torch_semimarkov.streaming.pytorch_reference import (
+    from flash_semicrf.streaming.pytorch_reference import (
         semi_crf_streaming_backward_pytorch,
         semi_crf_streaming_forward_pytorch,
     )
@@ -485,10 +485,10 @@ def run_profiled_benchmark(config: BenchmarkConfig):
     cum_scores, transition, duration_bias, lengths = create_test_inputs(config)
 
     # Import kernels
-    from torch_semimarkov.streaming.triton_backward import (
+    from flash_semicrf.streaming.triton_backward import (
         launch_streaming_triton_backward,
     )
-    from torch_semimarkov.streaming.triton_forward import (
+    from flash_semicrf.streaming.triton_forward import (
         launch_streaming_triton_kernel,
     )
 

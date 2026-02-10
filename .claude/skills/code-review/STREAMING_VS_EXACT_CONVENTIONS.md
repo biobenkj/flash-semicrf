@@ -23,8 +23,8 @@ This document defines the tensor shapes, loop bounds, and indexing conventions f
 The `SemiMarkov` class operates on **pre-materialized edge tensors**:
 
 ```python
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
 
 model = SemiMarkov(LogSemiring)
 log_Z, _, _ = model.logpartition(edge, lengths=lengths)
@@ -40,7 +40,7 @@ log_Z, _, _ = model.logpartition(edge, lengths=lengths)
 The streaming implementation computes edges **on-the-fly** from cumulative scores:
 
 ```python
-from torch_semimarkov import semi_crf_streaming_forward
+from flash_semicrf import semi_crf_streaming_forward
 
 partition = semi_crf_streaming_forward(
     cum_scores,      # (batch, T+1, C)

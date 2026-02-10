@@ -65,9 +65,9 @@ When K=1, every segment has duration 1, and the semi-CRF reduces to a standard l
 
 ## Workflows
 
-### Q: How does torch-semimarkov fit into my model?
+### Q: How does flash-semicrf fit into my model?
 
-Think of it as a structured prediction layer that sits on top of your encoder (transformer, Mamba, CNN, BiLSTM, etc.). Your encoder produces hidden states for each position; a small projection head converts those into semi-CRF parameters; and torch-semimarkov runs the DP to compute losses and predictions. The library handles the inference; you handle the encoder and the data.
+Think of it as a structured prediction layer that sits on top of your encoder (transformer, Mamba, CNN, BiLSTM, etc.). Your encoder produces hidden states for each position; a small projection head converts those into semi-CRF parameters; and flash-semicrf runs the DP to compute losses and predictions. The library handles the inference; you handle the encoder and the data.
 
 ```
 Input sequence (batch, T, input_dim)

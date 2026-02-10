@@ -11,8 +11,8 @@ These tests complement test_edge_cases.py which covers K=1, T=1, C=1 configurati
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkov, SemiMarkovCRFHead
-from torch_semimarkov.duration import (
+from flash_semicrf import SemiMarkov, SemiMarkovCRFHead
+from flash_semicrf.duration import (
     CallableDuration,
     GeometricDuration,
     NegativeBinomialDuration,
@@ -20,8 +20,8 @@ from torch_semimarkov.duration import (
     UniformDuration,
     create_duration_distribution,
 )
-from torch_semimarkov.semirings import LogSemiring, MaxSemiring
-from torch_semimarkov.streaming import semi_crf_streaming_forward_pytorch
+from flash_semicrf.semirings import LogSemiring, MaxSemiring
+from flash_semicrf.streaming import semi_crf_streaming_forward_pytorch
 
 
 class TestDurationDistributionEdgeCases:

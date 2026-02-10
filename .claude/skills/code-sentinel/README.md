@@ -1,6 +1,6 @@
 # Code Sentinel
 
-**Persistent execution traces ("Sentinels") for torch-semimarkov development.**
+**Persistent execution traces ("Sentinels") for flash-semicrf development.**
 
 Code Sentinel prevents hallucinations about code execution paths by maintaining verified baseline documentation that can be mechanically checked against source code. It transforms the traditional "trust the model's understanding" approach into a "verify then trust" methodology.
 
@@ -24,7 +24,7 @@ Code Sentinel addresses this by:
 ./sentinel.py status
 
 # Scaffold a new trace from source file
-./sentinel.py init src/torch_semimarkov/streaming/new_module.py
+./sentinel.py init src/flash_semicrf/streaming/new_module.py
 
 # Full verification before making changes
 ./sentinel.py verify --trace triton-forward-k3plus
@@ -55,7 +55,7 @@ Example trace header:
 ```markdown
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/torch_semimarkov/streaming/triton_forward.py` @ commit `40fe66b`
+**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `40fe66b`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`
 ```
 
@@ -67,7 +67,7 @@ Anchors are pattern-based references to specific code locations. They enable mec
 # anchors/anchors.yaml
 triton-forward-k3plus:
   KERNEL_ENTRY:
-    file: src/torch_semimarkov/streaming/triton_forward.py
+    file: src/flash_semicrf/streaming/triton_forward.py
     pattern: "def semi_crf_streaming_scan_kernel("
     expected_line: 84
     drift_tolerance: 20
@@ -155,18 +155,18 @@ Scaffold a new trace from a source file. Analyzes the source to extract function
 
 ```bash
 # Basic usage
-./sentinel.py init src/torch_semimarkov/streaming/new_module.py
+./sentinel.py init src/flash_semicrf/streaming/new_module.py
 
 # Custom trace name
-./sentinel.py init src/torch_semimarkov/streaming/new_module.py --name my-trace
+./sentinel.py init src/flash_semicrf/streaming/new_module.py --name my-trace
 
 # Overwrite existing trace
-./sentinel.py init src/torch_semimarkov/streaming/new_module.py --force
+./sentinel.py init src/flash_semicrf/streaming/new_module.py --force
 ```
 
 Output:
 ```
-Analyzing src/torch_semimarkov/streaming/new_module.py...
+Analyzing src/flash_semicrf/streaming/new_module.py...
   Found 15 functions, 2 classes
   Critical: 3, High: 5
 
@@ -175,7 +175,7 @@ Created trace: traces/new_module.md
 === Suggested Anchors ===
 Add to anchors/anchors.yaml:
   FORWARD:
-    file: src/torch_semimarkov/streaming/new_module.py
+    file: src/flash_semicrf/streaming/new_module.py
     pattern: "def forward("
     expected_line: 42
     drift_tolerance: 30
@@ -265,7 +265,7 @@ Run full pre-commit pipeline:
 SENTINEL_RUN_TESTS=1 ./sentinel.py pipeline
 
 # Pipeline for specific files
-./sentinel.py pipeline --files src/torch_semimarkov/streaming/triton_forward.py
+./sentinel.py pipeline --files src/flash_semicrf/streaming/triton_forward.py
 ```
 
 Exit codes:
@@ -520,6 +520,6 @@ Verify test_bindings in `.sentinel-meta.yaml` use path patterns that match your 
 
 ```yaml
 test_bindings:
-  src/torch_semimarkov/streaming/triton_forward.py:  # Exact path
+  src/flash_semicrf/streaming/triton_forward.py:  # Exact path
     - tests/test_streaming_triton.py::TestTritonBasic
 ```

@@ -18,12 +18,12 @@ Unlike real genomic data (e.g., GENCODE) where ground truth distributions are co
 |-------|---|----------|---------|---------------|
 | **softmax** | N/A | None | N/A | Pure position-wise baseline |
 | **pytorch-crf** | 1 | None | torchcrf | External linear CRF baseline |
-| **linear** | 1 | None | torch-semimarkov | Linear CRF, same codebase as semi-CRF |
-| **semicrf** | 1000 | Learned | torch-semimarkov | Full Semi-CRF capability |
-| **semicrf_uniform** | 1000 | Uniform | torch-semimarkov | Ablation: segment structure without duration |
+| **linear** | 1 | None | flash-semicrf | Linear CRF, same codebase as semi-CRF |
+| **semicrf** | 1000 | Learned | flash-semicrf | Full Semi-CRF capability |
+| **semicrf_uniform** | 1000 | Uniform | flash-semicrf | Ablation: segment structure without duration |
 
 **Key comparisons:**
-- `linear` vs `pytorch-crf`: Validates torch-semimarkov K=1 matches external baseline
+- `linear` vs `pytorch-crf`: Validates flash-semicrf K=1 matches external baseline
 - `semicrf` vs `linear`: Shows benefit of duration modeling
 - `semicrf` vs `semicrf_uniform`: Isolates learned duration as the mechanism
 

@@ -11,8 +11,8 @@ Two strategies are provided:
 
 Examples::
 
-    >>> from torch_semimarkov.semirings import LogSemiring
-    >>> from torch_semimarkov.semirings.checkpoint import CheckpointSemiring
+    >>> from flash_semicrf.semirings import LogSemiring
+    >>> from flash_semicrf.semirings.checkpoint import CheckpointSemiring
     >>> # Wrap LogSemiring with checkpointing for memory-efficient gradients
     >>> CheckpointedLog = CheckpointSemiring(LogSemiring, min_size=1000)
     >>> model = SemiMarkov(CheckpointedLog)

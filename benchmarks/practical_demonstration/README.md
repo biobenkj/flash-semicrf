@@ -1,6 +1,6 @@
 # Task Benchmarks: Semi-CRF vs Linear CRF
 
-This directory contains task-level benchmarks demonstrating where Semi-CRFs provide meaningful improvements over linear CRFs. While the main `torch-semimarkov` benchmarks focus on computational efficiency (time, memory, throughput), these benchmarks address the question: **does duration modeling actually help?**
+This directory contains task-level benchmarks demonstrating where Semi-CRFs provide meaningful improvements over linear CRFs. While the main `flash-semicrf` benchmarks focus on computational efficiency (time, memory, throughput), these benchmarks address the question: **does duration modeling actually help?**
 
 ## The Core Argument
 
@@ -69,7 +69,7 @@ Encoder (BiLSTM or Mamba)
     +-- Semi-CRF (K=500 or K=30)
 ```
 
-**Important observation:** `torch-semimarkov` with `max_duration=1` degenerates to a standard linear CRF. This enables truly apples-to-apples comparison using identical code paths.
+**Important observation:** `flash-semicrf` with `max_duration=1` degenerates to a standard linear CRF. This enables truly apples-to-apples comparison using identical code paths.
 
 ```python
 # Linear CRF baseline
@@ -328,7 +328,7 @@ These task benchmarks answer three questions:
 Together, they make the complete argument:
 1. **Semi-CRFs are better** when segment durations matter (task benchmarks)
 2. **Semi-CRF uncertainties are more calibrated** for actionable downstream use (calibration)
-3. **torch-semimarkov makes them practical** at genome scale (computational benchmarks)
+3. **flash-semicrf makes them practical** at genome scale (computational benchmarks)
 
 ## References
 

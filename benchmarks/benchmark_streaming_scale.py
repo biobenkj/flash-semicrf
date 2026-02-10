@@ -105,7 +105,7 @@ def benchmark_scale(
     use_triton: bool = True,
 ) -> ScaleResult:
     """Benchmark at scale with memory-conscious approach."""
-    from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
+    from flash_semicrf.streaming import HAS_TRITON, semi_crf_streaming_forward
 
     if use_triton and not HAS_TRITON:
         return ScaleResult(

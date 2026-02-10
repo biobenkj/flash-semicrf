@@ -9,6 +9,6 @@ repos:
         # - streaming/ (triton, pytorch reference, autograd)
         # - semimarkov.py (non-streaming backends, dispatch)
         # - nn.py (CRF heads - future)
-        files: ^src/torch_semimarkov/
+        files: ^src/flash_semicrf/
         pass_filenames: false
         verbose: true

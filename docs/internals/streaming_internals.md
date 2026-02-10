@@ -4,7 +4,7 @@ Technical reference for working with the streaming inference module.
 
 ## Overview
 
-The streaming module (`torch_semimarkov.streaming`) provides memory-efficient Semi-CRF inference by computing edge potentials on-the-fly rather than materializing the full edge tensor.
+The streaming module (`flash_semicrf.streaming`) provides memory-efficient Semi-CRF inference by computing edge potentials on-the-fly rather than materializing the full edge tensor.
 
 ### The Memory Problem
 
@@ -27,12 +27,12 @@ The streaming approach reduces memory to **O(K × C)** by:
 
 | File | Purpose |
 |------|---------|
-| [autograd.py](../src/torch_semimarkov/streaming/autograd.py) | Public API, autograd functions, and K-dispatch logic |
-| [triton_forward.py](../src/torch_semimarkov/streaming/triton_forward.py) | Triton forward kernels (log/max semiring) |
-| [triton_backward.py](../src/torch_semimarkov/streaming/triton_backward.py) | Triton backward kernel with loop tiling |
-| [triton_cache.py](../src/torch_semimarkov/streaming/triton_cache.py) | Triton cache validation utilities |
-| [pytorch_reference.py](../src/torch_semimarkov/streaming/pytorch_reference.py) | Pure PyTorch reference implementation |
-| [constants.py](../src/torch_semimarkov/streaming/constants.py) | Shared constants (NEG_INF) |
+| [autograd.py](../src/flash_semicrf/streaming/autograd.py) | Public API, autograd functions, and K-dispatch logic |
+| [triton_forward.py](../src/flash_semicrf/streaming/triton_forward.py) | Triton forward kernels (log/max semiring) |
+| [triton_backward.py](../src/flash_semicrf/streaming/triton_backward.py) | Triton backward kernel with loop tiling |
+| [triton_cache.py](../src/flash_semicrf/streaming/triton_cache.py) | Triton cache validation utilities |
+| [pytorch_reference.py](../src/flash_semicrf/streaming/pytorch_reference.py) | Pure PyTorch reference implementation |
+| [constants.py](../src/flash_semicrf/streaming/constants.py) | Shared constants (NEG_INF) |
 
 ---
 
@@ -48,7 +48,7 @@ The streaming module automatically routes to optimized implementations based on 
 
 **Important observation**: The Triton kernels require K≥3 because the ring buffer architecture assumes meaningful separation between timesteps. K=1 causes ring buffer aliasing (all `t % 1 = 0`), and K=2 has ring buffer fragility.
 
-From [autograd.py:602-656](../src/torch_semimarkov/streaming/autograd.py#L602-L656):
+From [autograd.py:602-656](../src/flash_semicrf/streaming/autograd.py#L602-L656):
 
 ```python
 # K=1 Fast Path: Linear CRF (no ring buffer, no duration loop)
@@ -175,7 +175,7 @@ content_score = cum_scores[t, c_dst] - cum_scores[t-k, c_dst]
 
 ### Code Location
 
-From [triton_forward.py:232-295](../src/torch_semimarkov/streaming/triton_forward.py#L232-L295) (kernel implementation):
+From [triton_forward.py:232-295](../src/flash_semicrf/streaming/triton_forward.py#L232-L295) (kernel implementation):
 
 ```python
 # Content score via cumulative sum difference
@@ -210,7 +210,7 @@ transition[k, c_src, c_dst]  # k = 0, 1, ..., K-1 (duration k+1 uses index k)
 
 The kernel detects the shape at launch and uses the appropriate loading pattern:
 
-From [triton_forward.py:283-293](../src/torch_semimarkov/streaming/triton_forward.py#L283-L293):
+From [triton_forward.py:283-293](../src/flash_semicrf/streaming/triton_forward.py#L283-L293):
 
 ```python
 # For duration-dependent transitions, load transition[dur_idx] inside the loop
@@ -265,7 +265,7 @@ Forward recurrence:
 
 ### Kernel Entry Point
 
-From [triton_forward.py:83-135](../src/torch_semimarkov/streaming/triton_forward.py#L83-L135):
+From [triton_forward.py:83-135](../src/flash_semicrf/streaming/triton_forward.py#L83-L135):
 
 ```python
 @triton.jit
@@ -307,7 +307,7 @@ log_norm_checkpoints = torch.zeros(batch, num_checkpoints, device=device, dtype=
 
 ### Main Loop Structure
 
-From [triton_forward.py:207-338](../src/torch_semimarkov/streaming/triton_forward.py#L207-L338):
+From [triton_forward.py:207-338](../src/flash_semicrf/streaming/triton_forward.py#L207-L338):
 
 ```python
 # Cumulative log normalization factor for numerical stability at extreme T
@@ -348,7 +348,7 @@ The kernel uses a two-step logsumexp with NEG_INF guards:
 1. **Over source labels** (c_src): `logsumexp(scores, axis=1)`
 2. **Over durations** (k): Accumulated incrementally via guarded logsumexp
 
-From [triton_forward.py:304-326](../src/torch_semimarkov/streaming/triton_forward.py#L304-L326):
+From [triton_forward.py:304-326](../src/flash_semicrf/streaming/triton_forward.py#L304-L326):
 
 ```python
 # Logsumexp over c_src (axis=1) with NEG_INF guard
@@ -394,7 +394,7 @@ At each checkpoint position `i × S`, we save the entire ring buffer state and t
 
 ### Checkpoint Interval Calculation
 
-From [pytorch_reference.py:15-18](../src/torch_semimarkov/streaming/pytorch_reference.py#L15-L18):
+From [pytorch_reference.py:15-18](../src/flash_semicrf/streaming/pytorch_reference.py#L15-L18):
 
 ```python
 def _compute_checkpoint_interval(T: int, K: int) -> int:
@@ -409,7 +409,7 @@ def _compute_checkpoint_interval(T: int, K: int) -> int:
 
 ### Saving Checkpoints with Normalization
 
-From [triton_forward.py:339-414](../src/torch_semimarkov/streaming/triton_forward.py#L339-L414):
+From [triton_forward.py:339-414](../src/flash_semicrf/streaming/triton_forward.py#L339-L414):
 
 ```python
 should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
@@ -560,7 +560,7 @@ Without masking (BROKEN):
 
 #### The Solution: Active Sequence Masking
 
-From [triton_forward.py:354-361](../src/torch_semimarkov/streaming/triton_forward.py#L354-L361):
+From [triton_forward.py:354-361](../src/flash_semicrf/streaming/triton_forward.py#L354-L361):
 
 ```python
 # 1. Find max alpha value for normalization (over valid C only)
@@ -586,7 +586,7 @@ accum_log_norm = accum_log_norm + shift
 
 The backward pass processes segments in reverse order with **loop tiling** to reduce register pressure:
 
-From [triton_backward.py:307-326](../src/torch_semimarkov/streaming/triton_backward.py#L307-L326):
+From [triton_backward.py:307-326](../src/flash_semicrf/streaming/triton_backward.py#L307-L326):
 
 ```python
 for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
@@ -609,7 +609,7 @@ for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
 
 Load ring buffer state from checkpoint, then recompute forward through the segment. Alpha buffer is **segment-isolated** to prevent race conditions:
 
-From [triton_backward.py:340-366](../src/torch_semimarkov/streaming/triton_backward.py#L340-L366):
+From [triton_backward.py:340-366](../src/flash_semicrf/streaming/triton_backward.py#L340-L366):
 
 ```python
 # Alpha buffer has segment dimension: (batch, num_segments, SEGMENT_SIZE, C_PAD)
@@ -638,7 +638,7 @@ The marginal computation requires a `(C_PAD × C_PAD)` matrix. At C_PAD=64, this
 
 **Solution**: Process c_dst dimension in tiles of TILE_C (typically 16):
 
-From [triton_backward.py:510-730](../src/torch_semimarkov/streaming/triton_backward.py#L510-L730):
+From [triton_backward.py:510-730](../src/flash_semicrf/streaming/triton_backward.py#L510-L730):
 
 ```python
 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
@@ -736,7 +736,7 @@ grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
 
 After kernel execution, host-side reduction combines per-segment workspaces:
 
-From [triton_backward.py:1447-1466](../src/torch_semimarkov/streaming/triton_backward.py#L1447-L1466):
+From [triton_backward.py:1447-1466](../src/flash_semicrf/streaming/triton_backward.py#L1447-L1466):
 
 ```python
 # 1. Sum over segments (deterministic order)
@@ -777,7 +777,7 @@ All internal computation uses **float64** for numerical stability at extreme seq
 - `log_norm_checkpoints`: float64 tensor `(batch, num_ckpts)`
 - `partition`: float64 output
 
-From [triton_forward.py:974](../src/torch_semimarkov/streaming/triton_forward.py#L974):
+From [triton_forward.py:974](../src/flash_semicrf/streaming/triton_forward.py#L974):
 ```python
 dtype = torch.float64  # Internal computation in float64 for numerical stability
 ```
@@ -787,7 +787,7 @@ dtype = torch.float64  # Internal computation in float64 for numerical stability
 - `grad_tr_workspace`, `grad_db_workspace`: float64 (accumulated across T)
 - Kernel-internal accumulators: `tl.float64` for logsumexp safety
 
-From [triton_backward.py:1212](../src/torch_semimarkov/streaming/triton_backward.py#L1212):
+From [triton_backward.py:1212](../src/flash_semicrf/streaming/triton_backward.py#L1212):
 ```python
 dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
 ```
@@ -796,7 +796,7 @@ dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
 
 Gradient tensors use **selective precision** based on their accumulation pattern:
 
-From [triton_backward.py:1276-1285](../src/torch_semimarkov/streaming/triton_backward.py#L1276-L1285):
+From [triton_backward.py:1276-1285](../src/flash_semicrf/streaming/triton_backward.py#L1276-L1285):
 ```python
 # NUMERICAL STABILITY: Selective precision for gradient tensors.
 # - grad_cum_scores: O(B*T*C) but per-position (no cross-T accumulation) -> float32 OK
@@ -819,7 +819,7 @@ grad_db_workspace = torch.zeros(..., dtype=torch.float64)
 
 The autograd function manages dtype conversion between user-facing float32 and internal float64:
 
-From [autograd.py:203-224](../src/torch_semimarkov/streaming/autograd.py#L203-L224):
+From [autograd.py:203-224](../src/flash_semicrf/streaming/autograd.py#L203-L224):
 ```python
 # Cast partition back to input dtype for return, but keep float64 for backward
 partition_f64 = partition  # Keep float64 for backward pass
@@ -902,7 +902,7 @@ At extreme sequence lengths (T ≥ 100k), accumulated floating-point error can v
 
 The module includes cache validation utilities to detect when Triton kernel configuration has changed:
 
-From [triton_cache.py](../src/torch_semimarkov/streaming/triton_cache.py):
+From [triton_cache.py](../src/flash_semicrf/streaming/triton_cache.py):
 
 ```python
 class TritonConfig(NamedTuple):
@@ -965,7 +965,7 @@ Streaming memory scales as O(batch × T × C), not O(batch × T × K × C²):
 Use the PyTorch reference for debugging:
 
 ```python
-from torch_semimarkov.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
+from flash_semicrf.streaming.pytorch_reference import semi_crf_streaming_forward_pytorch
 
 # Compare results (both return 4 values: partition, ring_ckpts, interval, log_norm_ckpts)
 partition_triton, _, _, _ = launch_streaming_triton_kernel(...)

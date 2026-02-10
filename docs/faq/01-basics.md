@@ -6,7 +6,7 @@ A Semi-Markov Conditional Random Field is a model that predicts **segments** (co
 
 The "semi-Markov" part means the model explicitly reasons about how long each segment lasts, unlike a standard linear-chain CRF which only predicts one label per position. This is important whenever your data has structure: genes have exons and introns with characteristic lengths, ECG traces have heartbeat phases of expected duration, and speech has phonemes that last for varying amounts of time.
 
-## Q: What does torch-semimarkov actually compute?
+## Q: What does flash-semicrf actually compute?
 
 At its core, the library solves a dynamic programming problem: given a set of scores for every possible segment (label, duration, transition), it efficiently computes quantities like:
 
@@ -15,7 +15,7 @@ At its core, the library solves a dynamic programming problem: given a set of sc
 - **Marginal probabilities** — how likely is a boundary at each position?
 - **Entropy** — how uncertain is the model overall?
 
-These are the same computations that underpin CRF-based NER taggers, gene finders, and speech recognizers. The difference is scale: torch-semimarkov is designed to handle sequences of 100,000+ positions on a GPU.
+These are the same computations that underpin CRF-based NER taggers, gene finders, and speech recognizers. The difference is scale: flash-semicrf is designed to handle sequences of 100,000+ positions on a GPU.
 
 ## Q: Why not just use a per-position classifier?
 

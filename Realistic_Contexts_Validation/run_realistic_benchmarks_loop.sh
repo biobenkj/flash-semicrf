@@ -16,15 +16,15 @@ module load bbc2/python3/python-3.13.7
 module load cuda12.6/toolkit/12.6.2
 unset PYTHONHOME PYTHONPATH
 
-cd /varidata/research/projects/jang/TommyGoralski/torch_semimarkov
+cd /varidata/research/projects/jang/TommyGoralski/flash_semicrf
 source .venv/bin/activate
 
-cd /varidata/research/projects/jang/TommyGoralski/torch_semimarkov/torch-semimarkov
+cd /varidata/research/projects/jang/TommyGoralski/flash_semicrf/flash-semicrf
 
 export CUDA_VISIBLE_DEVICES=3
 
 # Pull the sweep lists from the config generator output
-CFGDIR=/varidata/research/projects/jang/TommyGoralski/torch_semimarkov/benchmark_configs/human_from_stats_human_exonK
+CFGDIR=/varidata/research/projects/jang/TommyGoralski/flash_semicrf/benchmark_configs/human_from_stats_human_exonK
 CMDFILE="${CFGDIR}/benchmark_command.txt"
 test -f "$CMDFILE" || { echo "Missing benchmark command file: $CMDFILE" >&2; exit 2; }
 
@@ -41,7 +41,7 @@ test -n "${K_LIST:-}" || { echo "Could not parse --K from $CMDFILE" >&2; exit 3;
 test -n "${C_VAL:-}"  || { echo "Could not parse --C from $CMDFILE" >&2; exit 3; }
 
 # One sweep output directory (single benchmark_full.csv with MANY configs)
-OUTDIR=/varidata/research/projects/jang/TommyGoralski/torch_semimarkov/results/realistic/human_exonK_from_stats_sweep
+OUTDIR=/varidata/research/projects/jang/TommyGoralski/flash_semicrf/results/realistic/human_exonK_from_stats_sweep
 mkdir -p "$OUTDIR"
 
 echo "=== Sweep run ==="

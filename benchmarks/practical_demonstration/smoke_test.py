@@ -251,8 +251,8 @@ def collate_fn(batch):
 
 
 def test_library_imports():
-    """Test that torch_semimarkov imports correctly."""
-    from torch_semimarkov import (
+    """Test that flash_semicrf imports correctly."""
+    from flash_semicrf import (
         Segment,
         SemiMarkovCRFHead,
         UncertaintySemiMarkovCRFHead,
@@ -318,7 +318,7 @@ def test_calibration_imports():
 
 def test_semicrf_head_basic():
     """Test SemiMarkovCRFHead basic functionality."""
-    from torch_semimarkov import SemiMarkovCRFHead
+    from flash_semicrf import SemiMarkovCRFHead
 
     batch_size = 4
     seq_len = 50
@@ -348,7 +348,7 @@ def test_semicrf_head_basic():
 
 def test_semicrf_loss_computation():
     """Test SemiMarkovCRFHead loss computation."""
-    from torch_semimarkov import SemiMarkovCRFHead
+    from flash_semicrf import SemiMarkovCRFHead
 
     batch_size = 4
     seq_len = 50
@@ -376,7 +376,7 @@ def test_semicrf_loss_computation():
 
 def test_linear_crf_baseline():
     """Test that K=1 (linear CRF baseline) works."""
-    from torch_semimarkov import SemiMarkovCRFHead
+    from flash_semicrf import SemiMarkovCRFHead
 
     batch_size = 4
     seq_len = 50
@@ -659,7 +659,7 @@ def test_boundary_derivation():
 
 def test_segment_end_convention():
     """Verify segment end convention (inclusive end)."""
-    from torch_semimarkov import SemiMarkovCRFHead
+    from flash_semicrf import SemiMarkovCRFHead
 
     batch_size = 2
     seq_len = 30

@@ -33,20 +33,20 @@ import time
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import LogSemiring
-from torch_semimarkov.streaming.autograd import SemiCRFStreaming
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import LogSemiring
+from flash_semicrf.streaming.autograd import SemiCRFStreaming
 
 # Streaming imports
-from torch_semimarkov.streaming.pytorch_reference import (
+from flash_semicrf.streaming.pytorch_reference import (
     compute_edge_block_streaming,
     semi_crf_streaming_forward_pytorch,
 )
 
 # Conditional Triton imports
 try:
-    from torch_semimarkov.streaming.triton_backward import launch_streaming_triton_backward
-    from torch_semimarkov.streaming.triton_forward import (
+    from flash_semicrf.streaming.triton_backward import launch_streaming_triton_backward
+    from flash_semicrf.streaming.triton_forward import (
         HAS_TRITON,
         launch_streaming_triton_kernel,
     )
@@ -55,7 +55,7 @@ except ImportError:
     launch_streaming_triton_kernel = None
     launch_streaming_triton_backward = None
 
-from torch_semimarkov.streaming.constants import NEG_INF
+from flash_semicrf.streaming.constants import NEG_INF
 
 # -----------------------------------------------------------------------------
 # Test Configurations
@@ -111,7 +111,7 @@ def run_backend(struct, edge, lengths, backend: str, force_grad: bool = True):
 
     Returns the raw output from each backend's method.
     """
-    from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
+    from flash_semicrf.semirings.checkpoint import CheckpointShardSemiring
 
     if backend == "linear_scan":
         v, potentials, _ = struct._dp_standard(edge, lengths, force_grad=force_grad)

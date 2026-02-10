@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 # =============================================================================
 # Mock Encoders

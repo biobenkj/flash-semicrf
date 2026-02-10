@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from torch_semimarkov.validation import (
+from flash_semicrf.validation import (
     validate_cum_scores,
     validate_device_consistency,
     validate_hidden_states,
@@ -218,7 +218,7 @@ class TestCRFHeadValidation:
 
     def test_forward_validates_hidden_states_shape(self):
         """forward() should reject wrong hidden_states shape."""
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=64)
         hidden = torch.randn(100, 64)  # Missing batch dim
@@ -229,7 +229,7 @@ class TestCRFHeadValidation:
 
     def test_forward_validates_lengths_bounds(self):
         """forward() should reject lengths > T."""
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=64)
         hidden = torch.randn(2, 100, 64)
@@ -240,7 +240,7 @@ class TestCRFHeadValidation:
 
     def test_compute_loss_validates_labels(self):
         """compute_loss() should reject out-of-range labels."""
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=64)
         hidden = torch.randn(2, 100, 64)
@@ -252,7 +252,7 @@ class TestCRFHeadValidation:
 
     def test_decode_validates_inputs(self):
         """decode() should validate inputs."""
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=64)
         hidden = torch.randn(100, 64)  # Missing batch dim
@@ -267,7 +267,7 @@ class TestStreamingAPIValidation:
 
     def test_streaming_forward_validates_cum_scores(self):
         """semi_crf_streaming_forward() should validate cum_scores."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         cum_scores = torch.zeros(2, 1, 4)  # T=0, invalid
         transition = torch.randn(4, 4)
@@ -279,7 +279,7 @@ class TestStreamingAPIValidation:
 
     def test_streaming_forward_validates_lengths(self):
         """semi_crf_streaming_forward() should validate lengths."""
-        from torch_semimarkov.streaming import semi_crf_streaming_forward
+        from flash_semicrf.streaming import semi_crf_streaming_forward
 
         cum_scores = torch.zeros(2, 101, 4)  # T=100
         transition = torch.randn(4, 4)

@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-PROJ=/varidata/research/projects/jang/TommyGoralski/torch_semimarkov
+PROJ=/varidata/research/projects/jang/TommyGoralski/flash_semicrf
 SUMMARY=${PROJ}/stats_human/summary.csv
 OUTDIR=${PROJ}/benchmark_configs/human_from_stats_human_exonK
 
@@ -20,8 +20,8 @@ OUTDIR=${PROJ}/benchmark_configs/human_from_stats_human_exonK
 # module load python/3.10
 
 # If you use a virtualenv or conda, activate it here:
-# source ~/venvs/torch_semimarkov/bin/activate
-# conda activate torch_semimarkov
+# source ~/venvs/flash_semicrf/bin/activate
+# conda activate flash_semicrf
 
 cd "${PROJ}"
 mkdir -p "${OUTDIR}"

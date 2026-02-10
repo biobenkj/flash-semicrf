@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/torch_semimarkov/streaming/autograd.py` @ commit `7120f0f`
+**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `7120f0f`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary

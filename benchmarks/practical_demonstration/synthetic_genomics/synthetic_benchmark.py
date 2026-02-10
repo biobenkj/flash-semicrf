@@ -657,7 +657,7 @@ class SemiCRFModel(nn.Module):
         self.backend = backend
         self.use_triton = use_triton
 
-        from torch_semimarkov import SemiMarkovCRFHead
+        from flash_semicrf import SemiMarkovCRFHead
 
         self.crf = SemiMarkovCRFHead(
             num_classes=num_classes,
@@ -724,7 +724,7 @@ def create_model(
     Model types:
     - softmax: Per-position softmax (baseline)
     - pytorch-crf: External pytorch-crf library (linear CRF baseline)
-    - linear: torch-semimarkov K=1 (linear CRF, same codebase as semi-CRF)
+    - linear: flash-semicrf K=1 (linear CRF, same codebase as semi-CRF)
     - semicrf: Semi-CRF with learned duration
     - semicrf_uniform: Semi-CRF with uniform duration (ablation)
     """
@@ -1138,7 +1138,7 @@ def evaluate(
                 # pytorch-crf returns list[list[int]]
                 pred_labels = np.array(result[i][:seq_len], dtype=np.int64)
             else:
-                # torch-semimarkov returns DecodeResult with segments
+                # flash-semicrf returns DecodeResult with segments
                 # Segment.end is INCLUSIVE, convert to exclusive
                 pred_labels = np.zeros(seq_len, dtype=np.int64)
                 for seg in result.segments[i]:
@@ -1523,7 +1523,7 @@ def cmd_run(args):
     # 5-way comparison:
     # - softmax: per-position baseline
     # - pytorch-crf: external library linear CRF baseline (if available)
-    # - linear: torch-semimarkov K=1 (same codebase as semi-CRF)
+    # - linear: flash-semicrf K=1 (same codebase as semi-CRF)
     # - semicrf: Semi-CRF with learned duration
     # - semicrf_uniform: Semi-CRF with uniform duration (ablation)
     all_model_types = ["softmax", "pytorch-crf", "linear", "semicrf", "semicrf_uniform"]

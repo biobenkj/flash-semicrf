@@ -11,7 +11,7 @@ Tests verify:
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkovCRFHead, UncertaintySemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead, UncertaintySemiMarkovCRFHead
 
 
 class TestCumsumPrecision:

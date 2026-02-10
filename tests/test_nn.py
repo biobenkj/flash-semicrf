@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from torch_semimarkov import SemiMarkovCRFHead, semi_crf_streaming_forward
-from torch_semimarkov.uncertainty import UncertaintySemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead, semi_crf_streaming_forward
+from flash_semicrf.uncertainty import UncertaintySemiMarkovCRFHead
 
 
 class TestBackendRouting:

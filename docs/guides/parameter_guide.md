@@ -124,7 +124,7 @@ assumptions about segment lengths with far fewer parameters (C or 2C).
 ### Example
 
 ```python
-from torch_semimarkov import SemiMarkovCRFHead
+from flash_semicrf import SemiMarkovCRFHead
 
 # Default: fully learned duration bias
 head = SemiMarkovCRFHead(num_classes=5, max_duration=200, hidden_dim=256)

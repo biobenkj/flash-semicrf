@@ -41,7 +41,7 @@ def _config_hash(config: TritonConfig) -> str:
 
 def _sentinel_path() -> Path:
     """Path to the config sentinel file."""
-    return get_triton_cache_dir() / ".torch_semimarkov_config"
+    return get_triton_cache_dir() / ".flash_semicrf_config"
 
 
 def validate_triton_cache(config: TritonConfig, warn: bool = True) -> bool:

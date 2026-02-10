@@ -120,7 +120,7 @@ where the reduction is over ``c_src`` (the source/previous label).
 Usage
 -----
 >>> import torch
->>> from torch_semimarkov.streaming import semi_crf_streaming_forward
+>>> from flash_semicrf.streaming import semi_crf_streaming_forward
 >>>
 >>> # Pre-project features (outside kernel)
 >>> h = encoder(x)  # (batch, T, hidden_dim)
@@ -136,7 +136,7 @@ Usage
 
 See Also
 --------
-:class:`torch_semimarkov.SemiMarkov` : Pre-computed edge tensor API with all 7 semirings
+:class:`flash_semicrf.SemiMarkov` : Pre-computed edge tensor API with all 7 semirings
 """
 
 from .autograd import (

@@ -1,5 +1,5 @@
 """
-Setup script for torch-semimarkov with optional CUDA extension.
+Setup script for flash-semicrf with optional CUDA extension.
 
 The CUDA extension (genbmm) provides accelerated generalized batch matrix
 multiplication for log-semiring, max-semiring, and banded operations.
@@ -20,7 +20,7 @@ from pathlib import Path
 from setuptools import setup
 
 # Check for CUDA build request
-BUILD_CUDA = "--cuda" in sys.argv or os.environ.get("TORCH_SEMIMARKOV_CUDA", "0") == "1"
+BUILD_CUDA = "--cuda" in sys.argv or os.environ.get("FLASH_SEMICRF_CUDA", "0") == "1"
 
 if "--cuda" in sys.argv:
     sys.argv.remove("--cuda")
@@ -42,7 +42,7 @@ def get_cuda_extensions():
         return []
 
     # Use relative paths from setup.py directory (required by setuptools)
-    csrc_rel = os.path.join("src", "torch_semimarkov", "_genbmm", "csrc")
+    csrc_rel = os.path.join("src", "flash_semicrf", "_genbmm", "csrc")
     csrc_abs = Path(__file__).parent / csrc_rel
 
     if not csrc_abs.exists():
@@ -65,7 +65,7 @@ def get_cuda_extensions():
 
     return [
         CUDAExtension(
-            name="torch_semimarkov._genbmm._C",
+            name="flash_semicrf._genbmm._C",
             sources=sources,
             extra_compile_args={
                 "cxx": ["-O3"],

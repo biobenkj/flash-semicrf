@@ -9,8 +9,8 @@ from dataclasses import dataclass
 
 import torch
 
-from torch_semimarkov import SemiMarkov
-from torch_semimarkov.semirings import EntropySemiring, LogSemiring, MaxSemiring
+from flash_semicrf import SemiMarkov
+from flash_semicrf.semirings import EntropySemiring, LogSemiring, MaxSemiring
 
 from .memory import bytes_to_gb, estimate_memory_breakdown
 
@@ -201,7 +201,7 @@ def _run_edge_tensor_benchmark(
                 return v
             elif backend == "binary_tree_sharded":
                 # Use CheckpointShardSemiring to reduce peak memory at cost of time
-                from torch_semimarkov.semirings.checkpoint import CheckpointShardSemiring
+                from flash_semicrf.semirings.checkpoint import CheckpointShardSemiring
 
                 ShardedSemiring = CheckpointShardSemiring(struct_to_use.semiring, max_size=10000)
                 struct_sharded = SemiMarkov(ShardedSemiring)
@@ -356,7 +356,7 @@ def _run_streaming_benchmark(
 ) -> BenchmarkResult:
     """Benchmark streaming backends (compute edges on-the-fly)."""
     try:
-        from torch_semimarkov.streaming import HAS_TRITON, semi_crf_streaming_forward
+        from flash_semicrf.streaming import HAS_TRITON, semi_crf_streaming_forward
     except ImportError:
         return BenchmarkResult(
             **result_base,
