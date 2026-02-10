@@ -7,11 +7,11 @@ Validates the Triton implementation against the PyTorch reference.
 import pytest
 import torch
 
-from tests.conftest import force_clear_triton_cache
 from flash_semicrf.streaming import (
     HAS_TRITON,
     semi_crf_streaming_forward_pytorch,
 )
+from tests.conftest import force_clear_triton_cache
 
 # Conditionally import Triton functions
 if HAS_TRITON:
