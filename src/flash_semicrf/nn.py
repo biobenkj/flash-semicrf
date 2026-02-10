@@ -231,7 +231,7 @@ class SemiMarkovCRFHead(nn.Module):
         Args:
             algorithm: DP algorithm to use on the materialized edge tensor.
                 ``"scan"`` uses ``_dp_scan_streaming`` (ring buffer, default).
-                ``"standard"`` uses ``_dp_standard`` (list comprehension reference).
+                ``"standard"`` uses ``_dp_standard`` (pytorch-struct reference).
         """
         from .semimarkov import SemiMarkov
         from .semirings import LogSemiring, MaxSemiring
@@ -248,7 +248,12 @@ class SemiMarkovCRFHead(nn.Module):
         # We need to pass lengths + 1 to match
         model = SemiMarkov(semiring_cls)
         if algorithm == "standard":
-            result = model._dp_standard(edge, lengths=lengths + 1, force_grad=True)
+            # Call _dp_standard directly with force_grad=False to preserve
+            # the autograd graph from _build_edge_tensor back to model params.
+            # (force_grad=True would create leaf charts that block gradient flow;
+            # _dp_standard_vectorized unconditionally sets edge.requires_grad_(True)
+            # which detaches it from model parameters.)
+            result = model._dp_standard(edge, lengths=lengths + 1, force_grad=False)
         else:
             result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
         return result[0].squeeze(0)
