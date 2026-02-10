@@ -1,6 +1,6 @@
 <div align="center">
 
-# flash-semicrf
+<img src="flash_semicrf_logo.png" alt="flash-semicrf" width="420" />
 
 Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 
