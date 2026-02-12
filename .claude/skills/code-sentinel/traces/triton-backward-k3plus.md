@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_backward.py` @ commit `9dfa110`
+**Verified against:** `src/flash_semicrf/streaming/triton_backward.py` @ commit `e75e1ee`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -24,7 +24,7 @@ The Triton backward kernel computes gradients for the Semi-CRF partition functio
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFStreamingTriton.backward()` | autograd.py:213 | Backward through SemiCRFStreamingTriton |
+| `SemiCRFStreamingTriton.backward()` | autograd.py:219 | Backward through SemiCRFStreamingTriton |
 | `launch_streaming_triton_backward()` | triton_backward.py:879 | Main launcher |
 | `semi_crf_streaming_backward_kernel()` | triton_backward.py:54 | The Triton kernel |
 
@@ -207,9 +207,9 @@ tl.debug_barrier()  # ← Sync all warps before starting next segment
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| autograd.py:228-235 | `torch.isfinite(partition)` | Validate partition before backward |
+| autograd.py:234-241 | `torch.isfinite(partition)` | Validate partition before backward |
 | triton_backward.py (kernel) | Clamp log_scale | Prevent exp() overflow: `clamp(log_scale, min=-700, max=0)` |
-| autograd.py:264-277 | `torch.isfinite(grad_*)` | Validate all backward outputs |
+| autograd.py:270-283 | `torch.isfinite(grad_*)` | Validate all backward outputs |
 
 ## Gradient Reduction (Deterministic)
 
@@ -257,6 +257,7 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len to int32 | `49d9d61` |
 | Non-deterministic gradients | Critical | Multi-segment backward | Per-segment workspaces eliminate cross-segment atomic contention | `0c9b73e` |
 | Missing memory barriers | Critical | Multi-warp execution | 3 tl.debug_barrier() calls added | `9dfa110` |
+| Non-power-of-2 C stride OOB | Critical | C_PAD > C | Safe index clamping (`tl.minimum(idx, C-1)`) for C-shaped tensor loads/stores | `e75e1ee` |
 
 ## Debugging: Gradient Mismatch
 
@@ -297,6 +298,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-12**: Fixed stride bug for non-power-of-2 C values (analogous to forward kernel safe index clamping); updated autograd.py line numbers for max semiring guard additions; updated to commit `e75e1ee`
 - **2026-02-05**: Migrated all internal computation to float64; added 3 memory barriers (tl.debug_barrier) for warp synchronization: post-checkpoint load (line 366), beta ring store (line 1070), end-of-segment sync (line 1072); documented barrier failure modes; updated to commit `9dfa110`
 - **2026-02-02**: Deterministic gradient accumulation via per-segment workspaces; workspace shapes now `(B, num_segments, ...)` instead of `(B, ...)`; each segment writes to its own slice eliminating cross-segment atomic contention; host-side `.sum(dim=1)` is deterministic; updated to commit `b05260f`
 - **2026-02-02**: Fixed int32/int64 type mismatch for seq_len comparison; seq_len now loaded as int32 to match loop variable type from tl.range; updated to commit `49d9d61`

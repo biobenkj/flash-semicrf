@@ -78,7 +78,7 @@ class TestTritonStreamingKernel:
         """Verify Triton kernel matches PyTorch for medium inputs."""
         batch, T, K, C = 4, 100, 8, 6
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
-            batch, T, K, C, device="cuda"
+            batch, T, K, C, device="cuda", dtype=torch.float64
         )
 
         partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
@@ -709,6 +709,111 @@ class TestTritonStreamingBoundaries:
         torch.testing.assert_close(db_tr.grad, db_py.grad, rtol=0.05, atol=0.5)
         torch.testing.assert_close(ps_tr.grad, ps_py.grad, rtol=0.05, atol=0.5)
         torch.testing.assert_close(pe_tr.grad, pe_py.grad, rtol=0.05, atol=0.5)
+
+    def test_triton_boundaries_gradients_non_power_of_2_C(self):
+        """Verify boundary gradients are correct when C != C_PAD (non-power-of-2).
+
+        Regression test for stride mismatch bug: grad_proj_start/grad_proj_end
+        buffers are allocated with C_PAD columns but were indexed using strides
+        from proj_start (C columns), causing row overlap when C < C_PAD.
+        """
+        from flash_semicrf.streaming import semi_crf_streaming_forward
+
+        # Small odd sizes and large pad jumps (C=17->32, C=24->32)
+        for C in [5, 6, 17, 24]:
+            batch, T, K = 2, 30, 5
+            cum_scores, transition, duration_bias, lengths, proj_start, proj_end = (
+                self.create_boundary_inputs(batch, T, K, C)
+            )
+
+            # Non-uniform grad_output to exercise backward scaling
+            grad_output = torch.randn(batch, device="cuda")
+
+            # PyTorch path
+            cs_py = cum_scores.clone().requires_grad_(True)
+            tr_py = transition.clone().requires_grad_(True)
+            db_py = duration_bias.clone().requires_grad_(True)
+            ps_py = proj_start.clone().requires_grad_(True)
+            pe_py = proj_end.clone().requires_grad_(True)
+
+            partition_py = semi_crf_streaming_forward(
+                cs_py,
+                tr_py,
+                db_py,
+                lengths,
+                K,
+                proj_start=ps_py,
+                proj_end=pe_py,
+                use_triton=False,
+            )
+            partition_py.backward(grad_output)
+
+            # Triton path
+            cs_tr = cum_scores.clone().requires_grad_(True)
+            tr_tr = transition.clone().requires_grad_(True)
+            db_tr = duration_bias.clone().requires_grad_(True)
+            ps_tr = proj_start.clone().requires_grad_(True)
+            pe_tr = proj_end.clone().requires_grad_(True)
+
+            partition_tr = semi_crf_streaming_forward(
+                cs_tr,
+                tr_tr,
+                db_tr,
+                lengths,
+                K,
+                proj_start=ps_tr,
+                proj_end=pe_tr,
+                use_triton=True,
+            )
+            partition_tr.backward(grad_output)
+
+            # Compare partition values
+            torch.testing.assert_close(
+                partition_tr,
+                partition_py,
+                rtol=1e-4,
+                atol=1e-4,
+                msg=f"C={C}: partition mismatch",
+            )
+
+            # Compare boundary gradients (the bug target)
+            torch.testing.assert_close(
+                ps_tr.grad,
+                ps_py.grad,
+                rtol=0.05,
+                atol=0.5,
+                msg=f"C={C}: grad_proj_start mismatch",
+            )
+            torch.testing.assert_close(
+                pe_tr.grad,
+                pe_py.grad,
+                rtol=0.05,
+                atol=0.5,
+                msg=f"C={C}: grad_proj_end mismatch",
+            )
+
+            # Also verify other gradients aren't disturbed
+            torch.testing.assert_close(
+                cs_tr.grad,
+                cs_py.grad,
+                rtol=0.05,
+                atol=0.5,
+                msg=f"C={C}: grad_cum_scores mismatch",
+            )
+            torch.testing.assert_close(
+                tr_tr.grad,
+                tr_py.grad,
+                rtol=0.05,
+                atol=0.5,
+                msg=f"C={C}: grad_transition mismatch",
+            )
+            torch.testing.assert_close(
+                db_tr.grad,
+                db_py.grad,
+                rtol=0.05,
+                atol=0.5,
+                msg=f"C={C}: grad_duration_bias mismatch",
+            )
 
     def test_triton_boundaries_backward_kernel_raw(self):
         """Test the raw Triton backward kernel with boundaries."""

@@ -1,7 +1,7 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `9dfa110`
-**Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
+**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `e45c7f1`
+**Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_triton.py::TestTritonStreamingKernel`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
 
@@ -36,28 +36,32 @@ These require human/agent judgment when loading the trace.
 
 | ID | Assumption          | Verification Guidance                                                    |
 |----|---------------------|--------------------------------------------------------------------------|
-| A4 | C_PAD is power of 2 | Check C_PAD assignment in launcher (line 975) uses `_next_power_of_2(C)` |
+| A4 | C_PAD is power of 2 | Check C_PAD assignment in launcher (~line 975) uses `_next_power_of_2(C)` |
+| A6 | Safe index clamping for non-power-of-2 C | Verify `c_idx_safe = tl.minimum(c_idx, C - 1)` at lines 176-178 (scan), 529-531 (max), 762-764 (max_bp) |
 
 ## Entry Points
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFStreamingTriton.forward()` | autograd.py:166 | K>=3, GPU, needs_grad, use_triton |
-| `launch_streaming_triton_kernel()` | triton_forward.py:902 | Direct inference or from autograd |
+| `SemiCRFStreamingTriton.forward()` | autograd.py:176 | K>=3, GPU, needs_grad, use_triton |
+| `launch_streaming_triton_kernel()` | triton_forward.py:931 | Direct inference or from autograd |
 | `semi_crf_streaming_scan_kernel()` | triton_forward.py:84 | Log semiring (partition function) |
-| `semi_crf_streaming_scan_kernel_max()` | triton_forward.py:449 | Max semiring (Viterbi) |
+| `semi_crf_streaming_scan_kernel_max()` | triton_forward.py:461 | Max semiring (Viterbi score only) |
+| `semi_crf_streaming_scan_kernel_max_bp()` | triton_forward.py:690 | Max semiring (Viterbi + backpointers) |
 
 ## Dispatch Conditions
 
 ```python
-# autograd.py:641
+# autograd.py:673
 can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 
-# autograd.py:643-652
+# autograd.py:675-679
 if needs_grad:
     if can_use_triton:
         return SemiCRFStreamingTriton.apply(...)  # This path
 ```
+
+**NOTE**: `needs_grad` now gates on `torch.is_grad_enabled()` (autograd.py:601), so `torch.no_grad()` contexts bypass autograd even with trainable parameters. Max semiring with `needs_grad=True` raises `ValueError` (autograd.py:610-616).
 
 ## Data Flow
 
@@ -82,9 +86,30 @@ Kernel produces:
   log_norm_checkpoints: (B, num_ckpts) float64       <- For numerical stability at extreme T
 ```
 
+## Safe Index Clamping (Non-Power-of-2 C)
+
+**Added in commit `e45c7f1`.** Applied to all three kernels: `scan_kernel` (line 176), `scan_kernel_max` (line 529), `scan_kernel_max_bp` (line 762).
+
+```python
+# Clamp indices so masked threads do not form out-of-bounds addresses.
+#
+# IMPORTANT: Even with a load/store mask, Triton may still evaluate address
+# arithmetic for masked lanes. When C_PAD > C (non-power-of-2 class counts),
+# raw c_idx/c_dst_idx/c_src_idx can form invalid pointers for tensors whose
+# last dimension is C. This is undefined behavior and can appear as small,
+# configuration-dependent numerical drift.
+c_idx_safe = tl.minimum(c_idx, C - 1)
+c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+```
+
+**Where used**: All `tl.load` / `tl.store` calls indexing into C-shaped tensors (cum_scores, duration_bias, proj_start, proj_end, transition, backpointers) now use `*_safe` indices. The C_PAD-shaped ring buffer still uses raw `c_idx` since it is allocated with C_PAD columns.
+
+**Why**: Triton may evaluate address arithmetic for masked-off lanes. With C_PAD > C, raw indices form invalid pointer offsets into tensors with stride `C`. This manifested as small, configuration-dependent numerical drift (not crashes) that was hard to reproduce because it depended on cache state and kernel recompilation.
+
 ## Algorithm Steps
 
-### 1. Buffer Initialization (triton_forward.py:1015-1030)
+### 1. Buffer Initialization (triton_forward.py:~1015-1030)
 
 ```python
 # dtype = torch.float64 (line 974) - All internal computation uses float64
@@ -101,12 +126,12 @@ log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtyp
 
 Grid: `(batch,)` - one program per batch element
 
-### 3. Main Forward Loop (triton_forward.py:201-422)
+### 3. Main Forward Loop (triton_forward.py:220-435)
 
 ```
-# Initialize tracking variables (line 201)
+# Initialize tracking variables (line ~215)
 final_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
-accum_log_norm = tl.zeros((), dtype=tl.float64)  # line 205
+accum_log_norm = tl.zeros((), dtype=tl.float64)
 
 for t in range(1, T + 1):  # t = 1, 2, ..., T
     # ACTIVE MASKING: Include t == seq_len to compute alpha at final position
@@ -119,35 +144,36 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
         k_valid = (k <= t) & (k <= K)
         start_pos = t - k
 
-        # 3a. Read alpha[start_pos] from ring buffer (lines 223-227)
+        # 3a. Read alpha[start_pos] from ring buffer (line ~235)
         # MASKED: only load for active & k_valid
         ring_k_idx = start_pos % K
         alpha_prev = load(ring_buffer[ring_k_idx], mask=active & k_valid)  # (C_PAD,)
 
-        # 3b. Compute edge on-the-fly (lines 229-292)
+        # 3b. Compute edge on-the-fly (lines ~240-305)
         # All loads MASKED with active & k_valid
-        content_score = cum_scores[t] - cum_scores[start_pos]  # (C_PAD,)
-        segment_score = content_score + duration_bias[k-1]     # (C_PAD,)
+        # NOTE: All C-shaped tensor loads use *_safe indices (see Safe Index Clamping section)
+        content_score = cum_scores[t] - cum_scores[start_pos]  # (C_PAD,) via c_idx_safe
+        segment_score = content_score + duration_bias[k-1]     # (C_PAD,) via c_idx_safe
         if HAS_BOUNDARIES:
-            segment_score += proj_start[start_pos] + proj_end[t-1]
-        edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD)
+            segment_score += proj_start[start_pos] + proj_end[t-1]  # via c_idx_safe
+        edge_block = segment_score[:, None] + transition_block  # (C_PAD, C_PAD) via c_dst/src_idx_safe
 
-        # 3c. Compute scores and logsumexp over c_src (lines 299-312)
+        # 3c. Compute scores and logsumexp over c_src (lines ~310-325)
         scores = alpha_prev[None, :] + edge_block  # (C_PAD, C_PAD)
         score_for_k = logsumexp(scores, axis=1)    # (C_PAD,) - with NEG_INF guard
 
-        # 3d. Accumulate into alpha_t via logsumexp (lines 314-323)
+        # 3d. Accumulate into alpha_t via logsumexp (lines ~327-336)
         alpha_t = logsumexp_2way(alpha_t, score_for_k)  # with NEG_INF guard
 
-    # 3e. Mask inactive sequences (line 326)
+    # 3e. Mask inactive sequences (line ~339)
     alpha_t = where(active & c_mask, alpha_t, NEG_INF)
 
-    # 3f. Store to ring buffer (lines 329-334)
+    # 3f. Store to ring buffer (line ~344)
     # MASKED: only store for active sequences
     ring_t_idx = t % K
     store(ring_buffer[ring_t_idx], alpha_t, mask=active & c_mask)
 
-    # 3g. Checkpoint with normalization (lines 340-413)
+    # 3g. Checkpoint with normalization (lines ~353-425)
     if t % CHECKPOINT_INTERVAL == 0:
         ckpt_idx = t // CHECKPOINT_INTERVAL
 
@@ -178,13 +204,13 @@ for t in range(1, T + 1):  # t = 1, 2, ..., T
         if (ckpt_idx < NUM_CKPTS) & active:
             store(log_norm_checkpoints[ckpt_idx], accum_log_norm)
 
-    # 3h. Capture final alpha at sequence end (lines 418-422)
+    # 3h. Capture final alpha at sequence end (lines ~430-435)
     # NOTE: Cast t to int32 for consistent comparison with seq_len
     is_final = t.to(tl.int32) == seq_len
     final_alpha = where(is_final & c_mask, alpha_t, final_alpha)
 ```
 
-### 4. Final Reduction (triton_forward.py:428-451)
+### 4. Final Reduction (triton_forward.py:~440-460)
 
 ```python
 # Compute raw partition from normalized final_alpha
@@ -252,6 +278,7 @@ Backward recomputes forward between checkpoints using saved ring states.
 | Ring buffer aliasing | alpha[t] overwrites alpha[t-K] | `t % K` write, `(t-k) % K` read |
 | Prefix-sum init | cum_scores[0] = 0 | `assert (cum_scores[:, 0, :] == 0).all()` |
 | C_PAD power of 2 | C_PAD = 2^ceil(log2(C)) | Required for `tl.arange` |
+| Safe index clamping | `*_safe = min(idx, C-1)` | Prevents OOB addresses for C-shaped tensors when C_PAD > C |
 | checkpoint_interval >= K | interval >= K | Required for correct backward |
 | Active masking | Only update active sequences | All ops use `active` mask |
 
@@ -270,11 +297,12 @@ Backward recomputes forward between checkpoints using saved ring states.
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| triton_forward.py:309-313 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
-| triton_forward.py:321-327 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
-| triton_forward.py:355-360 | `shift = where(active, max_val, 0.0)` | Checkpoint normalization uses `active` directly (NEG_INF comparison workaround) |
-| triton_forward.py:432-438 | Final logsumexp guard | Prevent NaN in partition output |
-| autograd.py:228 | `torch.isfinite(partition)` | Validate before backward |
+| triton_forward.py:~321 | `is_all_neginf = max_scores < (NEG_INF + 1.0)` | Prevent undefined logsumexp when all inputs are NEG_INF |
+| triton_forward.py:~327-336 | `is_both_neginf` check | Guard two-way logsumexp accumulation |
+| triton_forward.py:~367 | `shift = where(active, max_val, 0.0)` | Checkpoint normalization uses `active` directly (NEG_INF comparison workaround) |
+| triton_forward.py:~440-450 | Final logsumexp guard | Prevent NaN in partition output |
+| triton_forward.py:176-178 | `c_idx_safe = tl.minimum(c_idx, C - 1)` | Prevent OOB address arithmetic for non-power-of-2 C |
+| autograd.py:~234 | `torch.isfinite(partition)` | Validate before backward |
 
 ## NEG_INF Handling Pattern (Flash Attention Style)
 
@@ -315,7 +343,7 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | K=1/K=2 ring buffer aliasing | Critical | Always | Dispatch to specialized paths | `870bd1f` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
 | Numerical precision at extreme T | High | T > 100K | All kernels now use float64 internally | `9dfa110` |
-| Non-power-of-2 C | Medium | Always | Pad to C_PAD | triton_forward.py:985 |
+| Non-power-of-2 C masked OOB | Critical | C_PAD > C | Clamp indices via `tl.minimum(idx, C-1)` for C-shaped tensors | `e45c7f1` |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len and t to int32 | `49d9d61` |
 | NEG_INF comparison failure | Critical | Variable-length + checkpointing | Use `active` directly for shift | `49d9d61` |
 
@@ -338,6 +366,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-12**: Added safe index clamping (`c_idx_safe`, `c_dst_idx_safe`, `c_src_idx_safe`) to all three kernels (scan, max, max_bp) to prevent OOB address arithmetic for non-power-of-2 C; all `tl.load`/`tl.store` for C-shaped tensors now use `*_safe` indices; added max semiring guard note; updated entry points and line numbers; updated to `e45c7f1`
 - **2026-02-05**: Migrated all internal computation to float64 for numerical stability; updated dtype annotations throughout; updated to commit `9dfa110`
 - **2026-02-02**: Updated to commit `0c9b73e` (minor comment cleanup)
 - **2026-02-02**: Fixed int32/int64 type mismatch in Triton comparisons; `seq_len` loaded as int32, `t` cast to int32 for `active` and `is_final` comparisons; checkpoint normalization now uses `active` directly instead of NEG_INF comparison (workaround for silent comparison failure); updated to commit `49d9d61`

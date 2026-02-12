@@ -165,6 +165,18 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]  # (1, C_PAD)
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
+        # Clamp indices so masked threads do not form out-of-bounds addresses.
+        #
+        # IMPORTANT: Even with a load/store mask, Triton may still evaluate address
+        # arithmetic for masked lanes. When C_PAD > C (non-power-of-2 class counts),
+        # raw c_idx/c_dst_idx/c_src_idx can form invalid pointers for tensors whose
+        # last dimension is C. This is undefined behavior and can appear as small,
+        # configuration-dependent numerical drift (for example after unrelated cache
+        # invalidation/recompilation). Always use *_safe indices for C-shaped tensors.
+        c_idx_safe = tl.minimum(c_idx, C - 1)
+        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+
         # Load sequence length
         # Cast to int32 to match loop variable type from tl.range (int32)
         # Avoids silent comparison failures between int32 and int64
@@ -187,7 +199,7 @@ if HAS_TRITON:
         # So we load transition_ptr[c_dst, c_src] effectively
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
-                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
                 mask=c_mask_2d,
                 other=0.0,
             )  # (C_PAD, C_PAD) - this is transition.T
@@ -233,13 +245,13 @@ if HAS_TRITON:
 
                 # Load cum_scores[t, :] and cum_scores[start_pos, :]
                 cum_end = tl.load(
-                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )  # (C_PAD,)
 
                 cum_start = tl.load(
-                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + start_pos * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )  # (C_PAD,)
@@ -250,7 +262,7 @@ if HAS_TRITON:
                 # Load duration bias: duration k uses index k-1
                 dur_idx = k - 1
                 dur_bias = tl.load(
-                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx_safe * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )  # (C_PAD,)
@@ -263,14 +275,14 @@ if HAS_TRITON:
                 if HAS_BOUNDARIES:
                     # proj_start[start_pos, :] - start boundary score
                     start_score = tl.load(
-                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        proj_start_base + start_pos * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
                     # proj_end[t-1, :] - end boundary score (t-1 is last position in segment)
                     end_pos_boundary = t - 1
                     end_score = tl.load(
-                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
@@ -286,8 +298,8 @@ if HAS_TRITON:
                     transition_block = tl.load(
                         transition_ptr
                         + dur_idx * stride_tr_k
-                        + c_dst_idx * stride_tr_dst
-                        + c_src_idx * stride_tr_src,
+                        + c_dst_idx_safe * stride_tr_dst
+                        + c_src_idx_safe * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
                     )  # (C_PAD, C_PAD) - transition[dur_idx].T
@@ -512,6 +524,12 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
+        # Clamp indices so masked threads do not form out-of-bounds addresses.
+        # See detailed note in semi_crf_streaming_scan_kernel above.
+        c_idx_safe = tl.minimum(c_idx, C - 1)
+        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+
         # Cast to int32 to match loop variable type from tl.range
         seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
@@ -527,7 +545,7 @@ if HAS_TRITON:
         # Load static transitions once (duration-dependent loaded inside k-loop)
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
-                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
                 mask=c_mask_2d,
                 other=0.0,
             )
@@ -560,13 +578,13 @@ if HAS_TRITON:
                 )
 
                 cum_end = tl.load(
-                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
 
                 cum_start = tl.load(
-                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + start_pos * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
@@ -575,7 +593,7 @@ if HAS_TRITON:
                 # Duration k uses index k-1
                 dur_idx = k - 1
                 dur_bias = tl.load(
-                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx_safe * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
@@ -586,14 +604,14 @@ if HAS_TRITON:
                 if HAS_BOUNDARIES:
                     # proj_start[start_pos, :] - start boundary score
                     start_score = tl.load(
-                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        proj_start_base + start_pos * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
                     # proj_end[t-1, :] - end boundary score (t-1 is last position in segment)
                     end_pos_boundary = t - 1
                     end_score = tl.load(
-                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
@@ -605,8 +623,8 @@ if HAS_TRITON:
                     transition_block = tl.load(
                         transition_ptr
                         + dur_idx * stride_tr_k
-                        + c_dst_idx * stride_tr_dst
-                        + c_src_idx * stride_tr_src,
+                        + c_dst_idx_safe * stride_tr_dst
+                        + c_src_idx_safe * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
                     )  # (C_PAD, C_PAD) - transition[dur_idx].T
@@ -739,6 +757,12 @@ if HAS_TRITON:
         c_src_idx = tl.arange(0, C_PAD)[None, :]
         c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
+        # Clamp indices so masked threads do not form out-of-bounds addresses.
+        # See detailed note in semi_crf_streaming_scan_kernel above.
+        c_idx_safe = tl.minimum(c_idx, C - 1)
+        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+
         # Cast to int32 to match loop variable type from tl.range
         seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
 
@@ -753,7 +777,7 @@ if HAS_TRITON:
 
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
-                transition_ptr + c_dst_idx * stride_tr_dst + c_src_idx * stride_tr_src,
+                transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
                 mask=c_mask_2d,
                 other=0.0,
             )
@@ -783,13 +807,13 @@ if HAS_TRITON:
                 )
 
                 cum_end = tl.load(
-                    cum_scores_base + t * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + t * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
 
                 cum_start = tl.load(
-                    cum_scores_base + start_pos * stride_cs_t + c_idx * stride_cs_c,
+                    cum_scores_base + start_pos * stride_cs_t + c_idx_safe * stride_cs_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
@@ -797,7 +821,7 @@ if HAS_TRITON:
                 content_score = cum_end - cum_start
                 dur_idx = k - 1
                 dur_bias = tl.load(
-                    duration_bias_ptr + dur_idx * stride_db_k + c_idx * stride_db_c,
+                    duration_bias_ptr + dur_idx * stride_db_k + c_idx_safe * stride_db_c,
                     mask=active & k_valid & c_mask,
                     other=0.0,
                 )
@@ -805,13 +829,13 @@ if HAS_TRITON:
 
                 if HAS_BOUNDARIES:
                     start_score = tl.load(
-                        proj_start_base + start_pos * stride_ps_t + c_idx * stride_ps_c,
+                        proj_start_base + start_pos * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
                     end_pos_boundary = t - 1
                     end_score = tl.load(
-                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx * stride_ps_c,
+                        proj_end_base + end_pos_boundary * stride_ps_t + c_idx_safe * stride_ps_c,
                         mask=active & k_valid & c_mask,
                         other=0.0,
                     )
@@ -823,8 +847,8 @@ if HAS_TRITON:
                     transition_block = tl.load(
                         transition_ptr
                         + dur_idx * stride_tr_k
-                        + c_dst_idx * stride_tr_dst
-                        + c_src_idx * stride_tr_src,
+                        + c_dst_idx_safe * stride_tr_dst
+                        + c_src_idx_safe * stride_tr_src,
                         mask=c_mask_2d,
                         other=0.0,
                     )
@@ -852,12 +876,12 @@ if HAS_TRITON:
             # Store backpointers at position t-1 (0-indexed)
             bp_pos = t - 1
             tl.store(
-                bp_k_ptr + bp_base + bp_pos * stride_bp_t + c_idx * stride_bp_c,
+                bp_k_ptr + bp_base + bp_pos * stride_bp_t + c_idx_safe * stride_bp_c,
                 best_k_t,
                 mask=active & c_mask,
             )
             tl.store(
-                bp_c_ptr + bp_base + bp_pos * stride_bp_t + c_idx * stride_bp_c,
+                bp_c_ptr + bp_base + bp_pos * stride_bp_t + c_idx_safe * stride_bp_c,
                 best_c_src_t,
                 mask=active & c_mask,
             )

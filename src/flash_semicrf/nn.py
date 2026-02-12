@@ -223,23 +223,85 @@ class SemiMarkovCRFHead(nn.Module):
 
         return edge
 
-    def _forward_exact(self, scores: Tensor, lengths: Tensor, semiring: str) -> Tensor:
-        """Compute partition via exact edge tensor. O(TKC²) memory."""
+    def _build_differentiable_edge(self, scores: Tensor, lengths: Tensor) -> Tensor:
+        """Build edge potentials via torch.stack (preserves autograd graph).
+
+        Unlike ``_build_edge_tensor`` which uses in-place assignment, this method
+        builds the edge tensor via ``torch.stack``, maintaining gradient flow from
+        the edge back to ``self.transition`` and ``self.duration_bias``. Required
+        for pytorch-struct DP methods that need proper autograd through the edge.
+
+        Uses a large negative finite sentinel (-1e18) instead of ``-inf`` for
+        invalid positions. This is critical: ``_dp_standard`` computes
+        ``logsumexp`` over ALL K durations including invalid ones. With true
+        ``-inf``, the backward pass encounters ``softmax([-inf,...,-inf])`` =
+        ``0/0 = NaN``. A finite sentinel avoids this while being numerically
+        equivalent (``exp(-1e18) = 0`` in float64).
+        """
+        batch, T, C = scores.shape
+        K = self.max_duration
+
+        scores_float = scores.double()
+        if T > 1:
+            scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
+
+        # Build cum_scores without in-place ops to preserve autograd graph
+        cumsum_vals = torch.cumsum(scores_float, dim=1)
+        zero_pad = torch.zeros(batch, 1, C, dtype=torch.float64, device=scores.device)
+        cum_scores = torch.cat([zero_pad, cumsum_vals], dim=1)
+
+        # Use finite sentinel instead of -inf to avoid NaN gradient in logsumexp.
+        # _dp_standard processes ALL K durations per position (unlike _dp_scan_streaming
+        # which only processes valid durations). For invalid durations, all C_src entries
+        # are the sentinel value. logsumexp([-inf,...,-inf]) backward = softmax = 0/0 = NaN.
+        # With -1e18, softmax gives uniform 1/C, but the upstream gradient is ~0 (since
+        # exp(-1e18) = 0 in the outer logsumexp), so the gradient is clean.
+        _NEGINF_SAFE = -1e18
+        neg_inf = torch.full((batch, C, C), _NEGINF_SAFE, dtype=torch.float64, device=scores.device)
+
+        edge_parts = []
+        for n in range(T):
+            k_parts = []
+            for k_idx in range(K):
+                end_pos = n + k_idx + 1
+                if end_pos <= T:
+                    content = cum_scores[:, end_pos, :] - cum_scores[:, n, :]
+                    segment = content + self.duration_bias[k_idx]
+                    edge_nk = segment.unsqueeze(-1) + self.transition.T.unsqueeze(0)
+                else:
+                    edge_nk = neg_inf
+                k_parts.append(edge_nk)
+            edge_parts.append(torch.stack(k_parts, dim=1))
+        return torch.stack(edge_parts, dim=1)
+
+    def _forward_exact(
+        self, scores: Tensor, lengths: Tensor, semiring: str, algorithm: str = "scan"
+    ) -> Tensor:
+        """Compute partition via exact edge tensor. O(TKC²) memory.
+
+        Args:
+            algorithm: DP algorithm to use on the materialized edge tensor.
+                ``"scan"`` uses ``_dp_scan_streaming`` (ring buffer, default).
+                ``"standard"`` uses ``_dp_standard`` (pytorch-struct reference).
+        """
         from .semimarkov import SemiMarkov
         from .semirings import LogSemiring, MaxSemiring
 
         SEMIRING_MAP = {"log": LogSemiring, "max": MaxSemiring}
         semiring_cls = SEMIRING_MAP[semiring]
 
-        # Build edge tensor (O(T*K*C^2) memory)
-        # Edge tensor has shape (batch, T, K, C, C) to match streaming API
-        edge = self._build_edge_tensor(scores, lengths)
-
         # SemiMarkov interprets edge shape (batch, N-1, K, C, C) as sequence of length N
         # Since our edge has T positions, SemiMarkov sees N = T + 1
-        # We need to pass lengths + 1 to match
         model = SemiMarkov(semiring_cls)
-        result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
+        if algorithm == "standard":
+            # Use differentiable edge construction (torch.stack, not in-place)
+            # so autograd flows from the edge back to model parameters.
+            edge = self._build_differentiable_edge(scores, lengths)
+            result = model._dp_standard(edge, lengths=lengths + 1, force_grad=False)
+        else:
+            # In-place edge construction is fine for _dp_scan_streaming
+            edge = self._build_edge_tensor(scores, lengths)
+            result = model.logpartition(edge, lengths=lengths + 1, use_linear_scan=True)
         return result[0].squeeze(0)
 
     def _forward_binary_tree_sharded(
@@ -327,10 +389,12 @@ class SemiMarkovCRFHead(nn.Module):
             backend_type, use_triton_final = "exact", False
         elif backend == "binary_tree_sharded":
             backend_type, use_triton_final = "binary_tree_sharded", False
+        elif backend == "dp_standard":
+            backend_type, use_triton_final = "dp_standard", False
         else:
             raise ValueError(
                 f"Unknown backend: {backend}. "
-                "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
+                "Use 'auto', 'streaming', 'exact', 'dp_standard', or 'binary_tree_sharded'."
             )
 
         # Build cumulative scores for prefix-sum edge retrieval
@@ -367,8 +431,11 @@ class SemiMarkovCRFHead(nn.Module):
         elif backend_type == "binary_tree_sharded":
             # Use sharded binary tree backend for memory-efficient reference implementation
             partition = self._forward_binary_tree_sharded(scores, lengths, "log")
+        elif backend_type == "dp_standard":
+            # Original pytorch-struct list-comprehension linear scan
+            partition = self._forward_exact(scores, lengths, "log", algorithm="standard")
         else:
-            # Use exact backend via semimarkov.py
+            # Use exact backend via semimarkov.py (_dp_scan_streaming)
             partition = self._forward_exact(scores, lengths, "log")
 
         return {"partition": partition, "cum_scores": cum_scores}
@@ -458,6 +525,7 @@ class SemiMarkovCRFHead(nn.Module):
             max_duration=self.max_duration,
         )
 
+    @torch.no_grad()
     def decode(
         self,
         hidden_states: Tensor,
@@ -536,6 +604,7 @@ class SemiMarkovCRFHead(nn.Module):
 
         return max_score
 
+    @torch.no_grad()
     def decode_with_traceback(
         self,
         hidden_states: Tensor,

@@ -1,6 +1,6 @@
 # Sentinel: Non-Streaming Backends
 
-**Verified against:** `src/flash_semicrf/semimarkov.py` @ commit `f9298c5`
+**Verified against:** `src/flash_semicrf/semimarkov.py` @ commit `ebdfcba`
 **Linked tests:** `tests/test_semimarkov.py`
 
 ## Summary

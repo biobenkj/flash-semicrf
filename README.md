@@ -1,6 +1,6 @@
 <div align="center">
 
-# flash-semicrf
+<img src="flash_semicrf_logo.png" alt="flash-semicrf" width="420" />
 
 Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 
@@ -10,7 +10,7 @@ Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 [![CI](https://github.com/biobenkj/flash-semicrf/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/biobenkj/flash-semicrf/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/biobenkj/flash-semicrf/branch/main/graph/badge.svg)](https://codecov.io/gh/biobenkj/flash-semicrf)
 
-[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [Examples](examples/) | [GitHub](https://github.com/biobenkj/flash-semicrf)
+[Install](#installation) | [Quick Start](#quick-start) | [Docs](docs/) | [FAQ](docs/faq) | [Examples](examples/) | [GitHub](https://github.com/biobenkj/flash-semicrf)
 
 </div>
 
@@ -32,7 +32,7 @@ This makes Semi-Markov CRF inference practical for long sequences—chromosome-s
 
 ## Why Semi-CRFs?
 
-Neural sequence models - Transformers, Mamba SSMs, CNNs, LSTMs—produce per - position representations, but many tasks require segment-level predictions with structural constraints. Standard per-position prediction heads have limitations:
+Neural sequence models - Transformers, Mamba SSMs, CNNs, LSTMs—produce per-position representations, but many tasks require segment-level predictions with structural constraints. Standard per-position prediction heads have limitations:
 
 - No guarantee of valid segmentations (gaps, overlaps, implausible boundaries)
 - Duration constraints require post-hoc heuristics
@@ -190,6 +190,7 @@ For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md
 - [Backends and Triton kernel](docs/reference/backends.md) — algorithm selection and GPU acceleration
 - [API reference](docs/reference/api.md) — detailed API documentation
 - [Benchmarking](docs/reference/benchmarks.md) — performance measurement
+- [FAQ] (docs/faq) - background and frequently asked questions
 - [AI disclosure](docs/disclosure.md)
 
 ## Testing

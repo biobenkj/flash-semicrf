@@ -13,9 +13,17 @@ from .constants import NEG_INF
 
 
 def _compute_checkpoint_interval(T: int, K: int) -> int:
-    """Optimal checkpoint interval: sqrt(T*K), at least K."""
+    """Checkpoint interval balancing memory and numerical stability.
+
+    Uses sqrt(T*K) for optimal memory/compute tradeoff, capped to bound
+    alpha drift between normalization points in the backward pass.
+
+    When K >= 64, the interval equals K (normalize at every segment boundary).
+    When K < 64, the interval is min(sqrt(T*K), 64), floored at K.
+    """
     optimal = int(math.sqrt(T * K))
-    return max(K, optimal)
+    max_interval = max(K, 64)
+    return max(K, min(optimal, max_interval))
 
 
 # =============================================================================

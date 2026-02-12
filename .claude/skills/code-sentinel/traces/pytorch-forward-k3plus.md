@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Forward (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `52c3f9e`
+**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `7cd65e7`
 **Linked tests:** `tests/test_streaming.py::TestStreamingForward::test_forward_produces_finite_values`
 
 ## Summary
@@ -18,20 +18,22 @@ The PyTorch reference forward computes the Semi-CRF partition function on CPU us
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFStreaming.forward()` | autograd.py:33 | K>=3, needs_grad, no Triton/CPU |
-| `semi_crf_streaming_forward_pytorch()` | pytorch_reference.py:601 | Direct call or from autograd |
+| `SemiCRFStreaming.forward()` | autograd.py:29 | K>=3, needs_grad, no Triton/CPU |
+| `semi_crf_streaming_forward_pytorch()` | pytorch_reference.py:609 | Direct call or from autograd |
 
 ## Dispatch Conditions
 
 ```python
-# autograd.py:646
+# autograd.py:673
 can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 
-# autograd.py:664-674
+# autograd.py:675-703
 if needs_grad:
     if not can_use_triton:
         return SemiCRFStreaming.apply(...)  # This path
 ```
+
+**Note:** `needs_grad` now gates on `torch.is_grad_enabled()` (autograd.py:599-606), ensuring `torch.no_grad()` contexts bypass autograd even when model parameters have `requires_grad=True`. The max semiring is rejected with `ValueError` before dispatch (autograd.py:610-616).
 
 ## Data Flow
 
@@ -60,7 +62,7 @@ Outputs:
 
 ## Algorithm Steps
 
-### 1. Initialization (pytorch_reference.py:660-668)
+### 1. Initialization (pytorch_reference.py:669-678)
 
 ```python
 # Ring buffer - NOT padded (unlike Triton)
@@ -76,7 +78,7 @@ log_norm_checkpoints = torch.zeros((batch, num_checkpoints), ...)
 accum_log_norm = torch.zeros(batch, ...)
 ```
 
-### 2. Main Forward Loop (pytorch_reference.py:671-774)
+### 2. Main Forward Loop (pytorch_reference.py:679-782)
 
 ```python
 for t in range(1, T + 1):
@@ -168,7 +170,7 @@ for t in range(1, T + 1):
         final_alpha = torch.where(is_final.view(batch, 1), alpha_t, final_alpha)
 ```
 
-### 3. Final Reduction (pytorch_reference.py:776-784)
+### 3. Final Reduction (pytorch_reference.py:784-792)
 
 ```python
 # Add back cumulative normalization
@@ -221,7 +223,8 @@ This prevents the ~2.5*T log-sum growth that causes overflow at T>100K.
 |-----------|------|--------------|
 | Ring buffer aliasing | alpha[t] overwrites alpha[t-K] | `t % K` indexing |
 | Variable length mask | Only update active sequences | `active_mask = t <= lengths` |
-| Zero-centered warning | cum_scores endpoints < 1000 | pytorch_reference.py:630-638 |
+| Zero-centered warning | cum_scores endpoints < 1000 | pytorch_reference.py:637-644 |
+| Checkpoint interval cap | interval <= max(K, 64) | pytorch_reference.py:15-26 |
 | Normalization consistency | All K slots shifted together | Loop over k_slot in range(K) |
 | Inactive sequence preservation | No phantom shifts | `torch.where(active_mask, ...)` |
 
@@ -229,11 +232,29 @@ This prevents the ~2.5*T log-sum growth that causes overflow at T>100K.
 
 | Issue | Severity | Frequency | Resolution |
 |-------|----------|-----------|------------|
-| Non-zero-centered cumsum | High | When user forgets | Warning at pytorch_reference.py:630-638 |
+| Non-zero-centered cumsum | High | When user forgets | Warning at pytorch_reference.py:637-644 |
 | Slow on GPU | Medium | Always (vs Triton) | Use Triton when available |
+
+## Checkpoint Interval Capping
+
+**Location:** `pytorch_reference.py:15-26`
+
+The checkpoint interval is now capped to bound alpha drift between normalization points:
+
+```python
+def _compute_checkpoint_interval(T: int, K: int) -> int:
+    optimal = int(math.sqrt(T * K))
+    max_interval = max(K, 64)
+    return max(K, min(optimal, max_interval))
+```
+
+- When `K >= 64`: interval equals K (normalize at every segment boundary)
+- When `K < 64`: interval is `min(sqrt(T*K), 64)`, floored at K
+- This prevents the sqrt(T*K) growth from creating excessively long segments where alpha values drift too far between normalization points
 
 ## Version History
 
+- **2026-02-12**: Updated commit to `7cd65e7`; updated autograd.py line refs (class at 29, dispatch at 673/675-703); updated pytorch_reference.py line refs (init at 669-678, main loop at 679-782, final reduction at 784-792, zero-centering warning at 637-644); documented checkpoint interval capping at `max(K, 64)`; noted `torch.is_grad_enabled()` gating and max semiring guard in dispatch
 - **2026-02-05**: Minor documentation fixes (comment formatting); no functional changes; updated to commit `52c3f9e`
 - **2026-02-02**: Updated for active masking changes; all checkpoint operations now properly masked for variable-length sequences; line numbers updated for commit `d9aff99`
 - **2026-02-02**: Updated line numbers; documented Flash Attention-style normalization; log_norm_checkpoints now returned as 4th value

@@ -1,8 +1,8 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/flash_semicrf/streaming/autograd.py` @ commit `7120f0f`
-- `src/flash_semicrf/semimarkov.py` @ commit `f9298c5`
+- `src/flash_semicrf/streaming/autograd.py` @ commit `e45c7f1`
+- `src/flash_semicrf/semimarkov.py` @ commit `ebdfcba`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
 
@@ -143,7 +143,7 @@ The non-streaming API supports Log, Max, Std, KMax, Entropy, CrossEntropy, and K
 
 ## Streaming Dispatch Conditions
 
-### can_use_triton (line 641)
+### can_use_triton (line 673)
 
 ```python
 can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
@@ -153,16 +153,29 @@ can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
 - `use_triton`: User parameter (default True)
 - `cum_scores.is_cuda`: Input is on GPU
 
-### needs_grad (lines 578-584)
+### needs_grad (lines 599-606)
 
 ```python
-needs_grad = (
+# Gate on torch.is_grad_enabled() so torch.no_grad() with trainable params
+# (e.g. model.decode() during training) correctly takes the inference path.
+needs_grad = torch.is_grad_enabled() and (
     cum_scores.requires_grad
     or transition.requires_grad
     or duration_bias.requires_grad
     or (proj_start is not None and proj_start.requires_grad)
     or (proj_end is not None and proj_end.requires_grad)
 )
+```
+
+### Max Semiring Guard (lines 610-616)
+
+```python
+if semiring == "max" and needs_grad:
+    raise ValueError(
+        "semiring='max' (Viterbi) does not support gradients. "
+        "The max semiring computes the highest-scoring path, which is not "
+        "differentiable. Use torch.no_grad() for decoding, or semiring='log' for training."
+    )
 ```
 
 ## Streaming Lookup Table
@@ -208,13 +221,13 @@ needs_grad = (
 
 | Function | Line | Called When |
 |----------|------|-------------|
-| `semi_crf_streaming_forward()` | 479 | Public API entry point |
-| `LinearCRFStreaming.apply()` | 595 | K=1, needs_grad, no boundaries |
-| `SemiCRFK2Streaming.apply()` | 621 | K=2, needs_grad, no boundaries |
-| `SemiCRFStreamingTriton.apply()` | 647 | K>=3, GPU, Triton, needs_grad |
-| `SemiCRFStreaming.apply()` | 660 | K>=3, no Triton, needs_grad |
-| `launch_streaming_triton_kernel()` | 674 | K>=3, GPU, Triton, inference |
-| `semi_crf_streaming_forward_pytorch()` | 688 | K>=3, CPU, inference |
+| `semi_crf_streaming_forward()` | 498 | Public API entry point |
+| `LinearCRFStreaming.apply()` | 627 | K=1, needs_grad, no boundaries |
+| `SemiCRFK2Streaming.apply()` | 653 | K=2, needs_grad, no boundaries |
+| `SemiCRFStreamingTriton.apply()` | 679 | K>=3, GPU, Triton, needs_grad |
+| `SemiCRFStreaming.apply()` | 693 | K>=3, no Triton, needs_grad |
+| `launch_streaming_triton_kernel()` | 706 | K>=3, GPU, Triton, inference |
+| `semi_crf_streaming_forward_pytorch()` | 720 | K>=3, CPU, inference |
 
 ### Non-Streaming API (semimarkov.py)
 
@@ -244,6 +257,8 @@ needs_grad = (
 - [ ] K=1/K=2 fast paths do NOT support boundary projections
 - [ ] Boundary projections force fallback to K>=3 path even for K=1/K=2
 - [ ] `cum_scores` MUST be float32 or float64 (float64 recommended; matches Triton kernel precision)
+- [ ] `needs_grad` gates on `torch.is_grad_enabled()` for safe decode during training
+- [ ] Max semiring raises ValueError when gradients required
 
 ### Non-Streaming API
 
@@ -255,12 +270,13 @@ needs_grad = (
 
 | Location | Guard | Purpose |
 |----------|-------|---------|
-| autograd.py:88-95 | `torch.isfinite(partition)` | Validate partition before PyTorch backward |
-| autograd.py:228-235 | `torch.isfinite(partition)` | Validate partition before Triton backward |
-| autograd.py:344-350 | `torch.isfinite(partition)` | Validate partition before K=1 backward |
-| autograd.py:436-442 | `torch.isfinite(partition)` | Validate partition before K=2 backward |
-| autograd.py:115-121 | `torch.isfinite(grad_cum_scores)` | Validate PyTorch backward output |
-| autograd.py:258-269 | `torch.isfinite(grad_*)` | Validate Triton backward outputs |
+| autograd.py:~98 | `torch.isfinite(partition)` | Validate partition before PyTorch backward |
+| autograd.py:~234 | `torch.isfinite(partition)` | Validate partition before Triton backward |
+| autograd.py:~356 | `torch.isfinite(partition)` | Validate partition before K=1 backward |
+| autograd.py:~448 | `torch.isfinite(partition)` | Validate partition before K=2 backward |
+| autograd.py:~121 | `torch.isfinite(grad_cum_scores)` | Validate PyTorch backward output |
+| autograd.py:~264 | `torch.isfinite(grad_*)` | Validate Triton backward outputs |
+| autograd.py:610-616 | `semiring == "max" and needs_grad` | Reject Viterbi in grad-enabled context |
 
 ## Known Issues
 
@@ -271,6 +287,7 @@ needs_grad = (
 
 ## Version History
 
+- **2026-02-12**: Updated `needs_grad` to gate on `torch.is_grad_enabled()` (line 601); documented max semiring ValueError guard (line 610); updated all entry point and numerical guard line numbers; autograd.py to `e45c7f1`, semimarkov.py to `ebdfcba`
 - **2026-02-09**: Updated autograd.py commit (STAGED): float32→float64 in docstrings, cum_scores invariant relaxed to accept float64
 - **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Availability table; updated semimarkov.py to commit `f9298c5`
 - **2026-02-05**: Updated autograd.py to commit `6c463c3`; no dispatch logic changes (added checkpoint_interval parameter and dtype conversion handling)

@@ -1,6 +1,6 @@
 # Sentinel: K=1 Linear CRF Fast Path
 
-**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `52c3f9e`
+**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `7cd65e7`
 **Linked tests:** `tests/test_streaming.py::TestStreamingK1::test_streaming_k1_gradient_flow`
 
 ## Summary
@@ -17,15 +17,15 @@ The K=1 fast path handles linear CRF (segment length = 1 only). No ring buffer n
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `LinearCRFStreaming.apply()` | autograd.py:600 | K=1, needs_grad, no boundaries |
-| `linear_crf_forward_pytorch()` | pytorch_reference.py:26 | Forward pass |
-| `linear_crf_backward_pytorch()` | pytorch_reference.py:86 | Backward pass |
-| `linear_crf_viterbi_pytorch()` | pytorch_reference.py:195 | Max semiring (Viterbi) |
+| `LinearCRFStreaming.apply()` | autograd.py:627 | K=1, needs_grad, no boundaries |
+| `linear_crf_forward_pytorch()` | pytorch_reference.py:34 | Forward pass |
+| `linear_crf_backward_pytorch()` | pytorch_reference.py:94 | Backward pass |
+| `linear_crf_viterbi_pytorch()` | pytorch_reference.py:203 | Max semiring (Viterbi) |
 
 ## Dispatch Conditions
 
 ```python
-# autograd.py:594-616
+# autograd.py:621-642
 if K == 1:
     if proj_start is not None or proj_end is not None:
         # Fall through to K>=3 path (boundaries not supported)
@@ -41,6 +41,8 @@ if K == 1:
             return linear_crf_forward_pytorch(...)
 ```
 
+**Note:** `needs_grad` now gates on `torch.is_grad_enabled()` (autograd.py:599-606), so `torch.no_grad()` contexts bypass autograd even with trainable parameters. The max semiring is rejected with `ValueError` at dispatch level (autograd.py:610-616) and within `LinearCRFStreaming.forward()` (autograd.py:342).
+
 ## Why K=1 is Special
 
 1. **No ring buffer aliasing**: K=1 means all `t % 1 = 0`, causing ring buffer corruption
@@ -51,7 +53,7 @@ if K == 1:
 
 ```python
 def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
-    # pytorch_reference.py:26-83
+    # pytorch_reference.py:34-91
 
     # alpha: (B, C) - only current timestep needed
     alpha = torch.zeros(batch, C)
@@ -79,7 +81,7 @@ def linear_crf_forward_pytorch(cum_scores, transition, lengths, duration_bias):
 
 ```python
 def linear_crf_backward_pytorch(cum_scores, transition, lengths, log_Z, duration_bias):
-    # pytorch_reference.py:86-192
+    # pytorch_reference.py:94-200
 
     # Forward pass: store all alpha values
     alpha_all = torch.full((batch, T + 1, C), NEG_INF)
@@ -117,7 +119,7 @@ def linear_crf_backward_pytorch(cum_scores, transition, lengths, log_Z, duration
 The backward function returns per-batch gradients. Autograd reduces them:
 
 ```python
-# autograd.py:380-384
+# autograd.py:398-402
 grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
 if grad_duration_bias is not None:
     grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
@@ -148,5 +150,6 @@ if grad_duration_bias is not None:
 
 ## Version History
 
+- **2026-02-12**: Updated commit to `7cd65e7`; updated autograd.py line refs (apply at 627, dispatch at 621-642, einsum at 398-402); updated pytorch_reference.py line refs (forward at 34-91, backward at 94-200, viterbi at 203); noted `torch.is_grad_enabled()` gating and max semiring guard (`LinearCRFStreaming.forward` at line 342)
 - **2026-02-02**: Updated line numbers (Viterbi at 195, dispatch at 594-616); documented per-batch gradient convention
 - **2026-01-27**: Initial trace @ commit `09e86ed`

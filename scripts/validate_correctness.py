@@ -17,10 +17,11 @@ Three validation strategies:
    - Compare to autograd gradient from backward pass
    - This is the gold standard: if it passes, the implementation is correct
 
-3. **Training convergence** (§3): Do both backends converge to the same loss?
-   - Train a small model with PyTorch backend and Triton backend
-   - Both should reach similar final NLL
-   - Validates end-to-end correctness through gradient descent
+3. **Training convergence** (§3): Do all backends converge to the same loss?
+   - Train identical models with four backends: streaming PyTorch, streaming
+     Triton, pytorch-struct dp_scan (ring buffer), pytorch-struct dp_standard
+   - All should reach similar final NLL
+   - Validates end-to-end correctness against established SOTA implementations
 
 Usage:
     # Run all three benchmarks (default: moderate scale)
@@ -130,14 +131,14 @@ SCALES = {
         C=32,
         K=50,
         batch=4,
-        fd_T=30,
-        fd_C=6,
-        fd_K=8,
+        fd_T=100,
+        fd_C=16,
+        fd_K=25,
         fd_eps=1e-3,
-        conv_T=200,
-        conv_C=16,
-        conv_K=20,
-        conv_epochs=150,
+        conv_T=500,
+        conv_C=32,
+        conv_K=50,
+        conv_epochs=200,
     ),
     "genome": ScaleConfig(
         name="genome",
@@ -155,8 +156,8 @@ SCALES = {
         conv_C=16,
         conv_K=50,
         conv_epochs=50,
-        # Aggressive checkpointing for numerical stability at genome scale
-        checkpoint_interval=100,  # = K, gives 500 checkpoints instead of 23
+        # Default checkpoint_interval now caps at max(K, 64), giving 500 ckpts
+        # (previously required manual override to checkpoint_interval=K)
     ),
 }
 
@@ -528,11 +529,17 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
 
 
 def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
-    """Train with both PyTorch and Triton backends, compare final loss.
+    """Train with multiple backends, compare final loss.
 
-    Both backends compute valid gradients (just with different FP rounding
-    from reduction order). If both converge to similar final loss, the
+    All backends compute valid gradients (just with different FP rounding
+    from reduction order). If all converge to similar final loss, the
     gradients are functionally equivalent for optimization.
+
+    Backends tested:
+      - pytorch: Streaming PyTorch reference (on-the-fly edge computation)
+      - triton: Streaming Triton kernel (on-the-fly edge computation)
+      - dp_scan: pytorch-struct _dp_scan_streaming (materialized edge + ring buffer)
+      - dp_standard: pytorch-struct _dp_standard (materialized edge + list comprehension)
     """
     section_header("§3  TRAINING CONVERGENCE")
 
@@ -546,7 +553,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
     print(f"  Training: {n_epochs} epochs, lr={lr}, hidden_dim={hidden_dim}")
     print()
 
-    # Generate fixed synthetic data (same for both backends)
+    # Generate fixed synthetic data (same for all backends)
     torch.manual_seed(123)
     if device == "cuda":
         torch.cuda.manual_seed_all(123)
@@ -568,7 +575,17 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
     all_passed = True
     results = {}
 
-    for backend_name, use_triton in [("pytorch", False), ("triton", True)]:
+    # Backend configs: (display_name, use_triton, backend_str)
+    # Streaming backends compute edges on-the-fly; exact backends materialize
+    # the full O(TKC²) edge tensor then run DP on it.
+    backends = [
+        ("pytorch", False, "streaming"),
+        ("triton", True, "streaming"),
+        ("dp_scan", False, "exact"),
+        ("dp_standard", False, "dp_standard"),
+    ]
+
+    for backend_name, use_triton, backend_str in backends:
         # Skip Triton if not available
         if use_triton and not HAS_TRITON:
             print(f"  Skipping {backend_name}: Triton not available")
@@ -600,7 +617,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
                 lengths,
                 labels,
                 use_triton=use_triton,
-                backend="streaming",
+                backend=backend_str,
             )
             loss.backward()
 
@@ -628,52 +645,64 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
         }
 
         print(
-            f"  {backend_name:>8}: final_loss={final_loss:.4f}, "
+            f"  {backend_name:>12}: final_loss={final_loss:.4f}, "
             f"time={elapsed:.1f}s, epochs={len(losses)}"
         )
 
-    # Compare final losses
-    if "pytorch" in results and "triton" in results:
-        pt_loss = results["pytorch"]["final_loss"]
-        tr_loss = results["triton"]["final_loss"]
-        loss_diff = abs(pt_loss - tr_loss)
-        loss_rel = loss_diff / (abs(pt_loss) + 1e-8)
+    # Compare all backends against the reference (first available)
+    ref_name = next(
+        (name for name in ["pytorch", "dp_standard", "dp_scan"] if name in results), None
+    )
+    if ref_name is None or len(results) < 2:
+        print("  Cannot compare: need at least two backends")
+        return False
 
-        print()
-        print("  Final loss comparison:")
-        print(f"    PyTorch: {pt_loss:.6f}")
-        print(f"    Triton:  {tr_loss:.6f}")
-        print(f"    Abs diff: {loss_diff:.6f}")
-        print(f"    Rel diff: {loss_rel:.4%}")
+    ref_loss = results[ref_name]["final_loss"]
+    ref_losses = results[ref_name]["losses"]
 
-        # Both should converge to similar loss (within 5% relative)
-        all_passed &= result_line(
-            "Final loss agreement", loss_rel < 0.05, f"rel_diff={loss_rel:.4%}"
+    print()
+    print(f"  Final loss comparison (reference: {ref_name}):")
+    print(f"    {'Backend':<14} {'Final Loss':>12} {'Abs Diff':>12} {'Rel Diff':>10}")
+    print(f"    {'-'*14} {'-'*12} {'-'*12} {'-'*10}")
+
+    for name, res in results.items():
+        loss_diff = abs(res["final_loss"] - ref_loss)
+        loss_rel = loss_diff / (abs(ref_loss) + 1e-8)
+        marker = "(ref)" if name == ref_name else ""
+        print(
+            f"    {name:<14} {res['final_loss']:>12.6f} {loss_diff:>12.6f} {loss_rel:>9.4%} {marker}"
         )
 
-        # Both should have decreasing loss (convergence)
-        pt_converged = results["pytorch"]["losses"][-1] < results["pytorch"]["losses"][0]
-        tr_converged = results["triton"]["losses"][-1] < results["triton"]["losses"][0]
+    # Check all backends agree within 5% relative to reference
+    for name, res in results.items():
+        if name == ref_name:
+            continue
+        loss_diff = abs(res["final_loss"] - ref_loss)
+        loss_rel = loss_diff / (abs(ref_loss) + 1e-8)
+        all_passed &= result_line(
+            f"{name} vs {ref_name} agreement", loss_rel < 0.05, f"rel_diff={loss_rel:.4%}"
+        )
 
-        all_passed &= result_line("PyTorch converges (loss decreases)", pt_converged)
-        all_passed &= result_line("Triton converges (loss decreases)", tr_converged)
+    # Check all backends converge (loss decreases)
+    for name, res in results.items():
+        if res["losses"]:
+            converged = res["losses"][-1] < res["losses"][0]
+            all_passed &= result_line(f"{name} converges (loss decreases)", converged)
 
-        # Check loss curves are correlated
-        pt_tensor = torch.tensor(results["pytorch"]["losses"])
-        tr_tensor = torch.tensor(results["triton"]["losses"])
-        # Truncate to same length
-        min_len = min(len(pt_tensor), len(tr_tensor))
+    # Check loss curves are correlated (all pairs vs reference)
+    ref_tensor = torch.tensor(ref_losses)
+    for name, res in results.items():
+        if name == ref_name:
+            continue
+        other_tensor = torch.tensor(res["losses"])
+        min_len = min(len(ref_tensor), len(other_tensor))
         cos_sim = torch.nn.functional.cosine_similarity(
-            pt_tensor[:min_len].unsqueeze(0),
-            tr_tensor[:min_len].unsqueeze(0),
+            ref_tensor[:min_len].unsqueeze(0),
+            other_tensor[:min_len].unsqueeze(0),
         ).item()
-
         all_passed &= result_line(
-            "Loss curve correlation", cos_sim > 0.99, f"cosine_sim={cos_sim:.6f}"
+            f"{name} vs {ref_name} loss curve", cos_sim > 0.99, f"cosine_sim={cos_sim:.6f}"
         )
-    else:
-        print("  Cannot compare: need both backends")
-        all_passed = False
 
     return all_passed
 
@@ -785,7 +814,8 @@ def main():
         print("  The Triton Semi-CRF implementation is mathematically correct:")
         print("  - Marginals satisfy probabilistic invariants")
         print("  - Autograd matches finite differences")
-        print("  - Training converges equivalently to PyTorch reference")
+        print("  - Training converges equivalently across all backends")
+        print("    (streaming PyTorch, Triton, pytorch-struct dp_scan, dp_standard)")
     else:
         print("  ✗ SOME TESTS FAILED")
         print("  Review the detailed output above for diagnostics.")
