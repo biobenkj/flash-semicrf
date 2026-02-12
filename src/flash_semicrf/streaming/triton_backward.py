@@ -77,8 +77,8 @@ if HAS_TRITON:
         grad_cum_scores_ptr,  # (batch, T+1, C)
         grad_tr_workspace_ptr,  # (batch, C, C) or (batch, K, C, C) - per-batch accumulator
         grad_db_workspace_ptr,  # (batch, K, C) - per-batch accumulator, no atomic needed
-        grad_proj_start_ptr,  # (batch, T, C) - gradient for proj_start (only if HAS_BOUNDARIES)
-        grad_proj_end_ptr,  # (batch, T, C) - gradient for proj_end (only if HAS_BOUNDARIES)
+        grad_proj_start_ptr,  # (batch, T, C_PAD) - gradient for proj_start (only if HAS_BOUNDARIES)
+        grad_proj_end_ptr,  # (batch, T, C_PAD) - gradient for proj_end (only if HAS_BOUNDARIES)
         boundary_marginals_ptr,  # (batch, T) - output for boundary marginals (if RETURN_BOUNDARY_MARGINALS)
         # Dimensions
         batch_size,
@@ -107,6 +107,10 @@ if HAS_TRITON:
         stride_ps_b,
         stride_ps_t,
         stride_ps_c,
+        # Strides for grad_proj_start/grad_proj_end (batch, T, C_PAD) - only used if HAS_BOUNDARIES
+        stride_gps_b,
+        stride_gps_t,
+        stride_gps_c,
         # Strides for ring checkpoints (batch, num_ckpts, K, C_PAD)
         stride_ckpt_b,
         stride_ckpt_n,
@@ -278,8 +282,8 @@ if HAS_TRITON:
         if HAS_BOUNDARIES:
             proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
             proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
-            grad_ps_base = grad_proj_start_ptr + batch_idx * stride_ps_b
-            grad_pe_base = grad_proj_end_ptr + batch_idx * stride_ps_b
+            grad_ps_base = grad_proj_start_ptr + batch_idx * stride_gps_b
+            grad_pe_base = grad_proj_end_ptr + batch_idx * stride_gps_b
 
         # Load transition matrix into registers (only for static transitions)
         # Duration-dependent transitions are loaded inside the k-loops
@@ -941,16 +945,16 @@ if HAS_TRITON:
                                         # proj_start[t]: same position for all k, use atomic
                                         tl.atomic_add(
                                             grad_ps_base
-                                            + t * stride_ps_t
-                                            + c_dst_idx_tile * stride_ps_c,
+                                            + t * stride_gps_t
+                                            + c_dst_idx_tile * stride_gps_c,
                                             marginal_sum_src_tile_scaled,
                                             mask=c_dst_mask_tile,
                                         )
                                         # proj_end[end_pos-1]: varies by k, use atomic
                                         tl.atomic_add(
                                             grad_pe_base
-                                            + (end_pos - 1) * stride_ps_t
-                                            + c_dst_idx_tile * stride_ps_c,
+                                            + (end_pos - 1) * stride_gps_t
+                                            + c_dst_idx_tile * stride_gps_c,
                                             marginal_sum_src_tile_scaled,
                                             mask=c_dst_mask_tile,
                                         )
@@ -1240,11 +1244,15 @@ if HAS_TRITON:
             # (we slice back to C and convert to original dtype before returning)
             grad_proj_start = torch.zeros(batch, T, C_PAD, device=device, dtype=torch.float32)
             grad_proj_end = torch.zeros(batch, T, C_PAD, device=device, dtype=torch.float32)
+            # Grad buffers have shape (batch, T, C_PAD) — different strides from
+            # proj_start (batch, T, C) when C is not a power of 2.
+            stride_gps_b, stride_gps_t, stride_gps_c = grad_proj_start.stride()
         else:
             # Create dummy tensors for stride calculation (won't be accessed)
             proj_start = cum_scores[:, :T, :]
             proj_end = cum_scores[:, :T, :]
             stride_ps_b, stride_ps_t, stride_ps_c = 0, 0, 0
+            stride_gps_b, stride_gps_t, stride_gps_c = 0, 0, 0
             grad_proj_start = None
             grad_proj_end = None
             # Kernel uses proj_start/proj_end directly when HAS_BOUNDARY_PROJ=False
@@ -1393,6 +1401,9 @@ if HAS_TRITON:
                 stride_ps_b,
                 stride_ps_t,
                 stride_ps_c,
+                stride_gps_b,
+                stride_gps_t,
+                stride_gps_c,
                 stride_ckpt_b,
                 stride_ckpt_n,
                 stride_ckpt_k,

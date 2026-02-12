@@ -18,12 +18,14 @@ This script quantifies both effects by comparing three centering strategies:
 - **none**: Raw emissions. No centering at all.
 
 Usage:
-    python ablate_zero_centering.py                      # All sections
-    python ablate_zero_centering.py --section stability   # Numerical stability only
-    python ablate_zero_centering.py --section precision    # Float32 precision loss only
-    python ablate_zero_centering.py --section gradient     # Gradient precision (∂logZ/∂cum_scores)
-    python ablate_zero_centering.py --section prior        # Duration prior effect only
+    python ablate_zero_centering.py                      # §1 + §3 (default)
+    python ablate_zero_centering.py --section stability   # §1: Numerical stability only
+    python ablate_zero_centering.py --section precision    # §2: Float32 precision loss (opt-in)
+    python ablate_zero_centering.py --section prior        # §3: Duration prior effect only
     python ablate_zero_centering.py --scale quick          # Smaller T values
+
+Note: §2 (precision) is excluded from --section all because the Triton kernel uses
+float64 internally, so the test only measures cumsum quantization — not DP precision.
 """
 
 from __future__ import annotations
@@ -505,7 +507,7 @@ def main():
         "--section",
         choices=["stability", "precision", "prior", "all"],
         default="all",
-        help="Which section to run (default: all)",
+        help="Which section to run (default: all = stability + prior; precision is opt-in)",
     )
     parser.add_argument(
         "--scale",
@@ -540,7 +542,7 @@ def main():
     if args.device == "cuda" and torch.cuda.is_available():
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
-    sections = ["stability", "precision", "prior"] if args.section == "all" else [args.section]
+    sections = ["stability", "prior"] if args.section == "all" else [args.section]
 
     for section in sections:
         if section == "stability":
