@@ -1,6 +1,6 @@
 # Sentinel: CRF Heads (nn.py)
 
-**Verified against:** `src/flash_semicrf/nn.py` @ commit `8b8e3ed` (+ staged changes)
+**Verified against:** `src/flash_semicrf/nn.py` @ commit `600633a` (+ uncommitted changes)
 
 **Linked tests:** `tests/test_semimarkov.py`, `tests/test_streaming_triton.py::TestTritonBasic`
 
@@ -154,8 +154,10 @@ def _should_use_streaming(self, T: int) -> bool:
 
 | Method | Line | Returns | Memory |
 |--------|------|---------|--------|
-| `decode()` | 530 | Viterbi score only | O(KC) |
+| `decode()` | 529 | Viterbi score only | O(KC) |
 | `decode_with_traceback()` | 608 | Score + segment list | O(TC) for backpointers |
+
+Both methods are decorated with `@torch.no_grad()` (lines 528, 607), ensuring that even when called during training (where model parameters have `requires_grad=True`), they correctly bypass autograd and reach the direct inference path via `needs_grad=False` in the streaming dispatch.
 
 **decode_with_traceback** uses:
 - `semi_crf_streaming_viterbi_with_backpointers()` for backpointer computation
@@ -170,6 +172,7 @@ def _should_use_streaming(self, T: int) -> bool:
 - [ ] Transition matrix convention: `transition[i, j]` = FROM label i TO label j
 - [ ] `_build_differentiable_edge` MUST use finite sentinel (`-1e18`), NOT `-inf`, to avoid NaN gradient in `_dp_standard` backward pass
 - [ ] `_forward_exact(algorithm="standard")` MUST use `_build_differentiable_edge` (not `_build_edge_tensor`) for autograd correctness
+- [ ] `decode()` and `decode_with_traceback()` decorated with `@torch.no_grad()` for safe inference during training
 
 ## Numerical Guards
 
@@ -185,8 +188,8 @@ def _should_use_streaming(self, T: int) -> bool:
 |--------|------|---------|---------|
 | `forward()` | 336 | Partition function | dict with `partition`, `cum_scores` |
 | `compute_loss()` | 445 | NLL training loss | Tensor |
-| `decode()` | 530 | Viterbi score | Tensor |
-| `decode_with_traceback()` | 608 | Viterbi + segments | `ViterbiResult` |
+| `decode()` | 529 | Viterbi score (no_grad) | Tensor |
+| `decode_with_traceback()` | 608 | Viterbi + segments (no_grad) | `ViterbiResult` |
 | `_select_backend()` | 170 | Backend selection | `(backend_type, use_triton)` |
 | `_build_edge_tensor()` | 189 | In-place edge construction | Tensor (batch, T, K, C, C) |
 | `_build_differentiable_edge()` | 226 | Autograd-safe edge construction | Tensor (batch, T, K, C, C) |
@@ -203,6 +206,7 @@ def _should_use_streaming(self, T: int) -> bool:
 
 ## Version History
 
+- **2026-02-12**: Documented `@torch.no_grad()` decorators on `decode()` (line 528) and `decode_with_traceback()` (line 607); updated line numbers; updated to `600633a` + uncommitted
 - **2026-02-10**: Major update — documented new `_build_differentiable_edge()` method (torch.stack, finite sentinel -1e18), split edge construction in `_forward_exact()`, new `dp_standard` backend option, updated all line numbers, added invariants N9/N10 and critical invariant for finite sentinel
 - **2026-02-09**: Updated float32→float64 throughout: cum_scores construction, edge tensor sizing (4→8 bytes), invariants. Renamed anchor FLOAT32_CONVERT→FLOAT64_CONVERT. Updated assumption N2.
 - **2026-02-09**: Added Semiring Restriction section documenting that nn.py only exposes log/max semirings

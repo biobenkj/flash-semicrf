@@ -1,6 +1,6 @@
 # Sentinel: K=2 Specialized Path
 
-**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `52c3f9e`
+**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `7cd65e7`
 **Linked tests:** `tests/test_streaming_triton.py::TestKSpecificPaths::test_k2_forward_correctness`
 
 ## Summary
@@ -17,15 +17,15 @@ The K=2 fast path handles the case where segments can be length 1 or 2. Uses exp
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFK2Streaming.apply()` | autograd.py:626 | K=2, needs_grad, no boundaries |
-| `semi_crf_k2_forward_pytorch()` | pytorch_reference.py:275 | Forward pass |
-| `semi_crf_k2_backward_pytorch()` | pytorch_reference.py:338 | Backward pass |
-| `semi_crf_k2_viterbi_pytorch()` | pytorch_reference.py:468 | Max semiring (Viterbi) |
+| `SemiCRFK2Streaming.apply()` | autograd.py:653 | K=2, needs_grad, no boundaries |
+| `semi_crf_k2_forward_pytorch()` | pytorch_reference.py:283 | Forward pass |
+| `semi_crf_k2_backward_pytorch()` | pytorch_reference.py:346 | Backward pass |
+| `semi_crf_k2_viterbi_pytorch()` | pytorch_reference.py:476 | Max semiring (Viterbi) |
 
 ## Dispatch Conditions
 
 ```python
-# autograd.py:620-642
+# autograd.py:647-668
 if K == 2:
     if proj_start is not None or proj_end is not None:
         # Fall through to K>=3 path (boundaries not supported)
@@ -41,6 +41,8 @@ if K == 2:
             return semi_crf_k2_forward_pytorch(...)
 ```
 
+**Note:** `needs_grad` now gates on `torch.is_grad_enabled()` (autograd.py:599-606), so `torch.no_grad()` contexts bypass autograd even with trainable parameters. The max semiring is rejected with `ValueError` at dispatch level (autograd.py:610-616) and within `SemiCRFK2Streaming.forward()` (autograd.py:430).
+
 ## Why K=2 is Special
 
 1. **Ring buffer fragility**: K=2 means `t % 2` alternates 0,1,0,1... Any off-by-one causes corruption
@@ -51,7 +53,7 @@ if K == 2:
 
 ```python
 def semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths):
-    # pytorch_reference.py:275-335
+    # pytorch_reference.py:283-343
 
     # Explicit 2-step history
     alpha_prev1 = torch.zeros(batch, C)   # alpha[t-1]
@@ -85,7 +87,7 @@ def semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths):
 
 ```python
 def semi_crf_k2_backward_pytorch(cum_scores, transition, duration_bias, lengths, log_Z):
-    # pytorch_reference.py:338-465
+    # pytorch_reference.py:346-473
 
     # Forward pass: store all alpha values
     alpha_all = torch.full((batch, T + 1, C), NEG_INF)
@@ -134,7 +136,7 @@ def semi_crf_k2_backward_pytorch(cum_scores, transition, duration_bias, lengths,
 The backward function returns per-batch gradients. Autograd reduces them:
 
 ```python
-# autograd.py:472-473
+# autograd.py:486-487
 grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
 grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_output)
 ```
@@ -165,5 +167,6 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 
 ## Version History
 
+- **2026-02-12**: Updated commit to `7cd65e7`; updated autograd.py line refs (apply at 653, dispatch at 647-668, einsum at 486-487); updated pytorch_reference.py line refs (forward at 283-343, backward at 346-473, viterbi at 476); noted `torch.is_grad_enabled()` gating and max semiring guard (`SemiCRFK2Streaming.forward` at line 430)
 - **2026-02-02**: Updated line numbers (dispatch at 620-642, apply at 626); documented per-batch gradient convention
 - **2026-01-27**: Initial trace @ commit `09e86ed`

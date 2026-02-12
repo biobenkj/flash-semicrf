@@ -525,6 +525,7 @@ class SemiMarkovCRFHead(nn.Module):
             max_duration=self.max_duration,
         )
 
+    @torch.no_grad()
     def decode(
         self,
         hidden_states: Tensor,
@@ -603,6 +604,7 @@ class SemiMarkovCRFHead(nn.Module):
 
         return max_score
 
+    @torch.no_grad()
     def decode_with_traceback(
         self,
         hidden_states: Tensor,

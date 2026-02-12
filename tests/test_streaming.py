@@ -534,6 +534,134 @@ class TestStreamingOracleValues:
                 ), f"Edge[{c_new}, {c_prev}]: expected {expected:.4f}, got {actual:.4f}"
 
 
+class TestMaxSemiringGradGuard:
+    """Verify semiring='max' is non-differentiable and guards work correctly."""
+
+    # --- Dispatch-level tests (K=1, K=2, K>=3) ---
+
+    @pytest.mark.parametrize("K", [1, 2, 6])
+    def test_max_semiring_grad_enabled_raises(self, K):
+        """semiring='max' with grad-enabled inputs raises ValueError."""
+        batch, T, C = 2, 20, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        cum_scores.requires_grad_(True)
+
+        with pytest.raises(ValueError, match=r"semiring='max'"):
+            semi_crf_streaming_forward(
+                cum_scores, transition, duration_bias, lengths, K, semiring="max"
+            )
+
+    @pytest.mark.parametrize("K", [1, 2, 6])
+    def test_max_semiring_no_grad_works(self, K):
+        """semiring='max' inside torch.no_grad() works even with trainable params."""
+        batch, T, C = 2, 20, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        # Simulate trainable model params
+        transition.requires_grad_(True)
+        duration_bias.requires_grad_(True)
+
+        with torch.no_grad():
+            result = semi_crf_streaming_forward(
+                cum_scores, transition, duration_bias, lengths, K, semiring="max"
+            )
+
+        assert torch.isfinite(result).all()
+        assert result.shape == (batch,)
+
+    @pytest.mark.parametrize("K", [1, 2, 6])
+    def test_log_semiring_grad_still_works(self, K):
+        """semiring='log' with gradients is unaffected (regression check)."""
+        batch, T, C = 2, 20, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        cum_scores.requires_grad_(True)
+        transition.requires_grad_(True)
+        duration_bias.requires_grad_(True)
+
+        partition = semi_crf_streaming_forward(
+            cum_scores, transition, duration_bias, lengths, K, semiring="log"
+        )
+        assert torch.isfinite(partition).all()
+
+        # Backward should work
+        partition.sum().backward()
+        assert cum_scores.grad is not None
+        assert torch.isfinite(cum_scores.grad).all()
+
+    # --- Direct-bypass tests (autograd class hardening) ---
+
+    def test_linear_crf_streaming_apply_max_raises(self):
+        """Direct LinearCRFStreaming.apply() with semiring='max' raises."""
+        from flash_semicrf.streaming.autograd import LinearCRFStreaming
+
+        batch, T, K, C = 2, 20, 1, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        cum_scores.requires_grad_(True)
+
+        with pytest.raises(ValueError, match=r"semiring='max'"):
+            LinearCRFStreaming.apply(cum_scores, transition, duration_bias, lengths, "max")
+
+    def test_semi_crf_k2_streaming_apply_max_raises(self):
+        """Direct SemiCRFK2Streaming.apply() with semiring='max' raises."""
+        from flash_semicrf.streaming.autograd import SemiCRFK2Streaming
+
+        batch, T, K, C = 2, 20, 2, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        cum_scores.requires_grad_(True)
+
+        with pytest.raises(ValueError, match=r"semiring='max'"):
+            SemiCRFK2Streaming.apply(cum_scores, transition, duration_bias, lengths, "max")
+
+    def test_semi_crf_streaming_apply_max_raises(self):
+        """Direct SemiCRFStreaming.apply() with semiring='max' raises."""
+        from flash_semicrf.streaming.autograd import SemiCRFStreaming
+
+        batch, T, K, C = 2, 20, 6, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        cum_scores.requires_grad_(True)
+
+        with pytest.raises(ValueError, match=r"semiring='max'"):
+            SemiCRFStreaming.apply(cum_scores, transition, duration_bias, lengths, K, "max")
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_semi_crf_streaming_triton_apply_max_raises(self):
+        """Direct SemiCRFStreamingTriton.apply() with semiring='max' raises."""
+        from flash_semicrf.streaming import HAS_TRITON
+
+        if not HAS_TRITON:
+            pytest.skip("Triton not available")
+
+        from flash_semicrf.streaming.autograd import SemiCRFStreamingTriton
+
+        batch, T, K, C = 2, 20, 6, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+        cum_scores.requires_grad_(True)
+
+        with pytest.raises(ValueError, match=r"semiring='max'"):
+            SemiCRFStreamingTriton.apply(cum_scores, transition, duration_bias, lengths, K, "max")
+
+    # --- Head-level test ---
+
+    def test_model_decode_grad_enabled_works(self):
+        """model.decode() with trainable params in grad-enabled context works."""
+        from flash_semicrf import SemiMarkovCRFHead
+
+        batch, T, C, K = 2, 20, 3, 4
+        head = SemiMarkovCRFHead(hidden_dim=16, num_classes=C, max_duration=K)
+        hidden_states = torch.randn(batch, T, 16)
+        lengths = torch.full((batch,), T, dtype=torch.long)
+
+        # Grad is enabled (default), params have requires_grad=True
+        assert torch.is_grad_enabled()
+        assert head.transition.requires_grad
+
+        # decode should work via @torch.no_grad() decorator
+        result = head.decode(hidden_states, lengths, use_triton=False)
+        assert torch.isfinite(result).all()
+        assert result.shape == (batch,)
+
+
 if __name__ == "__main__":
     # Quick manual test
     batch, T, K, C = 2, 100, 8, 4

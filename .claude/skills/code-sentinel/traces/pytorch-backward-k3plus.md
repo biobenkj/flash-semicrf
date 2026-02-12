@@ -1,6 +1,6 @@
 # Sentinel: PyTorch Reference Backward (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `52c3f9e`
+**Verified against:** `src/flash_semicrf/streaming/pytorch_reference.py` @ commit `7cd65e7`
 **Linked tests:** `tests/test_streaming.py::TestStreamingBackward::test_backward_produces_finite_gradients`
 
 ## Summary
@@ -18,8 +18,8 @@ The PyTorch reference backward computes gradients using the forward-backward alg
 
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
-| `SemiCRFStreaming.backward()` | autograd.py:77 | Backward through SemiCRFStreaming |
-| `semi_crf_streaming_backward_pytorch()` | pytorch_reference.py:915 | Called from autograd |
+| `SemiCRFStreaming.backward()` | autograd.py:85 | Backward through SemiCRFStreaming |
+| `semi_crf_streaming_backward_pytorch()` | pytorch_reference.py:917 | Called from autograd |
 
 ## Data Flow
 
@@ -45,7 +45,7 @@ Outputs:
 
 Same as Triton backward: process checkpoint segments in reverse order.
 
-### Phase 1: Alpha Recomputation (pytorch_reference.py:984-1028)
+### Phase 1: Alpha Recomputation (pytorch_reference.py:986-1030)
 
 ```python
 # For segment starting at checkpoint ckpt_idx
@@ -63,7 +63,7 @@ for t in range(seg_start + 1, seg_end):
     alpha_segment[:, local_t, :] = alpha_t
 ```
 
-### Phase 2: Beta + Gradient Accumulation (pytorch_reference.py:1030-1185)
+### Phase 2: Beta + Gradient Accumulation (pytorch_reference.py:1032-1187)
 
 Uses relative log-marginal computation (Flash Attention pattern) for numerical stability:
 
@@ -133,7 +133,7 @@ The relative pattern:
 The backward function returns per-batch gradients. Autograd reduces them:
 
 ```python
-# autograd.py:143-148
+# autograd.py:149-156
 if grad_transition.ndim == 3:  # (batch, C, C)
     grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
 else:  # (batch, K, C, C)
@@ -146,8 +146,8 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 
 | Invariant | Check |
 |-----------|-------|
-| Partition finite | `torch.isfinite(partition).all()` (autograd.py:92) |
-| Gradients finite | `torch.isfinite(grad_cum_scores).all()` (autograd.py:120) |
+| Partition finite | `torch.isfinite(partition).all()` (autograd.py:100) |
+| Gradients finite | `torch.isfinite(grad_cum_scores).all()` (autograd.py:128) |
 | Relative log-marginal | Uses `log_norm_at_ckpt` to bridge normalized alpha and full log_Z |
 | Scale clamping | `clamp(log_scale, min=-700, max=0)` prevents exp overflow |
 | Per-batch gradients | transition/duration_bias returned as (B, ...) for einsum reduction |
@@ -161,6 +161,7 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_duration_bias, grad_outpu
 
 ## Version History
 
+- **2026-02-12**: Updated commit to `7cd65e7`; updated autograd.py line refs (backward at 85, partition validation at 100, grad validation at 128, einsum reduction at 149-156); updated pytorch_reference.py line refs (alpha recompute at 986-1030, beta+gradient at 1032-1187); checkpoint interval now capped at `max(K, 64)` (pytorch_reference.py:15-26)
 - **2026-02-05**: Minor documentation fixes (comment formatting); no functional changes; updated to commit `52c3f9e`
 - **2026-02-02**: Updated line numbers (backward now at 915); documented relative log-marginal pattern with 8-step breakdown; added per-batch gradient convention
 - **2026-01-27**: Initial trace @ commit `09e86ed`

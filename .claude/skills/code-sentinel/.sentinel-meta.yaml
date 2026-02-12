@@ -2,7 +2,7 @@
 # Machine-readable state for automation and status queries
 
 version: 2.0
-last_global_verification: 2026-02-05T00:00:00Z
+last_global_verification: 2026-02-12T00:00:00Z
 
 # Note: Mixed duration indexing convention
 # - Streaming backends: 0-based (dur_idx = k - 1)
@@ -12,11 +12,11 @@ last_global_verification: 2026-02-05T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: 9dfa110
+    verified_commit: ebdfcba
     source_files:
       - src/flash_semicrf/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
-    assumptions_agent: [A4]
+    assumptions_agent: [A4, A6]
     anchors:
       - KERNEL_ENTRY
       - MAIN_LOOP_START
@@ -36,7 +36,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: 7120f0f
+    verified_commit: ebdfcba
     source_files:
       - src/flash_semicrf/streaming/autograd.py
       - src/flash_semicrf/semimarkov.py
@@ -55,7 +55,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: 7120f0f
+    verified_commit: ebdfcba
     source_files:
       - src/flash_semicrf/streaming/autograd.py
     assumptions_mechanical: []
@@ -70,7 +70,7 @@ sentinels:
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: 9dfa110
+    verified_commit: e75e1ee
     source_files:
       - src/flash_semicrf/streaming/triton_backward.py
     assumptions_mechanical: []
@@ -84,7 +84,7 @@ sentinels:
       - triton-forward-k3plus
 
   pytorch-forward-k3plus:
-    verified_commit: 52c3f9e
+    verified_commit: 7cd65e7
     source_files:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -95,7 +95,7 @@ sentinels:
     depends_on: []
 
   pytorch-backward-k3plus:
-    verified_commit: 52c3f9e
+    verified_commit: 7cd65e7
     source_files:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -107,7 +107,7 @@ sentinels:
       - pytorch-forward-k3plus
 
   k1-linear-crf:
-    verified_commit: 52c3f9e
+    verified_commit: 7cd65e7
     source_files:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -118,7 +118,7 @@ sentinels:
     depends_on: []
 
   k2-fast-path:
-    verified_commit: 52c3f9e
+    verified_commit: 7cd65e7
     source_files:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
@@ -129,7 +129,7 @@ sentinels:
     depends_on: []
 
   non-streaming-backends:
-    verified_commit: f9298c5
+    verified_commit: ebdfcba
     source_files:
       - src/flash_semicrf/semimarkov.py
     assumptions_mechanical: []
@@ -140,7 +140,7 @@ sentinels:
     depends_on: []
 
   crf-heads:
-    verified_commit: 8b8e3ed
+    verified_commit: 600633a
     source_files:
       - src/flash_semicrf/nn.py
     assumptions_mechanical: [N1, N2, N3, N4, N5, N9, N10]

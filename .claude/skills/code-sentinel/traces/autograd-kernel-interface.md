@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `7120f0f`
+**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `ebdfcba` (+ uncommitted changes)
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -17,7 +17,7 @@ Documents the contract between autograd functions (`SemiCRFStreamingTriton`, `Se
 
 ## ctx.save_for_backward() Semantics
 
-### SemiCRFStreamingTriton (lines 199-213)
+### SemiCRFStreamingTriton (lines 205-219)
 
 ```python
 ctx.save_for_backward(
@@ -37,7 +37,7 @@ ctx.checkpoint_interval = interval  # int constant
 ctx.num_warps = num_warps           # int constant (passed to backward kernel)
 ```
 
-### SemiCRFStreaming (PyTorch, lines 59-72)
+### SemiCRFStreaming (PyTorch, lines 65-78)
 
 Same tensors saved, minus `num_warps`.
 
@@ -68,7 +68,7 @@ All input tensors must be:
 
 ### Dtype Handling (Triton Only)
 
-**IMPORTANT**: The Triton autograd function performs dtype conversion (autograd.py:203-215):
+**IMPORTANT**: The Triton autograd function performs dtype conversion (autograd.py:209-221):
 
 ```python
 # Forward computes partition in float64
@@ -105,7 +105,7 @@ Backward kernels produce:
 Both PyTorch and Triton backward return **per-batch** gradients for shared parameters. Autograd function reduces them:
 
 ```python
-# autograd.py lines 143-148 (PyTorch path)
+# autograd.py lines 149-154 (PyTorch path)
 # Shared parameters: weighted sum via einsum (memory-efficient)
 if grad_transition.ndim == 3:  # (batch, C, C) - static transitions
     grad_transition = torch.einsum("bij, b -> ij", grad_transition, grad_output)
@@ -124,7 +124,7 @@ Triton backward (lines 245-260) scales internally via `grad_output` parameter.
 Both autograd functions validate partition before backward:
 
 ```python
-# autograd.py lines 92-99 (PyTorch) and 233-240 (Triton)
+# autograd.py lines 98-105 (PyTorch) and 239-246 (Triton)
 if not torch.isfinite(partition).all():
     nan_count = torch.isnan(partition).sum().item()
     inf_count = torch.isinf(partition).sum().item()
@@ -140,7 +140,7 @@ if not torch.isfinite(partition).all():
 ### Gradient Validation (After Backward)
 
 ```python
-# autograd.py lines 120-126 (PyTorch) and 264-275 (Triton)
+# autograd.py lines 126-132 (PyTorch) and 270-281 (Triton)
 if not torch.isfinite(grad_cum_scores).all():
     nan_count = torch.isnan(grad_cum_scores).sum().item()
     inf_count = torch.isinf(grad_cum_scores).sum().item()
@@ -151,6 +151,34 @@ if not torch.isfinite(grad_cum_scores).all():
 ```
 
 **Why**: Catch gradient corruption before it propagates to optimizer.
+
+### Max Semiring Guard (Forward Only)
+
+All four autograd classes now reject `semiring='max'` in their `.forward()` methods:
+
+```python
+# In SemiCRFStreaming.forward(), SemiCRFStreamingTriton.forward(),
+# LinearCRFStreaming.forward(), SemiCRFK2Streaming.forward():
+if semiring == "max":
+    raise ValueError(
+        "semiring='max' does not support autograd backward. "
+        "Use semi_crf_streaming_forward() with torch.no_grad() instead."
+    )
+```
+
+Additionally, the dispatch function (`semi_crf_streaming_forward`) has a top-level guard:
+
+```python
+# autograd.py:601-616
+needs_grad = torch.is_grad_enabled() and (
+    cum_scores.requires_grad or transition.requires_grad or ...
+)
+
+if semiring == "max" and needs_grad:
+    raise ValueError("semiring='max' (Viterbi) does not support gradients. ...")
+```
+
+**Why `torch.is_grad_enabled()` gating**: Without this, `model.decode()` during training (where params have `requires_grad=True`) would take the autograd path even inside `torch.no_grad()`. The gate ensures `torch.no_grad()` contexts correctly bypass autograd and reach the direct inference kernels.
 
 ## Kernel Launch Interface
 
@@ -209,6 +237,8 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 - [ ] Shared params reduced via einsum, not expanded then summed (memory)
 - [ ] `checkpoint_interval >= K` (required for correct recomputation)
 - [ ] `num_warps` passed from forward to backward (consistency)
+- [ ] Max semiring rejected in all autograd forward methods (lines 45, 193, 342, 430)
+- [ ] `needs_grad` gates on `torch.is_grad_enabled()` (line 601)
 
 ## Known Issues
 
@@ -218,6 +248,7 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 | Wrong checkpoint_interval | Critical | Incorrect gradients | Use same interval in forward/backward |
 | float16 overflow | High | NaN in long sequences | Use float64 (recommended) or float32 for cum_scores |
 | Non-contiguous input | Medium | Kernel crash or wrong results | Always call `.contiguous()` |
+| Max semiring in autograd | Critical | semiring="max" with grad | Raise ValueError; use torch.no_grad() for decode (uncommitted) |
 
 ## Debugging: Interface Violations
 
@@ -237,6 +268,7 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
+- **2026-02-12**: Documented max semiring guard in all four autograd classes; added `torch.is_grad_enabled()` gating for `needs_grad`; updated line numbers throughout; updated to `ebdfcba` + uncommitted changes
 - **2026-02-09**: Updated dtype docs: float32→float64 recommended for cum_scores; docstring now says "float32 or float64"; return comment updated to "input dtype" instead of "float32"
 - **2026-02-05**: Added dtype handling documentation for Triton path (partition computed in float64, returned as input dtype); added checkpoint_interval parameter to forward methods; updated to commit `6c463c3`
 - **2026-02-02**: Updated line numbers throughout; clarified per-batch gradient convention

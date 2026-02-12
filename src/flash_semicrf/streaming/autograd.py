@@ -42,6 +42,12 @@ class SemiCRFStreaming(torch.autograd.Function):
         proj_end: Optional[torch.Tensor] = None,
         checkpoint_interval: Optional[int] = None,
     ) -> torch.Tensor:
+        if semiring == "max":
+            raise ValueError(
+                "semiring='max' does not support autograd backward. "
+                "Use semi_crf_streaming_forward() with torch.no_grad() instead."
+            )
+
         # Detach inputs for forward computation
         partition, ring_checkpoints, actual_checkpoint_interval, log_norm_checkpoints = (
             semi_crf_streaming_forward_pytorch(
@@ -184,6 +190,12 @@ class SemiCRFStreamingTriton(torch.autograd.Function):
         num_warps: int = 4,
         checkpoint_interval: Optional[int] = None,
     ) -> torch.Tensor:
+        if semiring == "max":
+            raise ValueError(
+                "semiring='max' does not support autograd backward. "
+                "Use semi_crf_streaming_forward() with torch.no_grad() instead."
+            )
+
         # Use Triton kernel for forward
         partition, ring_checkpoints, actual_checkpoint_interval, log_norm_checkpoints = (
             launch_streaming_triton_kernel(
@@ -328,14 +340,10 @@ class LinearCRFStreaming(torch.autograd.Function):
         semiring: str = "log",
     ) -> torch.Tensor:
         if semiring == "max":
-            # Viterbi: return scores only, no gradient support for max semiring
-            scores, _ = linear_crf_viterbi_pytorch(
-                cum_scores.detach(),
-                transition.detach(),
-                lengths,
-                duration_bias.detach(),
+            raise ValueError(
+                "semiring='max' does not support autograd backward. "
+                "Use semi_crf_streaming_forward() with torch.no_grad() instead."
             )
-            return scores
 
         # Forward pass
         partition = linear_crf_forward_pytorch(
@@ -420,14 +428,10 @@ class SemiCRFK2Streaming(torch.autograd.Function):
         semiring: str = "log",
     ) -> torch.Tensor:
         if semiring == "max":
-            # Viterbi: return scores only
-            scores, _, _ = semi_crf_k2_viterbi_pytorch(
-                cum_scores.detach(),
-                transition.detach(),
-                duration_bias.detach(),
-                lengths,
+            raise ValueError(
+                "semiring='max' does not support autograd backward. "
+                "Use semi_crf_streaming_forward() with torch.no_grad() instead."
             )
-            return scores
 
         # Forward pass
         partition = semi_crf_k2_forward_pytorch(
@@ -592,13 +596,24 @@ def semi_crf_streaming_forward(
     validate_lengths(lengths, T, batch_size=batch)
 
     # Determine if gradients are needed
-    needs_grad = (
+    # Gate on torch.is_grad_enabled() so torch.no_grad() with trainable params
+    # (e.g. model.decode() during training) correctly takes the inference path.
+    needs_grad = torch.is_grad_enabled() and (
         cum_scores.requires_grad
         or transition.requires_grad
         or duration_bias.requires_grad
         or (proj_start is not None and proj_start.requires_grad)
         or (proj_end is not None and proj_end.requires_grad)
     )
+
+    # Guard: max semiring is inference-only (Viterbi scores are not differentiable)
+    if semiring == "max" and needs_grad:
+        raise ValueError(
+            "semiring='max' (Viterbi) does not support gradients. "
+            "The max semiring computes the highest-scoring path, which is not "
+            "differentiable (requires Viterbi subgradients, not implemented). "
+            "Use torch.no_grad() for decoding, or semiring='log' for training."
+        )
 
     # =========================================================================
     # K=1 Fast Path: Linear CRF (no ring buffer, no duration loop)

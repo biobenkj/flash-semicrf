@@ -78,7 +78,7 @@ class TestTritonStreamingKernel:
         """Verify Triton kernel matches PyTorch for medium inputs."""
         batch, T, K, C = 4, 100, 8, 6
         cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
-            batch, T, K, C, device="cuda"
+            batch, T, K, C, device="cuda", dtype=torch.float64
         )
 
         partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
