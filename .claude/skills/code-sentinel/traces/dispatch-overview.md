@@ -1,7 +1,7 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/flash_semicrf/streaming/autograd.py` @ commit `ebdfcba` (+ uncommitted changes)
+- `src/flash_semicrf/streaming/autograd.py` @ commit `e45c7f1`
 - `src/flash_semicrf/semimarkov.py` @ commit `ebdfcba`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
@@ -287,7 +287,7 @@ if semiring == "max" and needs_grad:
 
 ## Version History
 
-- **2026-02-12**: Updated `needs_grad` to gate on `torch.is_grad_enabled()` (line 601); documented max semiring ValueError guard (line 610); updated all entry point and numerical guard line numbers; autograd.py to `ebdfcba` + uncommitted, semimarkov.py to `ebdfcba`
+- **2026-02-12**: Updated `needs_grad` to gate on `torch.is_grad_enabled()` (line 601); documented max semiring ValueError guard (line 610); updated all entry point and numerical guard line numbers; autograd.py to `e45c7f1`, semimarkov.py to `ebdfcba`
 - **2026-02-09**: Updated autograd.py commit (STAGED): float32→float64 in docstrings, cum_scores invariant relaxed to accept float64
 - **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Availability table; updated semimarkov.py to commit `f9298c5`
 - **2026-02-05**: Updated autograd.py to commit `6c463c3`; no dispatch logic changes (added checkpoint_interval parameter and dtype conversion handling)

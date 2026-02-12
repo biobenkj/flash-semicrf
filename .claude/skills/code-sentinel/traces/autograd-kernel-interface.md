@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `ebdfcba` (+ uncommitted changes)
+**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `e45c7f1`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -248,7 +248,7 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 | Wrong checkpoint_interval | Critical | Incorrect gradients | Use same interval in forward/backward |
 | float16 overflow | High | NaN in long sequences | Use float64 (recommended) or float32 for cum_scores |
 | Non-contiguous input | Medium | Kernel crash or wrong results | Always call `.contiguous()` |
-| Max semiring in autograd | Critical | semiring="max" with grad | Raise ValueError; use torch.no_grad() for decode (uncommitted) |
+| Max semiring in autograd | Critical | semiring="max" with grad | Raise ValueError; use torch.no_grad() for decode (`e45c7f1`) |
 
 ## Debugging: Interface Violations
 
@@ -268,7 +268,7 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
-- **2026-02-12**: Documented max semiring guard in all four autograd classes; added `torch.is_grad_enabled()` gating for `needs_grad`; updated line numbers throughout; updated to `ebdfcba` + uncommitted changes
+- **2026-02-12**: Documented max semiring guard in all four autograd classes; added `torch.is_grad_enabled()` gating for `needs_grad`; updated line numbers throughout; updated to `e45c7f1`
 - **2026-02-09**: Updated dtype docs: float32→float64 recommended for cum_scores; docstring now says "float32 or float64"; return comment updated to "input dtype" instead of "float32"
 - **2026-02-05**: Added dtype handling documentation for Triton path (partition computed in float64, returned as input dtype); added checkpoint_interval parameter to forward methods; updated to commit `6c463c3`
 - **2026-02-02**: Updated line numbers throughout; clarified per-batch gradient convention

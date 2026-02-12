@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `ebdfcba` (+ uncommitted changes)
+**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `e45c7f1`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_triton.py::TestTritonStreamingKernel`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -88,7 +88,7 @@ Kernel produces:
 
 ## Safe Index Clamping (Non-Power-of-2 C)
 
-**Added in current uncommitted changes.** Applied to all three kernels: `scan_kernel` (line 176), `scan_kernel_max` (line 529), `scan_kernel_max_bp` (line 762).
+**Added in commit `e45c7f1`.** Applied to all three kernels: `scan_kernel` (line 176), `scan_kernel_max` (line 529), `scan_kernel_max_bp` (line 762).
 
 ```python
 # Clamp indices so masked threads do not form out-of-bounds addresses.
@@ -343,7 +343,7 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | K=1/K=2 ring buffer aliasing | Critical | Always | Dispatch to specialized paths | `870bd1f` |
 | @triton.autotune corruption | Critical | Multi-config benchmark | Removed autotune decorator | See DEBUGGING_NAN.md |
 | Numerical precision at extreme T | High | T > 100K | All kernels now use float64 internally | `9dfa110` |
-| Non-power-of-2 C masked OOB | Critical | C_PAD > C | Clamp indices via `tl.minimum(idx, C-1)` for C-shaped tensors | uncommitted |
+| Non-power-of-2 C masked OOB | Critical | C_PAD > C | Clamp indices via `tl.minimum(idx, C-1)` for C-shaped tensors | `e45c7f1` |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len and t to int32 | `49d9d61` |
 | NEG_INF comparison failure | Critical | Variable-length + checkpointing | Use `active` directly for shift | `49d9d61` |
 
@@ -366,7 +366,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
-- **2026-02-12**: Added safe index clamping (`c_idx_safe`, `c_dst_idx_safe`, `c_src_idx_safe`) to all three kernels (scan, max, max_bp) to prevent OOB address arithmetic for non-power-of-2 C; all `tl.load`/`tl.store` for C-shaped tensors now use `*_safe` indices; added max semiring guard note; updated entry points and line numbers; updated to `ebdfcba` + uncommitted
+- **2026-02-12**: Added safe index clamping (`c_idx_safe`, `c_dst_idx_safe`, `c_src_idx_safe`) to all three kernels (scan, max, max_bp) to prevent OOB address arithmetic for non-power-of-2 C; all `tl.load`/`tl.store` for C-shaped tensors now use `*_safe` indices; added max semiring guard note; updated entry points and line numbers; updated to `e45c7f1`
 - **2026-02-05**: Migrated all internal computation to float64 for numerical stability; updated dtype annotations throughout; updated to commit `9dfa110`
 - **2026-02-02**: Updated to commit `0c9b73e` (minor comment cleanup)
 - **2026-02-02**: Fixed int32/int64 type mismatch in Triton comparisons; `seq_len` loaded as int32, `t` cast to int32 for `active` and `is_final` comparisons; checkpoint normalization now uses `active` directly instead of NEG_INF comparison (workaround for silent comparison failure); updated to commit `49d9d61`

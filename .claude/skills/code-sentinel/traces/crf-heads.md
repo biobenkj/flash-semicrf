@@ -1,6 +1,6 @@
 # Sentinel: CRF Heads (nn.py)
 
-**Verified against:** `src/flash_semicrf/nn.py` @ commit `600633a` (+ uncommitted changes)
+**Verified against:** `src/flash_semicrf/nn.py` @ commit `e45c7f1`
 
 **Linked tests:** `tests/test_semimarkov.py`, `tests/test_streaming_triton.py::TestTritonBasic`
 
@@ -206,7 +206,7 @@ Both methods are decorated with `@torch.no_grad()` (lines 528, 607), ensuring th
 
 ## Version History
 
-- **2026-02-12**: Documented `@torch.no_grad()` decorators on `decode()` (line 528) and `decode_with_traceback()` (line 607); updated line numbers; updated to `600633a` + uncommitted
+- **2026-02-12**: Documented `@torch.no_grad()` decorators on `decode()` (line 528) and `decode_with_traceback()` (line 607); updated line numbers; updated to `e45c7f1`
 - **2026-02-10**: Major update — documented new `_build_differentiable_edge()` method (torch.stack, finite sentinel -1e18), split edge construction in `_forward_exact()`, new `dp_standard` backend option, updated all line numbers, added invariants N9/N10 and critical invariant for finite sentinel
 - **2026-02-09**: Updated float32→float64 throughout: cum_scores construction, edge tensor sizing (4→8 bytes), invariants. Renamed anchor FLOAT32_CONVERT→FLOAT64_CONVERT. Updated assumption N2.
 - **2026-02-09**: Added Semiring Restriction section documenting that nn.py only exposes log/max semirings

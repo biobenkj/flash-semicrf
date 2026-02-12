@@ -12,7 +12,7 @@ last_global_verification: 2026-02-12T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: ebdfcba
+    verified_commit: e45c7f1
     source_files:
       - src/flash_semicrf/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -36,10 +36,10 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: ebdfcba
+    verified_commit: e45c7f1
     source_files:
-      - src/flash_semicrf/streaming/autograd.py
       - src/flash_semicrf/semimarkov.py
+      - src/flash_semicrf/streaming/autograd.py
     assumptions_mechanical: [D1, D2, D3, D4]
     assumptions_agent: [D5]
     anchors:
@@ -55,7 +55,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: ebdfcba
+    verified_commit: e45c7f1
     source_files:
       - src/flash_semicrf/streaming/autograd.py
     assumptions_mechanical: []
@@ -140,7 +140,7 @@ sentinels:
     depends_on: []
 
   crf-heads:
-    verified_commit: 600633a
+    verified_commit: e45c7f1
     source_files:
       - src/flash_semicrf/nn.py
     assumptions_mechanical: [N1, N2, N3, N4, N5, N9, N10]
