@@ -75,12 +75,12 @@ class TestTritonCacheIsolation:
             torch.cuda.manual_seed_all(42)
 
         batch, T, K, C = 2, 500, 16, 8
-        scores = torch.randn(batch, T, C, device="cuda")
+        scores = torch.randn(batch, T, C, device="cuda", dtype=torch.float64)
         scores = scores - scores.mean(dim=1, keepdim=True)
-        cum_scores = torch.zeros(batch, T + 1, C, device="cuda", dtype=torch.float32)
+        cum_scores = torch.zeros(batch, T + 1, C, device="cuda", dtype=torch.float64)
         cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
-        transition = torch.randn(C, C, device="cuda") * 0.1
-        duration_bias = torch.randn(K, C, device="cuda") * 0.1
+        transition = torch.randn(C, C, device="cuda", dtype=torch.float64) * 0.1
+        duration_bias = torch.randn(K, C, device="cuda", dtype=torch.float64) * 0.1
         lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
 
         partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(

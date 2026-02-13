@@ -60,7 +60,7 @@ class TestCPUOnlyOperation:
         cum_scores = torch.zeros(batch, T + 1, C)
         cum_scores[:, 1:] = torch.cumsum(scores, dim=1)
         transition = torch.randn(C, C)
-        duration_bias = torch.randn(K)
+        duration_bias = torch.randn(K, C)
         lengths = torch.full((batch,), T, dtype=torch.long)
 
         # This should work on CPU (uses PyTorch fallback when CUDA not available)
