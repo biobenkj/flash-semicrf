@@ -376,7 +376,9 @@ class TestStreamingAPIValidation:
 
         cum_scores = torch.zeros(2, 101, 4, device="cuda", dtype=torch.float64)
         transition = torch.randn(4, 4, device="cuda", dtype=torch.float64)
-        duration_bias = torch.randn(4, 4, device="cuda", dtype=torch.float64)  # K=4, but passing K=8
+        duration_bias = torch.randn(
+            4, 4, device="cuda", dtype=torch.float64
+        )  # K=4, but passing K=8
         lengths = torch.tensor([100, 100], device="cuda")
 
         with pytest.raises(ValueError, match="duration_bias"):
@@ -391,13 +393,13 @@ class TestStreamingAPIValidation:
 
         cum_scores = torch.zeros(2, 101, 4, device="cuda", dtype=torch.float64)
         transition = torch.randn(4, 4, device="cuda", dtype=torch.float64)
-        duration_bias = torch.randn(4, 4, device="cuda", dtype=torch.float64)  # K=4, but passing K=8
+        duration_bias = torch.randn(
+            4, 4, device="cuda", dtype=torch.float64
+        )  # K=4, but passing K=8
         lengths = torch.tensor([100, 100], device="cuda")
 
         with pytest.raises(ValueError, match="duration_bias"):
-            launch_streaming_triton_kernel(
-                cum_scores, transition, duration_bias, lengths, K=8
-            )
+            launch_streaming_triton_kernel(cum_scores, transition, duration_bias, lengths, K=8)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_backward_launcher_validates_checkpoint_count(self):
@@ -419,9 +421,15 @@ class TestStreamingAPIValidation:
 
         with pytest.raises(ValueError, match="checkpoint count must match"):
             launch_streaming_triton_backward(
-                cum_scores, transition, duration_bias, lengths,
-                log_Z, ring_checkpoints, log_norm_checkpoints,
-                checkpoint_interval, grad_output,
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                log_Z,
+                ring_checkpoints,
+                log_norm_checkpoints,
+                checkpoint_interval,
+                grad_output,
             )
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -439,14 +447,22 @@ class TestStreamingAPIValidation:
         checkpoint_interval = 16
         num_ckpts = (T + checkpoint_interval - 1) // checkpoint_interval
 
-        ring_checkpoints = torch.zeros(batch, num_ckpts, K, C + 1, device="cuda", dtype=torch.float64)
+        ring_checkpoints = torch.zeros(
+            batch, num_ckpts, K, C + 1, device="cuda", dtype=torch.float64
+        )
         log_norm_checkpoints = torch.zeros(batch, num_ckpts, device="cuda", dtype=torch.float64)
 
         with pytest.raises(ValueError, match="class dim must equal"):
             launch_streaming_triton_backward(
-                cum_scores, transition, duration_bias, lengths,
-                log_Z, ring_checkpoints, log_norm_checkpoints,
-                checkpoint_interval, grad_output,
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                log_Z,
+                ring_checkpoints,
+                log_norm_checkpoints,
+                checkpoint_interval,
+                grad_output,
             )
 
 
@@ -456,7 +472,10 @@ class TestValidateStreamingShapes:
     def test_valid_static_transition(self):
         """Valid shapes with static transition should pass."""
         validate_streaming_shapes(
-            K=8, C=4, batch=2, T=100,
+            K=8,
+            C=4,
+            batch=2,
+            T=100,
             transition=torch.randn(4, 4),
             duration_bias=torch.randn(8, 4),
         )
@@ -464,7 +483,10 @@ class TestValidateStreamingShapes:
     def test_valid_duration_dependent_transition(self):
         """Valid shapes with duration-dependent transition should pass."""
         validate_streaming_shapes(
-            K=8, C=4, batch=2, T=100,
+            K=8,
+            C=4,
+            batch=2,
+            T=100,
             transition=torch.randn(8, 4, 4),
             duration_bias=torch.randn(8, 4),
         )
@@ -472,7 +494,10 @@ class TestValidateStreamingShapes:
     def test_valid_with_boundaries(self):
         """Valid shapes with boundary projections should pass."""
         validate_streaming_shapes(
-            K=8, C=4, batch=2, T=100,
+            K=8,
+            C=4,
+            batch=2,
+            T=100,
             transition=torch.randn(4, 4),
             duration_bias=torch.randn(8, 4),
             proj_start=torch.randn(2, 100, 4),
@@ -485,7 +510,10 @@ class TestValidateStreamingShapes:
         """K=0 should raise ValueError."""
         with pytest.raises(ValueError, match="K must be a positive integer"):
             validate_streaming_shapes(
-                K=0, C=4, batch=2, T=100,
+                K=0,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(1, 4),
             )
@@ -494,7 +522,10 @@ class TestValidateStreamingShapes:
         """Negative K should raise ValueError."""
         with pytest.raises(ValueError, match="K must be a positive integer"):
             validate_streaming_shapes(
-                K=-1, C=4, batch=2, T=100,
+                K=-1,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(1, 4),
             )
@@ -503,7 +534,10 @@ class TestValidateStreamingShapes:
         """Float K should raise ValueError."""
         with pytest.raises(ValueError, match="K must be a positive integer"):
             validate_streaming_shapes(
-                K=2.5, C=4, batch=2, T=100,
+                K=2.5,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(2, 4),
             )
@@ -512,7 +546,10 @@ class TestValidateStreamingShapes:
         """Bool K should raise ValueError (bool is subclass of int)."""
         with pytest.raises(ValueError, match="K must be a positive integer"):
             validate_streaming_shapes(
-                K=True, C=4, batch=2, T=100,
+                K=True,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(1, 4),
             )
@@ -521,7 +558,10 @@ class TestValidateStreamingShapes:
         """numpy.int64 should be accepted as integral."""
         np = pytest.importorskip("numpy")
         validate_streaming_shapes(
-            K=np.int64(8), C=4, batch=2, T=100,
+            K=np.int64(8),
+            C=4,
+            batch=2,
+            T=100,
             transition=torch.randn(4, 4),
             duration_bias=torch.randn(8, 4),
         )
@@ -532,7 +572,10 @@ class TestValidateStreamingShapes:
         """1D duration_bias should raise."""
         with pytest.raises(ValueError, match="duration_bias must be 2D"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(32),
             )
@@ -541,7 +584,10 @@ class TestValidateStreamingShapes:
         """duration_bias.shape[0] != K should raise."""
         with pytest.raises(ValueError, match=r"duration_bias.shape\[0\] must equal K=8"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(4, 4),
             )
@@ -550,7 +596,10 @@ class TestValidateStreamingShapes:
         """duration_bias.shape[1] != C should raise."""
         with pytest.raises(ValueError, match=r"duration_bias.shape\[1\] must equal C=4"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(8, 6),
             )
@@ -561,7 +610,10 @@ class TestValidateStreamingShapes:
         """1D transition should raise."""
         with pytest.raises(ValueError, match="must be 2D.*or 3D"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(16),
                 duration_bias=torch.randn(8, 4),
             )
@@ -570,7 +622,10 @@ class TestValidateStreamingShapes:
         """4D transition should raise."""
         with pytest.raises(ValueError, match="must be 2D.*or 3D"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(8, 4, 4, 4),
                 duration_bias=torch.randn(8, 4),
             )
@@ -579,7 +634,10 @@ class TestValidateStreamingShapes:
         """(C, C') with C'!=C should raise."""
         with pytest.raises(ValueError, match=r"transition must be \(C, C\)"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 6),
                 duration_bias=torch.randn(8, 4),
             )
@@ -588,7 +646,10 @@ class TestValidateStreamingShapes:
         """transition.shape[0] != K for 3D transition should raise."""
         with pytest.raises(ValueError, match="must equal K=8"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4, 4),
                 duration_bias=torch.randn(8, 4),
             )
@@ -597,7 +658,10 @@ class TestValidateStreamingShapes:
         """transition (K, C, C') with wrong C dims should raise."""
         with pytest.raises(ValueError, match=r"must be \(K, C, C\)"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(8, 4, 6),
                 duration_bias=torch.randn(8, 4),
             )
@@ -608,7 +672,10 @@ class TestValidateStreamingShapes:
         """2D proj_start should raise."""
         with pytest.raises(ValueError, match="proj_start must be 3D"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(8, 4),
                 proj_start=torch.randn(200, 4),
@@ -618,7 +685,10 @@ class TestValidateStreamingShapes:
         """proj_start with wrong T should raise."""
         with pytest.raises(ValueError, match="proj_start shape must be"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(8, 4),
                 proj_start=torch.randn(2, 50, 4),
@@ -628,7 +698,10 @@ class TestValidateStreamingShapes:
         """2D proj_end should raise."""
         with pytest.raises(ValueError, match="proj_end must be 3D"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(8, 4),
                 proj_end=torch.randn(200, 4),
@@ -638,7 +711,10 @@ class TestValidateStreamingShapes:
         """proj_end with wrong C should raise."""
         with pytest.raises(ValueError, match="proj_end shape must be"):
             validate_streaming_shapes(
-                K=8, C=4, batch=2, T=100,
+                K=8,
+                C=4,
+                batch=2,
+                T=100,
                 transition=torch.randn(4, 4),
                 duration_bias=torch.randn(8, 4),
                 proj_end=torch.randn(2, 100, 6),

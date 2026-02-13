@@ -7,13 +7,15 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-_INT_DTYPES = frozenset({
-    torch.uint8,
-    torch.int8,
-    torch.int16,
-    torch.int32,
-    torch.int64,
-})
+_INT_DTYPES = frozenset(
+    {
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+)
 
 __all__ = [
     "validate_hidden_states",
@@ -83,9 +85,7 @@ def validate_lengths(
     # - Bool is rejected (not a meaningful length type).
     # - Non-integer dtypes are accepted only if values are integral, with warning.
     if lengths.dtype == torch.bool:
-        raise ValueError(
-            f"{name} must contain integral length values, got dtype torch.bool"
-        )
+        raise ValueError(f"{name} must contain integral length values, got dtype torch.bool")
 
     if lengths.dtype not in _INT_DTYPES:
         if torch.is_complex(lengths):
@@ -275,17 +275,11 @@ def validate_streaming_shapes(
 
     # duration_bias: (K, C)
     if duration_bias.ndim != 2:
-        raise ValueError(
-            f"duration_bias must be 2D (K, C), got {duration_bias.ndim}D"
-        )
+        raise ValueError(f"duration_bias must be 2D (K, C), got {duration_bias.ndim}D")
     if duration_bias.shape[0] != K:
-        raise ValueError(
-            f"duration_bias.shape[0] must equal K={K}, got {duration_bias.shape[0]}"
-        )
+        raise ValueError(f"duration_bias.shape[0] must equal K={K}, got {duration_bias.shape[0]}")
     if duration_bias.shape[1] != C:
-        raise ValueError(
-            f"duration_bias.shape[1] must equal C={C}, got {duration_bias.shape[1]}"
-        )
+        raise ValueError(f"duration_bias.shape[1] must equal C={C}, got {duration_bias.shape[1]}")
 
     # transition: (C, C) or (K, C, C)
     if transition.ndim == 2:
@@ -301,20 +295,15 @@ def validate_streaming_shapes(
             )
         if transition.shape[1] != C or transition.shape[2] != C:
             raise ValueError(
-                f"transition must be (K, C, C) = ({K}, {C}, {C}), "
-                f"got {tuple(transition.shape)}"
+                f"transition must be (K, C, C) = ({K}, {C}, {C}), " f"got {tuple(transition.shape)}"
             )
     else:
-        raise ValueError(
-            f"transition must be 2D (C, C) or 3D (K, C, C), got {transition.ndim}D"
-        )
+        raise ValueError(f"transition must be 2D (C, C) or 3D (K, C, C), got {transition.ndim}D")
 
     # proj_start: (batch, T, C) if provided
     if proj_start is not None:
         if proj_start.ndim != 3:
-            raise ValueError(
-                f"proj_start must be 3D (batch, T, C), got {proj_start.ndim}D"
-            )
+            raise ValueError(f"proj_start must be 3D (batch, T, C), got {proj_start.ndim}D")
         if proj_start.shape != (batch, T, C):
             raise ValueError(
                 f"proj_start shape must be (batch, T, C) = ({batch}, {T}, {C}), "
@@ -324,9 +313,7 @@ def validate_streaming_shapes(
     # proj_end: (batch, T, C) if provided
     if proj_end is not None:
         if proj_end.ndim != 3:
-            raise ValueError(
-                f"proj_end must be 3D (batch, T, C), got {proj_end.ndim}D"
-            )
+            raise ValueError(f"proj_end must be 3D (batch, T, C), got {proj_end.ndim}D")
         if proj_end.shape != (batch, T, C):
             raise ValueError(
                 f"proj_end shape must be (batch, T, C) = ({batch}, {T}, {C}), "
