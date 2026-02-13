@@ -104,6 +104,49 @@ class TestValidateLengths:
         with pytest.raises(ValueError, match="cannot exceed T=100"):
             validate_lengths(lengths, max_length=100)
 
+    def test_non_integer_dtype_with_integral_values_warns(self):
+        """Non-integer dtype is accepted with warning when values are integral."""
+        lengths = torch.tensor([100.0, 75.0], dtype=torch.float32)
+        with pytest.warns(UserWarning, match="non-integer dtype"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_non_integer_dtype_with_non_integral_values_raises(self):
+        """Non-integer dtype must raise if any length value is non-integral."""
+        lengths = torch.tensor([100.0, 75.5], dtype=torch.float32)
+        with pytest.raises(ValueError, match="must contain integral values"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_bool_dtype_raises(self):
+        """Bool dtype must raise even though it's technically integral."""
+        lengths = torch.tensor([True, True])
+        with pytest.raises(ValueError, match="torch.bool"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_complex_dtype_raises(self):
+        """Complex dtype must raise."""
+        lengths = torch.tensor([50.0 + 0j, 75.0 + 0j], dtype=torch.complex64)
+        with pytest.raises(ValueError, match="complex dtype"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_float_with_inf_raises(self):
+        """Float lengths containing inf must raise."""
+        lengths = torch.tensor([50.0, float("inf")], dtype=torch.float32)
+        with pytest.raises(ValueError, match="non-finite"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_float_with_nan_raises(self):
+        """Float lengths containing NaN must raise."""
+        lengths = torch.tensor([50.0, float("nan")], dtype=torch.float32)
+        with pytest.raises(ValueError, match="non-finite"):
+            validate_lengths(lengths, max_length=100)
+
+    def test_float_integral_exceeding_max_raises(self):
+        """Float lengths with integral values must still be bounds-checked."""
+        lengths = torch.tensor([50.0, 200.0], dtype=torch.float32)
+        with pytest.warns(UserWarning, match="non-integer dtype"):
+            with pytest.raises(ValueError, match="cannot exceed T=100"):
+                validate_lengths(lengths, max_length=100)
+
 
 class TestValidateLabels:
     """Tests for validate_labels."""

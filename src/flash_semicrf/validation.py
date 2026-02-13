@@ -7,6 +7,14 @@ from typing import Optional
 import torch
 from torch import Tensor
 
+_INT_DTYPES = frozenset({
+    torch.uint8,
+    torch.int8,
+    torch.int16,
+    torch.int32,
+    torch.int64,
+})
+
 __all__ = [
     "validate_hidden_states",
     "validate_lengths",
@@ -59,7 +67,8 @@ def validate_lengths(
         name (str, optional): Name for error messages. Default: ``"lengths"``
 
     Raises:
-        ValueError: If not 1D, non-positive, exceeds max_length, or wrong batch size.
+        ValueError: If not 1D, wrong batch size, non-integral values,
+            non-positive values, or values exceed ``max_length``.
     """
     if lengths.ndim != 1:
         raise ValueError(f"{name} must be 1D, got {lengths.ndim}D")
@@ -67,6 +76,40 @@ def validate_lengths(
     if batch_size is not None and lengths.shape[0] != batch_size:
         raise ValueError(
             f"{name} batch size {lengths.shape[0]} doesn't match expected {batch_size}"
+        )
+
+    # Dtype contract:
+    # - Integer dtypes are accepted directly.
+    # - Bool is rejected (not a meaningful length type).
+    # - Non-integer dtypes are accepted only if values are integral, with warning.
+    if lengths.dtype == torch.bool:
+        raise ValueError(
+            f"{name} must contain integral length values, got dtype torch.bool"
+        )
+
+    if lengths.dtype not in _INT_DTYPES:
+        if torch.is_complex(lengths):
+            raise ValueError(
+                f"{name} must contain integral values, got complex dtype {lengths.dtype}"
+            )
+
+        lengths_f64 = lengths.to(torch.float64)
+        if not torch.isfinite(lengths_f64).all():
+            raise ValueError(f"{name} must be finite, got non-finite values")
+
+        is_integral = lengths_f64 == torch.round(lengths_f64)
+        if not bool(is_integral.all()):
+            bad_vals = lengths_f64[~is_integral]
+            first_bad = bad_vals[0].item()
+            raise ValueError(
+                f"{name} must contain integral values, got non-integral value {first_bad}"
+            )
+
+        warnings.warn(
+            f"{name} has non-integer dtype {lengths.dtype}; values are integral and accepted. "
+            "Values are cast to int32 in Triton kernels.",
+            UserWarning,
+            stacklevel=3,
         )
 
     # Check for non-positive lengths

@@ -1016,7 +1016,12 @@ class TestKLessThan3BoundaryDispatch:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
 class TestTritonLauncherSingleBoundaryRaises:
-    """Triton launchers must raise ValueError for single-boundary direct calls."""
+    """Contract tests for unsupported direct-launcher single-boundary usage.
+
+    These tests intentionally exercise non-viable direct Triton calls
+    (only one boundary tensor provided) and assert the public contract:
+    launchers must fail fast with ValueError.
+    """
 
     def _make_forward_inputs(self, K=5):
         batch, T, C = 2, 20, 4
@@ -1122,7 +1127,12 @@ class TestTritonLauncherSingleBoundaryRaises:
     "boundary_mode", ["start_only", "end_only"], ids=["start_only", "end_only"]
 )
 class TestSingleBoundaryDispatchFallback:
-    """K>=3 single-boundary dispatch falls back to PyTorch with correct results."""
+    """Contract tests for single-boundary dispatch behavior at the public API.
+
+    Single-boundary inputs are supported semantically via PyTorch fallback.
+    The contract is: warn when Triton would have been used, do not launch Triton,
+    and preserve forward/backward correctness against reference.
+    """
 
     def test_single_boundary_dispatch_matches_reference(self, boundary_mode):
         """Dispatch with single boundary matches PyTorch reference (CPU)."""
