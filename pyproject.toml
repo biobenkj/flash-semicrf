@@ -111,6 +111,8 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "diagnostic: non-gating diagnostic tests intended for local debugging",
+    "informational: non-gating profiling/informational tests",
 ]
 
 [tool.coverage.run]

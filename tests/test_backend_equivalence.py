@@ -146,6 +146,18 @@ def run_backend(struct, edge, lengths, backend: str, force_grad: bool = True):
         raise ValueError(f"Unknown backend: {backend}")
 
 
+def _is_expected_runtime_skip(err: RuntimeError) -> bool:
+    """Return True only for expected resource-limit runtime failures."""
+    msg = str(err).lower()
+    expected_substrings = (
+        "out of memory",
+        "not enough memory",
+        "insufficient memory",
+        "cuda error: out of memory",
+    )
+    return any(s in msg for s in expected_substrings)
+
+
 def create_test_data(T, K, C, B, device="cpu", dtype=torch.float32, seed=42):
     """Create random edge potentials for testing."""
     torch.manual_seed(seed)
@@ -405,9 +417,14 @@ class TestAllBackendsEquivalence:
                 edge_copy = edge.clone().detach().requires_grad_(True)
                 v, _ = run_backend(struct, edge_copy, lengths, backend)
                 results[backend] = v.detach()
-            except (NotImplementedError, RuntimeError) as e:
+            except NotImplementedError as e:
                 print(f"  Skipping {backend}: {e}")
                 continue
+            except RuntimeError as e:
+                if _is_expected_runtime_skip(e):
+                    print(f"  Skipping {backend} (resource-limited): {e}")
+                    continue
+                raise
 
         if "binary_tree" not in results:
             pytest.skip("Reference tree backend not available")
@@ -452,9 +469,14 @@ class TestAllBackendsEquivalence:
                 v, _ = run_backend(struct, edge_copy, lengths, backend)
                 v.sum().backward()
                 grads[backend] = edge_copy.grad.clone()
-            except (NotImplementedError, RuntimeError) as e:
+            except NotImplementedError as e:
                 print(f"  Skipping {backend}: {e}")
                 continue
+            except RuntimeError as e:
+                if _is_expected_runtime_skip(e):
+                    print(f"  Skipping {backend} (resource-limited): {e}")
+                    continue
+                raise
 
         if "binary_tree" not in grads:
             pytest.skip("Reference tree backend not available")
