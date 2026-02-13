@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 
-from ..validation import validate_cum_scores, validate_lengths
+from ..validation import validate_cum_scores, validate_lengths, validate_streaming_shapes
 from .pytorch_reference import (
     linear_crf_backward_pytorch,
     linear_crf_forward_pytorch,
@@ -595,6 +595,7 @@ def semi_crf_streaming_forward(
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
     validate_lengths(lengths, T, batch_size=batch)
+    validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)
 
     # Determine if gradients are needed
     # Gate on torch.is_grad_enabled() so torch.no_grad() with trainable params

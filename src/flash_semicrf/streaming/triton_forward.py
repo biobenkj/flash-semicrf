@@ -29,6 +29,7 @@ Functions:
 
 import torch
 
+from ..validation import validate_streaming_shapes
 from .constants import NEG_INF
 from .pytorch_reference import _compute_checkpoint_interval
 
@@ -999,6 +1000,7 @@ if HAS_TRITON:
             update_cache_sentinel(config)
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
+        validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)
         device = cum_scores.device
         dtype = torch.float64  # Internal computation in float64 for numerical stability
 
@@ -1201,6 +1203,7 @@ if HAS_TRITON:
             update_cache_sentinel(config)
         batch, T_plus_1, C = cum_scores.shape
         T = T_plus_1 - 1
+        validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)
         device = cum_scores.device
         dtype = torch.float64  # Internal computation in float64 for numerical stability
 
