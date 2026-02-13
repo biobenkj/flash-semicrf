@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="flash_semicrf_logo.png" alt="flash-semicrf" width="420" />
+<img src="https://raw.githubusercontent.com/biobenkj/flash-semicrf/main/flash_semicrf_logo.png" alt="flash-semicrf" width="420" />
 
 Structured Sequence Decoding with Memory-Efficient Semi-CRF Inference
 
