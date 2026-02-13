@@ -39,6 +39,7 @@ Functions:
 
 import torch
 
+from ..validation import validate_streaming_shapes
 from .constants import NEG_INF
 from .triton_forward import _next_power_of_2
 
@@ -1155,7 +1156,9 @@ if HAS_TRITON:
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
             ring_checkpoints (Tensor): Saved ring buffer states of shape
-                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`. The class
+                dimension must be ``C`` (not ``C_PAD``); the forward launcher
+                trims padding before returning checkpoints.
             log_norm_checkpoints (Tensor): Cumulative log normalization factors
                 at each checkpoint of shape :math:`(\text{batch}, \text{num\_ckpts})`.
             checkpoint_interval (int): Interval used during forward pass.
@@ -1187,6 +1190,11 @@ if HAS_TRITON:
                 - **boundary_marginals** (Tensor or None): Boundary marginal probabilities of shape
                   :math:`(\text{batch}, T)` if ``return_boundary_marginals=True``, else ``None``.
 
+        .. note::
+            Requires both or neither boundary tensor (proj_start, proj_end).
+            For single-boundary support, use :func:`semi_crf_streaming_forward`
+            which automatically falls back to the PyTorch path.
+
         See Also:
             :func:`launch_streaming_triton_kernel`: Forward pass that produces checkpoints
                 for this backward pass.
@@ -1212,6 +1220,40 @@ if HAS_TRITON:
             update_cache_sentinel(config)
         T = T_plus_1 - 1
         K = duration_bias.shape[0]
+        validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)
+
+        # Validate checkpoint tensors
+        if ring_checkpoints.ndim != 4:
+            raise ValueError(
+                f"ring_checkpoints must be 4D (batch, num_ckpts, K, C), got {ring_checkpoints.ndim}D"
+            )
+        if log_norm_checkpoints.ndim != 2:
+            raise ValueError(
+                f"log_norm_checkpoints must be 2D (batch, num_ckpts), got {log_norm_checkpoints.ndim}D"
+            )
+        if ring_checkpoints.shape[0] != batch:
+            raise ValueError(
+                f"ring_checkpoints batch dim must equal {batch}, got {ring_checkpoints.shape[0]}"
+            )
+        if log_norm_checkpoints.shape[0] != batch:
+            raise ValueError(
+                f"log_norm_checkpoints batch dim must equal {batch}, got {log_norm_checkpoints.shape[0]}"
+            )
+        if ring_checkpoints.shape[1] != log_norm_checkpoints.shape[1]:
+            raise ValueError(
+                f"ring_checkpoints and log_norm_checkpoints checkpoint count must match: "
+                f"ring_checkpoints has {ring_checkpoints.shape[1]}, "
+                f"log_norm_checkpoints has {log_norm_checkpoints.shape[1]}"
+            )
+        if ring_checkpoints.shape[2] != K:
+            raise ValueError(
+                f"ring_checkpoints K dim must equal K={K}, got {ring_checkpoints.shape[2]}"
+            )
+        if ring_checkpoints.shape[3] != C:
+            raise ValueError(
+                f"ring_checkpoints class dim must equal C={C}, got {ring_checkpoints.shape[3]}"
+            )
+
         device = cum_scores.device
         dtype = torch.float64  # Must match ring_checkpoints dtype from forward pass
 
@@ -1220,6 +1262,15 @@ if HAS_TRITON:
 
         # Compute segment size for alpha buffer
         segment_size = checkpoint_interval + K
+
+        # Validate boundary projections: require both or neither
+        if (proj_start is None) != (proj_end is None):
+            raise ValueError(
+                "Triton kernels require both proj_start and proj_end, or neither. "
+                f"Got proj_start={'provided' if proj_start is not None else 'None'}, "
+                f"proj_end={'provided' if proj_end is not None else 'None'}. "
+                "Use semi_crf_streaming_forward() for automatic PyTorch fallback."
+            )
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
@@ -1524,7 +1575,9 @@ if HAS_TRITON:
             lengths (Tensor): Sequence lengths of shape :math:`(\text{batch},)`.
             log_Z (Tensor): Partition values from forward of shape :math:`(\text{batch},)`.
             ring_checkpoints (Tensor): Saved ring buffer states of shape
-                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`.
+                :math:`(\text{batch}, \text{num\_ckpts}, K, C)`. The class
+                dimension must be ``C`` (not ``C_PAD``); the forward launcher
+                trims padding before returning checkpoints.
             log_norm_checkpoints (Tensor): Cumulative log normalization factors of shape
                 :math:`(\text{batch}, \text{num\_ckpts})`. Required for numerical stability
                 at extreme sequence lengths.

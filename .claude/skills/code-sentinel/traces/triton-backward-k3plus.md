@@ -1,6 +1,6 @@
 # Sentinel: Triton Backward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_backward.py` @ commit `e75e1ee`
+**Verified against:** `src/flash_semicrf/streaming/triton_backward.py` @ commit `559cebd`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -25,7 +25,7 @@ The Triton backward kernel computes gradients for the Semi-CRF partition functio
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
 | `SemiCRFStreamingTriton.backward()` | autograd.py:219 | Backward through SemiCRFStreamingTriton |
-| `launch_streaming_triton_backward()` | triton_backward.py:879 | Main launcher |
+| `launch_streaming_triton_backward()` | triton_backward.py:1126 | Main launcher |
 | `semi_crf_streaming_backward_kernel()` | triton_backward.py:54 | The Triton kernel |
 
 ## Data Flow
@@ -37,7 +37,7 @@ Inputs (from forward):
   duration_bias: (K, C)                  <- Original input
   lengths: (B,)                          <- Original input
   log_Z: (B,)                            <- Partition from forward
-  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved ring states (normalized)
+  ring_checkpoints: (B, num_ckpts, K, C_PAD) <- Saved ring states (normalized). The class dimension must be C (not C_PAD); forward trims padding.
   log_norm_checkpoints: (B, num_ckpts)   <- Cumulative normalization factors
   grad_output: (B,)                      <- Upstream gradient
 
@@ -115,6 +115,26 @@ for t in range(seg_end-1, seg_start-1, -1):  # t = seg_end-1, ..., seg_start
         grad_cum_scores[t:t+k] += marginal
         grad_tr_workspace[ckpt_idx] += marginal  # Segment-isolated atomic
         grad_db_workspace[ckpt_idx] += marginal  # Segment-isolated atomic
+```
+
+## Input Validation (Added `559cebd`)
+
+The launcher (`launch_streaming_triton_backward` at line 1223) now calls `validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)` at entry.
+
+Additionally, checkpoint tensors are validated (lines 1225-1259):
+
+- `ring_checkpoints` must be 4D `(batch, num_ckpts, K, C)`
+- `log_norm_checkpoints` must be 2D `(batch, num_ckpts)`
+- Batch dims must match
+- Checkpoint counts must match between ring and log_norm
+- `ring_checkpoints` K dim must equal K
+- `ring_checkpoints` class dim must equal C (not C_PAD -- forward trims padding)
+
+Boundary projections require both or neither (lines 1266-1275):
+
+```python
+if (proj_start is None) != (proj_end is None):
+    raise ValueError("Triton kernels require both proj_start and proj_end, or neither.")
 ```
 
 ## Memory Barriers (Warp Synchronization)
@@ -258,6 +278,8 @@ grad_duration_bias = torch.einsum("bkc, b -> kc", grad_db_workspace, grad_output
 | Non-deterministic gradients | Critical | Multi-segment backward | Per-segment workspaces eliminate cross-segment atomic contention | `0c9b73e` |
 | Missing memory barriers | Critical | Multi-warp execution | 3 tl.debug_barrier() calls added | `9dfa110` |
 | Non-power-of-2 C stride OOB | Critical | C_PAD > C | Safe index clamping (`tl.minimum(idx, C-1)`) for C-shaped tensor loads/stores | `e75e1ee` |
+| Single boundary not supported | Medium | proj_start XOR proj_end | Raise ValueError in launcher; dispatch auto-falls back in `semi_crf_streaming_forward` | `559cebd` |
+| Checkpoint C_PAD vs C mismatch | Critical | ring_checkpoints.shape[3] != C | Forward trims to C before returning; backward validates C dim | `559cebd` |
 
 ## Debugging: Gradient Mismatch
 
@@ -298,6 +320,7 @@ if not torch.isfinite(grad_cum_scores_ws).all():
 
 ## Version History
 
+- **2026-02-13**: Added `validate_streaming_shapes()` call at launcher entry (line 1223); added checkpoint tensor validation (lines 1225-1259) checking shapes, batch dims, checkpoint counts, K dim, and C dim; added boundary projection both-or-neither validation (lines 1266-1275); clarified ring_checkpoints class dim must be C not C_PAD; updated launcher line to 1126; updated to `559cebd`
 - **2026-02-12**: Fixed stride bug for non-power-of-2 C values (analogous to forward kernel safe index clamping); updated autograd.py line numbers for max semiring guard additions; updated to commit `e75e1ee`
 - **2026-02-05**: Migrated all internal computation to float64; added 3 memory barriers (tl.debug_barrier) for warp synchronization: post-checkpoint load (line 366), beta ring store (line 1070), end-of-segment sync (line 1072); documented barrier failure modes; updated to commit `9dfa110`
 - **2026-02-02**: Deterministic gradient accumulation via per-segment workspaces; workspace shapes now `(B, num_segments, ...)` instead of `(B, ...)`; each segment writes to its own slice eliminating cross-segment atomic contention; host-side `.sum(dim=1)` is deterministic; updated to commit `b05260f`

@@ -1,10 +1,11 @@
 r"""Autograd functions and public API for streaming Semi-CRF."""
 
+import warnings
 from typing import Optional
 
 import torch
 
-from ..validation import validate_cum_scores, validate_lengths
+from ..validation import validate_cum_scores, validate_lengths, validate_streaming_shapes
 from .pytorch_reference import (
     linear_crf_backward_pytorch,
     linear_crf_forward_pytorch,
@@ -594,6 +595,7 @@ def semi_crf_streaming_forward(
     batch, T_plus_1, C = cum_scores.shape
     T = T_plus_1 - 1
     validate_lengths(lengths, T, batch_size=batch)
+    validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)
 
     # Determine if gradients are needed
     # Gate on torch.is_grad_enabled() so torch.no_grad() with trainable params
@@ -668,9 +670,22 @@ def semi_crf_streaming_forward(
                 return semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths)
 
     # =========================================================================
-    # K>=3: Triton streaming kernel (ring buffer architecture)
+    # Generic path: Triton (K>=3 only) or PyTorch fallback
     # =========================================================================
-    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda and K >= 3
+
+    # Single-boundary: Triton requires both proj_start and proj_end.
+    # Fall back to PyTorch path which handles each independently.
+    _single_boundary = (proj_start is None) != (proj_end is None)
+    if _single_boundary and can_use_triton:
+        warnings.warn(
+            f"Only one boundary tensor provided (K={K}, device={cum_scores.device}); "
+            "falling back to PyTorch path. Pass both proj_start and proj_end "
+            "for Triton acceleration.",
+            UserWarning,
+            stacklevel=2,
+        )
+        can_use_triton = False
 
     if needs_grad:
         # Training path

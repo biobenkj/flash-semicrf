@@ -1407,6 +1407,7 @@ class TestGradientScalingBugFix:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+@pytest.mark.diagnostic
 class TestTritonBackwardDebug:
     """Debug tests to diagnose Triton vs PyTorch gradient mismatches."""
 

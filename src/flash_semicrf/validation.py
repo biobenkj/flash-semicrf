@@ -1,10 +1,21 @@
 r"""Input validation utilities for Semi-Markov CRF."""
 
+import numbers
 import warnings
 from typing import Optional
 
 import torch
 from torch import Tensor
+
+_INT_DTYPES = frozenset(
+    {
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+)
 
 __all__ = [
     "validate_hidden_states",
@@ -12,6 +23,7 @@ __all__ = [
     "validate_labels",
     "validate_cum_scores",
     "validate_device_consistency",
+    "validate_streaming_shapes",
 ]
 
 
@@ -57,7 +69,8 @@ def validate_lengths(
         name (str, optional): Name for error messages. Default: ``"lengths"``
 
     Raises:
-        ValueError: If not 1D, non-positive, exceeds max_length, or wrong batch size.
+        ValueError: If not 1D, wrong batch size, non-integral values,
+            non-positive values, or values exceed ``max_length``.
     """
     if lengths.ndim != 1:
         raise ValueError(f"{name} must be 1D, got {lengths.ndim}D")
@@ -65,6 +78,38 @@ def validate_lengths(
     if batch_size is not None and lengths.shape[0] != batch_size:
         raise ValueError(
             f"{name} batch size {lengths.shape[0]} doesn't match expected {batch_size}"
+        )
+
+    # Dtype contract:
+    # - Integer dtypes are accepted directly.
+    # - Bool is rejected (not a meaningful length type).
+    # - Non-integer dtypes are accepted only if values are integral, with warning.
+    if lengths.dtype == torch.bool:
+        raise ValueError(f"{name} must contain integral length values, got dtype torch.bool")
+
+    if lengths.dtype not in _INT_DTYPES:
+        if torch.is_complex(lengths):
+            raise ValueError(
+                f"{name} must contain integral values, got complex dtype {lengths.dtype}"
+            )
+
+        lengths_f64 = lengths.to(torch.float64)
+        if not torch.isfinite(lengths_f64).all():
+            raise ValueError(f"{name} must be finite, got non-finite values")
+
+        is_integral = lengths_f64 == torch.round(lengths_f64)
+        if not bool(is_integral.all()):
+            bad_vals = lengths_f64[~is_integral]
+            first_bad = bad_vals[0].item()
+            raise ValueError(
+                f"{name} must contain integral values, got non-integral value {first_bad}"
+            )
+
+        warnings.warn(
+            f"{name} has non-integer dtype {lengths.dtype}; values are integral and accepted. "
+            "Values are cast to int32 in Triton kernels.",
+            UserWarning,
+            stacklevel=3,
         )
 
     # Check for non-positive lengths
@@ -186,3 +231,91 @@ def validate_device_consistency(
         else:
             device_map = {f"tensor_{i}": d for i, d in enumerate(devices)}
         raise ValueError(f"Device mismatch: {device_map}")
+
+
+def validate_streaming_shapes(
+    K: int,
+    C: int,
+    batch: int,
+    T: int,
+    transition: Tensor,
+    duration_bias: Tensor,
+    proj_start: Optional[Tensor] = None,
+    proj_end: Optional[Tensor] = None,
+) -> None:
+    r"""Validate shape consistency of streaming Semi-CRF inputs.
+
+    Ensures that ``K``, ``duration_bias``, ``transition``, and optional
+    boundary projections are mutually consistent with the ``(batch, T+1, C)``
+    shape of ``cum_scores``. This prevents undefined Triton memory access
+    on shape-mismatched inputs.
+
+    Args:
+        K (int): Maximum segment duration. Must be a positive integer
+            (not ``bool``).
+        C (int): Number of classes (from ``cum_scores.shape[2]``).
+        batch (int): Batch size (from ``cum_scores.shape[0]``).
+        T (int): Sequence length (``cum_scores.shape[1] - 1``).
+        transition (Tensor): Transition scores of shape :math:`(C, C)` for
+            static transitions, or :math:`(K, C, C)` for duration-dependent.
+        duration_bias (Tensor): Duration-specific bias of shape :math:`(K, C)`.
+        proj_start (Tensor, optional): Start boundary scores of shape
+            :math:`(\text{batch}, T, C)`. Default: ``None``
+        proj_end (Tensor, optional): End boundary scores of shape
+            :math:`(\text{batch}, T, C)`. Default: ``None``
+
+    Raises:
+        ValueError: If any shape contract is violated.
+    """
+    # K: integral, not bool, >= 1
+    if isinstance(K, bool) or not isinstance(K, numbers.Integral):
+        raise ValueError(f"K must be a positive integer, got {type(K).__name__}({K!r})")
+    if K < 1:
+        raise ValueError(f"K must be a positive integer, got {K}")
+
+    # duration_bias: (K, C)
+    if duration_bias.ndim != 2:
+        raise ValueError(f"duration_bias must be 2D (K, C), got {duration_bias.ndim}D")
+    if duration_bias.shape[0] != K:
+        raise ValueError(f"duration_bias.shape[0] must equal K={K}, got {duration_bias.shape[0]}")
+    if duration_bias.shape[1] != C:
+        raise ValueError(f"duration_bias.shape[1] must equal C={C}, got {duration_bias.shape[1]}")
+
+    # transition: (C, C) or (K, C, C)
+    if transition.ndim == 2:
+        if transition.shape != (C, C):
+            raise ValueError(
+                f"transition must be (C, C) = ({C}, {C}), got {tuple(transition.shape)}"
+            )
+    elif transition.ndim == 3:
+        if transition.shape[0] != K:
+            raise ValueError(
+                f"duration-dependent transition.shape[0] must equal K={K}, "
+                f"got {transition.shape[0]}"
+            )
+        if transition.shape[1] != C or transition.shape[2] != C:
+            raise ValueError(
+                f"transition must be (K, C, C) = ({K}, {C}, {C}), " f"got {tuple(transition.shape)}"
+            )
+    else:
+        raise ValueError(f"transition must be 2D (C, C) or 3D (K, C, C), got {transition.ndim}D")
+
+    # proj_start: (batch, T, C) if provided
+    if proj_start is not None:
+        if proj_start.ndim != 3:
+            raise ValueError(f"proj_start must be 3D (batch, T, C), got {proj_start.ndim}D")
+        if proj_start.shape != (batch, T, C):
+            raise ValueError(
+                f"proj_start shape must be (batch, T, C) = ({batch}, {T}, {C}), "
+                f"got {tuple(proj_start.shape)}"
+            )
+
+    # proj_end: (batch, T, C) if provided
+    if proj_end is not None:
+        if proj_end.ndim != 3:
+            raise ValueError(f"proj_end must be 3D (batch, T, C), got {proj_end.ndim}D")
+        if proj_end.shape != (batch, T, C):
+            raise ValueError(
+                f"proj_end shape must be (batch, T, C) = ({batch}, {T}, {C}), "
+                f"got {tuple(proj_end.shape)}"
+            )

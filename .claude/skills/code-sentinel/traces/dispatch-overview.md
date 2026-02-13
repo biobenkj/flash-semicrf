@@ -1,7 +1,7 @@
 # Sentinel: Dispatch Overview
 
 **Verified against:**
-- `src/flash_semicrf/streaming/autograd.py` @ commit `e45c7f1`
+- `src/flash_semicrf/streaming/autograd.py` @ commit `559cebd`
 - `src/flash_semicrf/semimarkov.py` @ commit `ebdfcba`
 
 **Linked tests:** `tests/test_streaming_triton.py::TestDispatch`, `tests/test_semimarkov.py`
@@ -85,6 +85,8 @@ graph TD
     V --> Z
 ```
 
+**Note:** `can_use_triton` now also requires `K >= 3` (line 675), and is set to `False` if only one boundary tensor is provided (lines 679-688).
+
 ## Decision Tree: Non-Streaming API
 
 **Entry:** `SemiMarkov(semiring).logpartition()` at `semimarkov.py:35`
@@ -143,15 +145,31 @@ The non-streaming API supports Log, Max, Std, KMax, Entropy, CrossEntropy, and K
 
 ## Streaming Dispatch Conditions
 
-### can_use_triton (line 673)
+### can_use_triton (line 675)
 
 ```python
-can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda and K >= 3
 ```
 
 - `HAS_TRITON`: Triton import succeeded (line 20-26)
 - `use_triton`: User parameter (default True)
 - `cum_scores.is_cuda`: Input is on GPU
+- `K >= 3`: Triton kernels only support K >= 3 (K=1/K=2 use specialized paths)
+
+### Single-Boundary Fallback (lines 679-688)
+
+```python
+_single_boundary = (proj_start is None) != (proj_end is None)
+if _single_boundary and can_use_triton:
+    warnings.warn(
+        f"Only one boundary tensor provided (K={K}, device={cum_scores.device}); "
+        "falling back to PyTorch path.",
+        UserWarning, stacklevel=2,
+    )
+    can_use_triton = False
+```
+
+Triton kernels require both boundary tensors or neither. Single-boundary inputs get a `UserWarning` and fall back to PyTorch (which handles each independently).
 
 ### needs_grad (lines 599-606)
 
@@ -188,6 +206,7 @@ if semiring == "max" and needs_grad:
 | 2 | any | any | yes | no | SemiCRFK2Streaming | k2-fast-path.md |
 | 2 | any | any | no | no | semi_crf_k2_*_pytorch | k2-fast-path.md |
 | 2 | any | any | any | yes | K>=3 path | (see below) |
+| >=3 | GPU | yes | any | single | PyTorch fallback (warn) | pytorch-forward-k3plus.md |
 | >=3 | GPU | yes | yes | any | SemiCRFStreamingTriton | triton-forward-k3plus.md |
 | >=3 | GPU | yes | no | any | launch_streaming_triton_kernel | triton-forward-k3plus.md |
 | >=3 | CPU | any | yes | any | SemiCRFStreaming | pytorch-forward-k3plus.md |
@@ -221,13 +240,13 @@ if semiring == "max" and needs_grad:
 
 | Function | Line | Called When |
 |----------|------|-------------|
-| `semi_crf_streaming_forward()` | 498 | Public API entry point |
-| `LinearCRFStreaming.apply()` | 627 | K=1, needs_grad, no boundaries |
-| `SemiCRFK2Streaming.apply()` | 653 | K=2, needs_grad, no boundaries |
-| `SemiCRFStreamingTriton.apply()` | 679 | K>=3, GPU, Triton, needs_grad |
-| `SemiCRFStreaming.apply()` | 693 | K>=3, no Triton, needs_grad |
-| `launch_streaming_triton_kernel()` | 706 | K>=3, GPU, Triton, inference |
-| `semi_crf_streaming_forward_pytorch()` | 720 | K>=3, CPU, inference |
+| `semi_crf_streaming_forward()` | 499 | Public API entry point |
+| `LinearCRFStreaming.apply()` | 629 | K=1, needs_grad, no boundaries |
+| `SemiCRFK2Streaming.apply()` | 655 | K=2, needs_grad, no boundaries |
+| `SemiCRFStreamingTriton.apply()` | 694 | K>=3, GPU, Triton, needs_grad |
+| `SemiCRFStreaming.apply()` | 708 | K>=3, no Triton, needs_grad |
+| `launch_streaming_triton_kernel()` | 723 | K>=3, GPU, Triton, inference |
+| `semi_crf_streaming_forward_pytorch()` | 738 | K>=3, CPU, inference |
 
 ### Non-Streaming API (semimarkov.py)
 
@@ -276,6 +295,7 @@ if semiring == "max" and needs_grad:
 | autograd.py:~448 | `torch.isfinite(partition)` | Validate partition before K=2 backward |
 | autograd.py:~121 | `torch.isfinite(grad_cum_scores)` | Validate PyTorch backward output |
 | autograd.py:~264 | `torch.isfinite(grad_*)` | Validate Triton backward outputs |
+| autograd.py:598 | `validate_streaming_shapes(...)` | Validate tensor shapes before dispatch |
 | autograd.py:610-616 | `semiring == "max" and needs_grad` | Reject Viterbi in grad-enabled context |
 
 ## Known Issues
@@ -284,9 +304,11 @@ if semiring == "max" and needs_grad:
 |-------|----------|-----------|------------|--------|
 | K=1/K=2 ring buffer aliasing | Critical | Always with K<3 | Dispatch to specialized paths | `870bd1f` |
 | Boundaries force K>=3 path | Medium | When boundaries used with K<3 | Document; specialized paths don't support boundaries | - |
+| Single boundary Triton fallback | Low | Boundary XOR provided with K>=3 GPU | UserWarning + PyTorch fallback | `559cebd` |
 
 ## Version History
 
+- **2026-02-13**: `can_use_triton` now includes `K >= 3` (line 675); added single-boundary Triton fallback with UserWarning (lines 679-688); added `validate_streaming_shapes()` at dispatch entry (line 598); updated all streaming entry point line numbers; autograd.py to `559cebd`
 - **2026-02-12**: Updated `needs_grad` to gate on `torch.is_grad_enabled()` (line 601); documented max semiring ValueError guard (line 610); updated all entry point and numerical guard line numbers; autograd.py to `e45c7f1`, semimarkov.py to `ebdfcba`
 - **2026-02-09**: Updated autograd.py commit (STAGED): float32→float64 in docstrings, cum_scores invariant relaxed to accept float64
 - **2026-02-09**: Corrected duration indexing to document mixed convention (binary tree 1-based, scan 0-based); added Semiring Availability table; updated semimarkov.py to commit `f9298c5`
