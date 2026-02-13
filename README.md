@@ -190,7 +190,7 @@ For performance characteristics, see [Benchmarking](docs/reference/benchmarks.md
 - [Backends and Triton kernel](docs/reference/backends.md) — algorithm selection and GPU acceleration
 - [API reference](docs/reference/api.md) — detailed API documentation
 - [Benchmarking](docs/reference/benchmarks.md) — performance measurement
-- [FAQ] (docs/faq) - background and frequently asked questions
+- [FAQ](docs/faq) — background and frequently asked questions
 - [AI disclosure](docs/disclosure.md)
 
 ## Testing
