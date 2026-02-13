@@ -9,6 +9,8 @@ Includes manual oracle tests that enumerate all valid segmentations
 for small configurations to verify partition computation.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -682,3 +684,319 @@ class TestKBoundaryTransitions:
             atol=1e-5,
             msg="CPU dispatch should use PyTorch reference",
         )
+
+
+# =============================================================================
+# K<3 + Boundary Dispatch Tests (bug fix verification)
+# =============================================================================
+
+
+def _make_boundaries(batch, T, C, mode, device="cpu"):
+    """Create boundary tensors based on mode.
+
+    Args:
+        mode: "both", "start_only", or "end_only"
+
+    Returns:
+        (proj_start, proj_end) tuple with None for missing boundaries.
+    """
+    proj_start = torch.randn(batch, T, C, device=device) * 0.1 if mode != "end_only" else None
+    proj_end = torch.randn(batch, T, C, device=device) * 0.1 if mode != "start_only" else None
+    return proj_start, proj_end
+
+
+@pytest.mark.parametrize("K", [1, 2], ids=["K1", "K2"])
+@pytest.mark.parametrize(
+    "boundary_mode", ["both", "start_only", "end_only"], ids=["both", "start_only", "end_only"]
+)
+class TestKLessThan3BoundaryDispatch:
+    """Verify K<3 with boundary projections dispatches correctly.
+
+    Regression tests for the fall-through bug where K<3 + boundaries
+    could reach Triton kernels that require K>=3 (ring buffer aliasing).
+    """
+
+    def test_forward_matches_reference(self, K, boundary_mode):
+        """Dispatch forward matches semi_crf_streaming_forward_pytorch."""
+        batch, T, C = 2, 20, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode)
+
+        # Dispatch path
+        result = semi_crf_streaming_forward(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
+            use_triton=False,
+        )
+
+        # True reference
+        expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
+        )
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: dispatch forward != reference",
+        )
+
+    def test_gradient_matches_reference(self, K, boundary_mode):
+        """Dispatch gradients match SemiCRFStreaming.apply() called directly."""
+        from flash_semicrf.streaming.autograd import SemiCRFStreaming
+
+        batch, T, C = 2, 15, 3
+        torch.manual_seed(42)
+
+        def _make_grad_inputs():
+            cs, tr, db, lengths = create_streaming_inputs(batch, T, K, C)
+            ps, pe = _make_boundaries(batch, T, C, boundary_mode)
+            cs.requires_grad_(True)
+            tr.requires_grad_(True)
+            db.requires_grad_(True)
+            if ps is not None:
+                ps.requires_grad_(True)
+            if pe is not None:
+                pe.requires_grad_(True)
+            return cs, tr, db, lengths, ps, pe
+
+        # Reference: call SemiCRFStreaming.apply() directly
+        torch.manual_seed(42)
+        cs_ref, tr_ref, db_ref, lengths, ps_ref, pe_ref = _make_grad_inputs()
+        ref_partition = SemiCRFStreaming.apply(
+            cs_ref,
+            tr_ref,
+            db_ref,
+            lengths,
+            K,
+            "log",
+            ps_ref,
+            pe_ref,
+            None,
+        )
+        ref_partition.sum().backward()
+
+        # Dispatch path
+        torch.manual_seed(42)
+        cs_disp, tr_disp, db_disp, lengths, ps_disp, pe_disp = _make_grad_inputs()
+        disp_partition = semi_crf_streaming_forward(
+            cs_disp,
+            tr_disp,
+            db_disp,
+            lengths,
+            K,
+            proj_start=ps_disp,
+            proj_end=pe_disp,
+            use_triton=False,
+        )
+        disp_partition.sum().backward()
+
+        # Compare forward values
+        torch.testing.assert_close(
+            disp_partition,
+            ref_partition,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: dispatch partition != reference",
+        )
+
+        # Compare gradients
+        torch.testing.assert_close(
+            cs_disp.grad,
+            cs_ref.grad,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: cum_scores grad mismatch",
+        )
+        torch.testing.assert_close(
+            tr_disp.grad,
+            tr_ref.grad,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: transition grad mismatch",
+        )
+        torch.testing.assert_close(
+            db_disp.grad,
+            db_ref.grad,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: duration_bias grad mismatch",
+        )
+        if ps_disp is not None:
+            torch.testing.assert_close(
+                ps_disp.grad,
+                ps_ref.grad,
+                rtol=1e-5,
+                atol=1e-5,
+                msg=f"K={K} {boundary_mode}: proj_start grad mismatch",
+            )
+        if pe_disp is not None:
+            torch.testing.assert_close(
+                pe_disp.grad,
+                pe_ref.grad,
+                rtol=1e-5,
+                atol=1e-5,
+                msg=f"K={K} {boundary_mode}: proj_end grad mismatch",
+            )
+
+    def test_max_semiring_inference(self, K, boundary_mode):
+        """Max semiring (Viterbi) inference works for K<3 + boundaries."""
+        batch, T, C = 2, 20, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(batch, T, K, C)
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode)
+
+        with torch.no_grad():
+            result = semi_crf_streaming_forward(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                semiring="max",
+                proj_start=proj_start,
+                proj_end=proj_end,
+                use_triton=False,
+            )
+
+            expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                semiring="max",
+                proj_start=proj_start,
+                proj_end=proj_end,
+            )
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K={K} {boundary_mode}: max semiring dispatch != reference",
+        )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
+    def test_triton_not_called_inference(self, K, boundary_mode):
+        """K<3 + boundaries on CUDA must NOT dispatch to Triton (inference)."""
+        batch, T, C = 2, 20, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+            device="cuda",
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode, device="cuda")
+
+        # Reference on same device
+        with torch.no_grad():
+            expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=proj_end,
+            )
+
+        # Dispatch with fail-fast mock: Triton must not be called
+        with patch(
+            "flash_semicrf.streaming.autograd.launch_streaming_triton_kernel",
+            side_effect=AssertionError("Triton should not be called for K<3 with boundaries"),
+        ):
+            with torch.no_grad():
+                result = semi_crf_streaming_forward(
+                    cum_scores,
+                    transition,
+                    duration_bias,
+                    lengths,
+                    K,
+                    proj_start=proj_start,
+                    proj_end=proj_end,
+                    use_triton=True,
+                )
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"K={K} {boundary_mode}: CUDA inference result != reference",
+        )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
+    def test_triton_not_called_grad(self, K, boundary_mode):
+        """K<3 + boundaries on CUDA must NOT dispatch to Triton (grad)."""
+        batch, T, C = 2, 15, 3
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+            device="cuda",
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode, device="cuda")
+
+        # Reference forward
+        expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
+        )
+
+        # Dispatch with fail-fast mock: Triton autograd must not be called
+        cum_scores.requires_grad_(True)
+        if proj_start is not None:
+            proj_start.requires_grad_(True)
+        if proj_end is not None:
+            proj_end.requires_grad_(True)
+
+        with patch(
+            "flash_semicrf.streaming.autograd.SemiCRFStreamingTriton.apply",
+            side_effect=AssertionError("Triton should not be called for K<3 with boundaries"),
+        ):
+            result = semi_crf_streaming_forward(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=proj_end,
+                use_triton=True,
+            )
+            result.sum().backward()
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"K={K} {boundary_mode}: CUDA grad result != reference",
+        )
+        assert torch.isfinite(
+            cum_scores.grad
+        ).all(), f"K={K} {boundary_mode}: cum_scores grad not finite"

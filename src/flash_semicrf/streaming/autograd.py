@@ -668,9 +668,9 @@ def semi_crf_streaming_forward(
                 return semi_crf_k2_forward_pytorch(cum_scores, transition, duration_bias, lengths)
 
     # =========================================================================
-    # K>=3: Triton streaming kernel (ring buffer architecture)
+    # Generic path: Triton (K>=3 only) or PyTorch fallback
     # =========================================================================
-    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+    can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda and K >= 3
 
     if needs_grad:
         # Training path
