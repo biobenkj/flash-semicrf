@@ -1187,6 +1187,11 @@ if HAS_TRITON:
                 - **boundary_marginals** (Tensor or None): Boundary marginal probabilities of shape
                   :math:`(\text{batch}, T)` if ``return_boundary_marginals=True``, else ``None``.
 
+        .. note::
+            Requires both or neither boundary tensor (proj_start, proj_end).
+            For single-boundary support, use :func:`semi_crf_streaming_forward`
+            which automatically falls back to the PyTorch path.
+
         See Also:
             :func:`launch_streaming_triton_kernel`: Forward pass that produces checkpoints
                 for this backward pass.
@@ -1220,6 +1225,15 @@ if HAS_TRITON:
 
         # Compute segment size for alpha buffer
         segment_size = checkpoint_interval + K
+
+        # Validate boundary projections: require both or neither
+        if (proj_start is None) != (proj_end is None):
+            raise ValueError(
+                "Triton kernels require both proj_start and proj_end, or neither. "
+                f"Got proj_start={'provided' if proj_start is not None else 'None'}, "
+                f"proj_end={'provided' if proj_end is not None else 'None'}. "
+                "Use semi_crf_streaming_forward() for automatic PyTorch fallback."
+            )
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None

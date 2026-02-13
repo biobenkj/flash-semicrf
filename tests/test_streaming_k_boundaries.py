@@ -9,6 +9,7 @@ Includes manual oracle tests that enumerate all valid segmentations
 for small configurations to verify partition computation.
 """
 
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +27,11 @@ from flash_semicrf.streaming.pytorch_reference import (
 
 if HAS_TRITON:
     from flash_semicrf.streaming import launch_streaming_triton_kernel
+    from flash_semicrf.streaming.triton_backward import (
+        launch_streaming_triton_backward,
+        launch_streaming_triton_marginals,
+    )
+    from flash_semicrf.streaming.triton_forward import launch_streaming_triton_kernel_max_bp
 
 
 def create_streaming_inputs(batch, T, K, C, device="cpu", dtype=torch.float32, seed=42):
@@ -1000,3 +1006,341 @@ class TestKLessThan3BoundaryDispatch:
         assert torch.isfinite(
             cum_scores.grad
         ).all(), f"K={K} {boundary_mode}: cum_scores grad not finite"
+
+
+# =============================================================================
+# Single-Boundary Triton Guard Tests (or/and inconsistency fix)
+# =============================================================================
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
+class TestTritonLauncherSingleBoundaryRaises:
+    """Triton launchers must raise ValueError for single-boundary direct calls."""
+
+    def _make_forward_inputs(self, K=5):
+        batch, T, C = 2, 20, 4
+        cs, tr, db, lengths = create_streaming_inputs(batch, T, K, C, device="cuda")
+        return cs, tr, db, lengths, batch, T, C, K
+
+    def test_triton_forward_single_start_raises(self):
+        cs, tr, db, lengths, batch, T, C, K = self._make_forward_inputs()
+        proj_start = torch.randn(batch, T, C, device="cuda") * 0.1
+        with pytest.raises(ValueError, match="both proj_start and proj_end"):
+            launch_streaming_triton_kernel(
+                cs,
+                tr,
+                db,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=None,
+            )
+
+    def test_triton_forward_single_end_raises(self):
+        cs, tr, db, lengths, batch, T, C, K = self._make_forward_inputs()
+        proj_end = torch.randn(batch, T, C, device="cuda") * 0.1
+        with pytest.raises(ValueError, match="both proj_start and proj_end"):
+            launch_streaming_triton_kernel(
+                cs,
+                tr,
+                db,
+                lengths,
+                K,
+                proj_start=None,
+                proj_end=proj_end,
+            )
+
+    def test_triton_max_bp_single_boundary_raises(self):
+        cs, tr, db, lengths, batch, T, C, K = self._make_forward_inputs()
+        proj_start = torch.randn(batch, T, C, device="cuda") * 0.1
+        with pytest.raises(ValueError, match="both proj_start and proj_end"):
+            launch_streaming_triton_kernel_max_bp(
+                cs,
+                tr,
+                db,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=None,
+            )
+
+    def test_triton_backward_single_boundary_raises(self):
+        cs, tr, db, lengths, batch, T, C, K = self._make_forward_inputs()
+        # Run forward to get checkpoints needed for backward
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
+            cs,
+            tr,
+            db,
+            lengths,
+            K,
+        )
+        grad_output = torch.ones(batch, device="cuda")
+        proj_start = torch.randn(batch, T, C, device="cuda") * 0.1
+        with pytest.raises(ValueError, match="both proj_start and proj_end"):
+            launch_streaming_triton_backward(
+                cs,
+                tr,
+                db,
+                lengths,
+                log_Z,
+                ring_ckpts,
+                log_norm_ckpts,
+                interval,
+                grad_output,
+                proj_start=proj_start,
+                proj_end=None,
+            )
+
+    def test_triton_marginals_single_boundary_raises(self):
+        """launch_streaming_triton_marginals delegates to backward; guard propagates."""
+        cs, tr, db, lengths, batch, T, C, K = self._make_forward_inputs()
+        log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
+            cs,
+            tr,
+            db,
+            lengths,
+            K,
+        )
+        proj_end = torch.randn(batch, T, C, device="cuda") * 0.1
+        with pytest.raises(ValueError, match="both proj_start and proj_end"):
+            launch_streaming_triton_marginals(
+                cs,
+                tr,
+                db,
+                lengths,
+                log_Z,
+                ring_ckpts,
+                log_norm_ckpts,
+                interval,
+                proj_start=None,
+                proj_end=proj_end,
+            )
+
+
+@pytest.mark.parametrize(
+    "boundary_mode", ["start_only", "end_only"], ids=["start_only", "end_only"]
+)
+class TestSingleBoundaryDispatchFallback:
+    """K>=3 single-boundary dispatch falls back to PyTorch with correct results."""
+
+    def test_single_boundary_dispatch_matches_reference(self, boundary_mode):
+        """Dispatch with single boundary matches PyTorch reference (CPU)."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode)
+
+        result = semi_crf_streaming_forward(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
+            use_triton=False,
+        )
+
+        expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            proj_start=proj_start,
+            proj_end=proj_end,
+        )
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K>=3 {boundary_mode}: dispatch != reference",
+        )
+
+    def test_single_boundary_dispatch_grad_matches_reference(self, boundary_mode):
+        """Dispatch gradients match reference for single boundary, semiring='log'."""
+        from flash_semicrf.streaming.autograd import SemiCRFStreaming
+
+        batch, T, K, C = 2, 20, 5, 3
+
+        def _make_grad_inputs():
+            torch.manual_seed(42)
+            cs, tr, db, lengths = create_streaming_inputs(batch, T, K, C)
+            ps, pe = _make_boundaries(batch, T, C, boundary_mode)
+            cs.requires_grad_(True)
+            tr.requires_grad_(True)
+            db.requires_grad_(True)
+            if ps is not None:
+                ps.requires_grad_(True)
+            if pe is not None:
+                pe.requires_grad_(True)
+            return cs, tr, db, lengths, ps, pe
+
+        # Reference
+        cs_ref, tr_ref, db_ref, lengths, ps_ref, pe_ref = _make_grad_inputs()
+        ref_part = SemiCRFStreaming.apply(
+            cs_ref,
+            tr_ref,
+            db_ref,
+            lengths,
+            K,
+            "log",
+            ps_ref,
+            pe_ref,
+            None,
+        )
+        ref_part.sum().backward()
+
+        # Dispatch
+        cs_disp, tr_disp, db_disp, lengths, ps_disp, pe_disp = _make_grad_inputs()
+        disp_part = semi_crf_streaming_forward(
+            cs_disp,
+            tr_disp,
+            db_disp,
+            lengths,
+            K,
+            semiring="log",
+            proj_start=ps_disp,
+            proj_end=pe_disp,
+            use_triton=False,
+        )
+        disp_part.sum().backward()
+
+        torch.testing.assert_close(
+            disp_part,
+            ref_part,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K>=3 {boundary_mode}: partition mismatch",
+        )
+        torch.testing.assert_close(
+            cs_disp.grad,
+            cs_ref.grad,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"K>=3 {boundary_mode}: cum_scores grad mismatch",
+        )
+
+    def test_single_boundary_dispatch_no_warn_cpu(self, boundary_mode):
+        """No warning when single-boundary on CPU (use_triton irrelevant)."""
+        batch, T, K, C = 2, 20, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            semi_crf_streaming_forward(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=proj_end,
+                use_triton=False,
+            )
+
+        boundary_warnings = [x for x in w if "Only one boundary tensor provided" in str(x.message)]
+        assert len(boundary_warnings) == 0, "No warning expected on CPU with use_triton=False"
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
+    def test_single_boundary_dispatch_warns(self, boundary_mode):
+        """Warning emitted when single-boundary would use Triton (CUDA)."""
+        batch, T, K, C = 2, 20, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+            device="cuda",
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode, device="cuda")
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with torch.no_grad():
+                semi_crf_streaming_forward(
+                    cum_scores,
+                    transition,
+                    duration_bias,
+                    lengths,
+                    K,
+                    proj_start=proj_start,
+                    proj_end=proj_end,
+                    use_triton=True,
+                )
+
+        boundary_warnings = [
+            x
+            for x in w
+            if issubclass(x.category, UserWarning)
+            and "Only one boundary tensor provided" in str(x.message)
+        ]
+        assert (
+            len(boundary_warnings) == 1
+        ), f"Expected exactly 1 UserWarning, got {len(boundary_warnings)}"
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @pytest.mark.skipif(not HAS_TRITON, reason="Triton required")
+    def test_single_boundary_triton_not_called(self, boundary_mode):
+        """K>=3 single-boundary on CUDA must NOT dispatch to Triton."""
+        batch, T, K, C = 2, 20, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch,
+            T,
+            K,
+            C,
+            device="cuda",
+        )
+        proj_start, proj_end = _make_boundaries(batch, T, C, boundary_mode, device="cuda")
+
+        with torch.no_grad():
+            expected, _, _, _ = semi_crf_streaming_forward_pytorch(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                proj_start=proj_start,
+                proj_end=proj_end,
+            )
+
+        with patch(
+            "flash_semicrf.streaming.autograd.launch_streaming_triton_kernel",
+            side_effect=AssertionError("Triton should not be called for single boundary"),
+        ):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with torch.no_grad():
+                    result = semi_crf_streaming_forward(
+                        cum_scores,
+                        transition,
+                        duration_bias,
+                        lengths,
+                        K,
+                        proj_start=proj_start,
+                        proj_end=proj_end,
+                        use_triton=True,
+                    )
+
+        torch.testing.assert_close(
+            result,
+            expected,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"K>=3 {boundary_mode}: CUDA result != reference",
+        )

@@ -1,5 +1,6 @@
 r"""Autograd functions and public API for streaming Semi-CRF."""
 
+import warnings
 from typing import Optional
 
 import torch
@@ -671,6 +672,19 @@ def semi_crf_streaming_forward(
     # Generic path: Triton (K>=3 only) or PyTorch fallback
     # =========================================================================
     can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda and K >= 3
+
+    # Single-boundary: Triton requires both proj_start and proj_end.
+    # Fall back to PyTorch path which handles each independently.
+    _single_boundary = (proj_start is None) != (proj_end is None)
+    if _single_boundary and can_use_triton:
+        warnings.warn(
+            f"Only one boundary tensor provided (K={K}, device={cum_scores.device}); "
+            "falling back to PyTorch path. Pass both proj_start and proj_end "
+            "for Triton acceleration.",
+            UserWarning,
+            stacklevel=2,
+        )
+        can_use_triton = False
 
     if needs_grad:
         # Training path

@@ -979,6 +979,11 @@ if HAS_TRITON:
                 - **log_norm_checkpoints** (Tensor): Cumulative log normalization factors
                   at each checkpoint of shape :math:`(\text{batch}, \text{num\_ckpts})`.
 
+        .. note::
+            Requires both or neither boundary tensor (proj_start, proj_end).
+            For single-boundary support, use :func:`semi_crf_streaming_forward`
+            which automatically falls back to the PyTorch path.
+
         See Also:
             :func:`launch_streaming_triton_backward`: Backward pass that uses checkpoints
                 from this forward pass.
@@ -1007,6 +1012,15 @@ if HAS_TRITON:
 
         # Pad C to next power of 2
         C_PAD = _next_power_of_2(C)
+
+        # Validate boundary projections: require both or neither
+        if (proj_start is None) != (proj_end is None):
+            raise ValueError(
+                "Triton kernels require both proj_start and proj_end, or neither. "
+                f"Got proj_start={'provided' if proj_start is not None else 'None'}, "
+                f"proj_end={'provided' if proj_end is not None else 'None'}. "
+                "Use semi_crf_streaming_forward() for automatic PyTorch fallback."
+            )
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
@@ -1169,6 +1183,11 @@ if HAS_TRITON:
                 - **final_labels** (Tensor): Best final label (argmax of final alpha)
                   of shape :math:`(\text{batch},)`.
 
+        .. note::
+            Requires both or neither boundary tensor (proj_start, proj_end).
+            For single-boundary support, use :func:`semi_crf_streaming_forward`
+            which automatically falls back to the PyTorch path.
+
         See Also:
             :func:`launch_streaming_triton_kernel`: Log-semiring variant for computing
                 partition function and gradients.
@@ -1195,6 +1214,15 @@ if HAS_TRITON:
 
         # Pad C to next power of 2
         C_PAD = _next_power_of_2(C)
+
+        # Validate boundary projections: require both or neither
+        if (proj_start is None) != (proj_end is None):
+            raise ValueError(
+                "Triton kernels require both proj_start and proj_end, or neither. "
+                f"Got proj_start={'provided' if proj_start is not None else 'None'}, "
+                f"proj_end={'provided' if proj_end is not None else 'None'}. "
+                "Use semi_crf_streaming_forward() for automatic PyTorch fallback."
+            )
 
         # Determine if boundaries are provided
         has_boundaries = proj_start is not None and proj_end is not None
