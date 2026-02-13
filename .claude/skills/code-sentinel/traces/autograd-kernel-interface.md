@@ -1,6 +1,6 @@
 # Sentinel: Autograd-Kernel Interface
 
-**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `e45c7f1`
+**Verified against:** `src/flash_semicrf/streaming/autograd.py` @ commit `559cebd`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonGradients`
 
 ## Summary
@@ -14,6 +14,12 @@ Documents the contract between autograd functions (`SemiCRFStreamingTriton`, `Se
 - `K` = Maximum segment length
 - `C` = Number of classes/labels
 - `C_PAD` = Padded class count (power of 2 for Triton)
+
+## Input Validation (Added `559cebd`)
+
+The public dispatch function `semi_crf_streaming_forward()` now calls `validate_streaming_shapes()` at line 598, before any dispatch logic runs. This validates K, C, batch, T, transition, duration_bias, proj_start, proj_end shapes upfront.
+
+This is in addition to `validate_cum_scores()` and `validate_lengths()` which were already called.
 
 ## ctx.save_for_backward() Semantics
 
@@ -180,6 +186,23 @@ if semiring == "max" and needs_grad:
 
 **Why `torch.is_grad_enabled()` gating**: Without this, `model.decode()` during training (where params have `requires_grad=True`) would take the autograd path even inside `torch.no_grad()`. The gate ensures `torch.no_grad()` contexts correctly bypass autograd and reach the direct inference kernels.
 
+### Single-Boundary Fallback (autograd.py:679-688)
+
+Triton kernels require both `proj_start` and `proj_end`, or neither. If only one boundary is provided:
+
+```python
+_single_boundary = (proj_start is None) != (proj_end is None)
+if _single_boundary and can_use_triton:
+    warnings.warn(
+        f"Only one boundary tensor provided (K={K}, device={cum_scores.device}); "
+        "falling back to PyTorch path.",
+        UserWarning, stacklevel=2,
+    )
+    can_use_triton = False
+```
+
+The PyTorch path handles single boundaries independently. The Triton launchers additionally raise `ValueError` if called directly with mismatched boundaries.
+
 ## Kernel Launch Interface
 
 ### Triton Forward: `launch_streaming_triton_kernel()`
@@ -205,6 +228,8 @@ Returns:
 - `ring_checkpoints`: (B, num_ckpts, K, C_PAD) for backward (normalized)
 - `checkpoint_interval`: int actual interval used
 - `log_norm_checkpoints`: (B, num_ckpts) cumulative normalization factors
+
+**Note**: The launcher also calls `validate_streaming_shapes()` internally (triton_forward.py:1003), so validation happens at both the dispatch level and the kernel level.
 
 ### Triton Backward: `launch_streaming_triton_backward()`
 
@@ -249,6 +274,7 @@ Note: Returns 6 values; 6th (`boundary_marginals`) is unused in autograd path.
 | float16 overflow | High | NaN in long sequences | Use float64 (recommended) or float32 for cum_scores |
 | Non-contiguous input | Medium | Kernel crash or wrong results | Always call `.contiguous()` |
 | Max semiring in autograd | Critical | semiring="max" with grad | Raise ValueError; use torch.no_grad() for decode (`e45c7f1`) |
+| Single boundary Triton fallback | Low | Only one of proj_start/proj_end provided | UserWarning + PyTorch fallback in dispatch; ValueError in direct launcher call (`559cebd`) |
 
 ## Debugging: Interface Violations
 
@@ -268,6 +294,7 @@ print(f"grad_duration_bias finite: {torch.isfinite(grad_duration_bias).all()}")
 
 ## Version History
 
+- **2026-02-13**: Added `validate_streaming_shapes()` at dispatch entry (line 598); documented single-boundary Triton fallback with UserWarning (lines 679-688); noted double validation (dispatch + launcher); `can_use_triton` now includes `K >= 3`; updated to `559cebd`
 - **2026-02-12**: Documented max semiring guard in all four autograd classes; added `torch.is_grad_enabled()` gating for `needs_grad`; updated line numbers throughout; updated to `e45c7f1`
 - **2026-02-09**: Updated dtype docs: float32→float64 recommended for cum_scores; docstring now says "float32 or float64"; return comment updated to "input dtype" instead of "float32"
 - **2026-02-05**: Added dtype handling documentation for Triton path (partition computed in float64, returned as input dtype); added checkpoint_interval parameter to forward methods; updated to commit `6c463c3`

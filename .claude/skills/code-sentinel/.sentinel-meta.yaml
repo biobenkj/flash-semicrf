@@ -2,7 +2,7 @@
 # Machine-readable state for automation and status queries
 
 version: 2.0
-last_global_verification: 2026-02-12T00:00:00Z
+last_global_verification: 2026-02-13T00:00:00Z
 
 # Note: Mixed duration indexing convention
 # - Streaming backends: 0-based (dur_idx = k - 1)
@@ -12,7 +12,7 @@ last_global_verification: 2026-02-12T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: e45c7f1
+    verified_commit: 559cebd
     source_files:
       - src/flash_semicrf/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -36,7 +36,7 @@ sentinels:
       - autograd-kernel-interface
 
   dispatch-overview:
-    verified_commit: e45c7f1
+    verified_commit: 559cebd
     source_files:
       - src/flash_semicrf/semimarkov.py
       - src/flash_semicrf/streaming/autograd.py
@@ -55,7 +55,7 @@ sentinels:
     depends_on: []
 
   autograd-kernel-interface:
-    verified_commit: e45c7f1
+    verified_commit: 559cebd
     source_files:
       - src/flash_semicrf/streaming/autograd.py
     assumptions_mechanical: []
@@ -70,7 +70,7 @@ sentinels:
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: e75e1ee
+    verified_commit: 559cebd
     source_files:
       - src/flash_semicrf/streaming/triton_backward.py
     assumptions_mechanical: []

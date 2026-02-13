@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `e45c7f1`
+**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `559cebd`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_triton.py::TestTritonStreamingKernel`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary
@@ -44,7 +44,7 @@ These require human/agent judgment when loading the trace.
 | Function | File:Line | Called When |
 |----------|-----------|-------------|
 | `SemiCRFStreamingTriton.forward()` | autograd.py:176 | K>=3, GPU, needs_grad, use_triton |
-| `launch_streaming_triton_kernel()` | triton_forward.py:931 | Direct inference or from autograd |
+| `launch_streaming_triton_kernel()` | triton_forward.py:932 | Direct inference or from autograd |
 | `semi_crf_streaming_scan_kernel()` | triton_forward.py:84 | Log semiring (partition function) |
 | `semi_crf_streaming_scan_kernel_max()` | triton_forward.py:461 | Max semiring (Viterbi score only) |
 | `semi_crf_streaming_scan_kernel_max_bp()` | triton_forward.py:690 | Max semiring (Viterbi + backpointers) |
@@ -52,16 +52,18 @@ These require human/agent judgment when loading the trace.
 ## Dispatch Conditions
 
 ```python
-# autograd.py:673
-can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda
+# autograd.py:675
+can_use_triton = HAS_TRITON and use_triton and cum_scores.is_cuda and K >= 3
 
-# autograd.py:675-679
+# autograd.py:690-694
 if needs_grad:
     if can_use_triton:
         return SemiCRFStreamingTriton.apply(...)  # This path
 ```
 
 **NOTE**: `needs_grad` now gates on `torch.is_grad_enabled()` (autograd.py:601), so `torch.no_grad()` contexts bypass autograd even with trainable parameters. Max semiring with `needs_grad=True` raises `ValueError` (autograd.py:610-616).
+
+**Single-boundary fallback** (autograd.py:679-688): Triton now requires both `proj_start` and `proj_end`. If only one boundary is provided, a `UserWarning` is issued and dispatch falls back to PyTorch.
 
 ## Data Flow
 
@@ -74,7 +76,10 @@ Inputs:
   proj_start: (B, T, C) optional      <- Start boundary scores (float64)
   proj_end: (B, T, C) optional        <- End boundary scores (float64)
 
-Launcher allocates (triton_forward.py:1011-1030):
+validate_streaming_shapes() called at launcher entry (line ~1003)
+  validates K, C, batch, T, transition, duration_bias, proj_start, proj_end shapes
+
+Launcher allocates (triton_forward.py:~1018-1033):
   partition: (B,) float64             <- Output
   ring_buffer: (B, K, C_PAD) float64  <- Live ring buffer (initialized: [0,:,0,:C]=0, rest=NEG_INF)
   ring_checkpoints: (B, num_ckpts, K, C_PAD) float64 <- Saved states for backward
@@ -107,9 +112,23 @@ c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
 
 **Why**: Triton may evaluate address arithmetic for masked-off lanes. With C_PAD > C, raw indices form invalid pointer offsets into tensors with stride `C`. This manifested as small, configuration-dependent numerical drift (not crashes) that was hard to reproduce because it depended on cache state and kernel recompilation.
 
+## Input Validation (Added `559cebd`)
+
+Both launchers (`launch_streaming_triton_kernel` at line 1003, `launch_streaming_triton_kernel_max_bp` at line 1206) now call `validate_streaming_shapes(K, C, batch, T, transition, duration_bias, proj_start, proj_end)` at entry. This validates:
+- K, C, batch, T are positive integers
+- transition shape matches (C, C) or (K, C, C)
+- duration_bias shape is (K, C)
+- proj_start/proj_end shapes are (B, T, C) when provided
+
+Additionally, both launchers validate boundary projections require both or neither (lines 1018-1027 and 1221-1230):
+```python
+if (proj_start is None) != (proj_end is None):
+    raise ValueError("Triton kernels require both proj_start and proj_end, or neither.")
+```
+
 ## Algorithm Steps
 
-### 1. Buffer Initialization (triton_forward.py:~1015-1030)
+### 1. Buffer Initialization (triton_forward.py:~1018-1033)
 
 ```python
 # dtype = torch.float64 (line 974) - All internal computation uses float64
@@ -122,7 +141,7 @@ ring_checkpoints[:, 0, 0, :C] = 0.0  # Initial state at checkpoint 0
 log_norm_checkpoints = torch.zeros((batch, num_checkpoints), device=device, dtype=torch.float64)
 ```
 
-### 2. Kernel Launch (triton_forward.py:1042-1084)
+### 2. Kernel Launch (triton_forward.py:~1055-1097)
 
 Grid: `(batch,)` - one program per batch element
 
@@ -346,6 +365,7 @@ result = tl.where(is_all_neginf, NEG_INF, max_val + log_sum)
 | Non-power-of-2 C masked OOB | Critical | C_PAD > C | Clamp indices via `tl.minimum(idx, C-1)` for C-shaped tensors | `e45c7f1` |
 | int32/int64 comparison failure | Critical | Variable-length batches | Cast seq_len and t to int32 | `49d9d61` |
 | NEG_INF comparison failure | Critical | Variable-length + checkpointing | Use `active` directly for shift | `49d9d61` |
+| Single boundary not supported | Medium | proj_start XOR proj_end | Raise ValueError in launcher; dispatch auto-falls back in `semi_crf_streaming_forward` | `559cebd` |
 
 ## Debugging: Log-partition bounds violation
 
@@ -366,6 +386,7 @@ if (partition < viterbi_score).any():
 
 ## Version History
 
+- **2026-02-13**: Added `validate_streaming_shapes()` calls at both launcher entries (lines 1003, 1206); added boundary projection validation requiring both-or-neither (lines 1018-1027, 1221-1230); updated `can_use_triton` to include `K >= 3` check; documented single-boundary fallback in dispatch; updated to `559cebd`
 - **2026-02-12**: Added safe index clamping (`c_idx_safe`, `c_dst_idx_safe`, `c_src_idx_safe`) to all three kernels (scan, max, max_bp) to prevent OOB address arithmetic for non-power-of-2 C; all `tl.load`/`tl.store` for C-shaped tensors now use `*_safe` indices; added max semiring guard note; updated entry points and line numbers; updated to `e45c7f1`
 - **2026-02-05**: Migrated all internal computation to float64 for numerical stability; updated dtype annotations throughout; updated to commit `9dfa110`
 - **2026-02-02**: Updated to commit `0c9b73e` (minor comment cleanup)
