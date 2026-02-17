@@ -2074,15 +2074,22 @@ class TestTritonNumWarps:
         )
 
         partition_triton, _, _, _ = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
             semiring="log",
             num_warps=num_warps,
             validate_cache=False,
         )
 
         torch.testing.assert_close(
-            partition_triton, partition_pytorch,
-            rtol=1e-4, atol=1e-4, check_dtype=False,
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
             msg=f"log semiring failed at num_warps={num_warps}",
         )
 
@@ -2099,15 +2106,22 @@ class TestTritonNumWarps:
         )
 
         partition_triton, _, _, _ = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
             semiring="max",
             num_warps=num_warps,
             validate_cache=False,
         )
 
         torch.testing.assert_close(
-            partition_triton, partition_pytorch,
-            rtol=1e-4, atol=1e-4, check_dtype=False,
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
             msg=f"max semiring failed at num_warps={num_warps}",
         )
 
@@ -2129,30 +2143,35 @@ class TestTritonNumWarps:
             )
         )
 
-        scores_triton, bp_k_tr, bp_c_tr, final_labels_tr = (
-            launch_streaming_triton_kernel_max_bp(
-                cum_scores, transition, duration_bias, lengths, K,
-                num_warps=num_warps,
-                validate_cache=False,
-            )
+        scores_triton, bp_k_tr, bp_c_tr, final_labels_tr = launch_streaming_triton_kernel_max_bp(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            num_warps=num_warps,
+            validate_cache=False,
         )
 
         torch.testing.assert_close(
-            scores_triton, scores_pytorch,
-            rtol=1e-4, atol=1e-4, check_dtype=False,
+            scores_triton,
+            scores_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
             msg=f"max_bp scores failed at num_warps={num_warps}",
         )
         # Backpointers are discrete — compare values, not dtype
         # (Triton returns int32, PyTorch reference uses long)
-        assert torch.equal(final_labels_tr.to(torch.long), final_labels_py), (
-            f"max_bp final_labels mismatch at num_warps={num_warps}"
-        )
-        assert torch.equal(bp_k_tr.to(torch.long), bp_k_py), (
-            f"max_bp bp_k mismatch at num_warps={num_warps}"
-        )
-        assert torch.equal(bp_c_tr.to(torch.long), bp_c_py), (
-            f"max_bp bp_c mismatch at num_warps={num_warps}"
-        )
+        assert torch.equal(
+            final_labels_tr.to(torch.long), final_labels_py
+        ), f"max_bp final_labels mismatch at num_warps={num_warps}"
+        assert torch.equal(
+            bp_k_tr.to(torch.long), bp_k_py
+        ), f"max_bp bp_k mismatch at num_warps={num_warps}"
+        assert torch.equal(
+            bp_c_tr.to(torch.long), bp_c_py
+        ), f"max_bp bp_c mismatch at num_warps={num_warps}"
 
     @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
     @pytest.mark.filterwarnings("ignore:Triton cache may be stale:UserWarning")
@@ -2170,9 +2189,7 @@ class TestTritonNumWarps:
         tr_py = transition.clone().requires_grad_(True)
         db_py = duration_bias.clone().requires_grad_(True)
 
-        partition_py = semi_crf_streaming_forward(
-            cs_py, tr_py, db_py, lengths, K, use_triton=False
-        )
+        partition_py = semi_crf_streaming_forward(cs_py, tr_py, db_py, lengths, K, use_triton=False)
         partition_py.sum().backward()
 
         # Triton path at this num_warps
@@ -2181,7 +2198,11 @@ class TestTritonNumWarps:
         db_tr = duration_bias.clone().requires_grad_(True)
 
         partition_tr = semi_crf_streaming_forward(
-            cs_tr, tr_tr, db_tr, lengths, K,
+            cs_tr,
+            tr_tr,
+            db_tr,
+            lengths,
+            K,
             use_triton=True,
             num_warps=num_warps,
         )
@@ -2189,22 +2210,33 @@ class TestTritonNumWarps:
 
         # Forward values should match tightly
         torch.testing.assert_close(
-            partition_tr, partition_py,
-            rtol=1e-4, atol=1e-4,
+            partition_tr,
+            partition_py,
+            rtol=1e-4,
+            atol=1e-4,
             msg=f"forward partition mismatch at num_warps={num_warps}",
         )
 
         # Gradients: looser tolerance due to atomic_add non-determinism
         torch.testing.assert_close(
-            cs_tr.grad, cs_py.grad, rtol=0.05, atol=0.5,
+            cs_tr.grad,
+            cs_py.grad,
+            rtol=0.05,
+            atol=0.5,
             msg=f"grad_cum_scores mismatch at num_warps={num_warps}",
         )
         torch.testing.assert_close(
-            tr_tr.grad, tr_py.grad, rtol=0.05, atol=0.5,
+            tr_tr.grad,
+            tr_py.grad,
+            rtol=0.05,
+            atol=0.5,
             msg=f"grad_transition mismatch at num_warps={num_warps}",
         )
         torch.testing.assert_close(
-            db_tr.grad, db_py.grad, rtol=0.05, atol=0.5,
+            db_tr.grad,
+            db_py.grad,
+            rtol=0.05,
+            atol=0.5,
             msg=f"grad_duration_bias mismatch at num_warps={num_warps}",
         )
 
@@ -2222,15 +2254,22 @@ class TestTritonNumWarps:
         )
 
         partition_triton, _, _, _ = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
             semiring="log",
             num_warps=num_warps,
             validate_cache=False,
         )
 
         torch.testing.assert_close(
-            partition_triton, partition_pytorch,
-            rtol=1e-4, atol=1e-4, check_dtype=False,
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
             msg=f"C={C}, num_warps={num_warps} failed",
         )
 
@@ -2258,15 +2297,22 @@ class TestTritonNumWarps:
         )
 
         partition_triton, _, _, _ = launch_streaming_triton_kernel(
-            cum_scores, transition, duration_bias, lengths, K,
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
             semiring="log",
             num_warps=num_warps,
             validate_cache=False,
         )
 
         torch.testing.assert_close(
-            partition_triton, partition_pytorch,
-            rtol=1e-4, atol=1e-4, check_dtype=False,
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
             msg=f"duration-dependent transitions failed at num_warps={num_warps}",
         )
 
@@ -2280,7 +2326,11 @@ class TestTritonNumWarps:
         results = {}
         for nw in NUM_WARPS_VALUES:
             partition, _, _, _ = launch_streaming_triton_kernel(
-                cum_scores, transition, duration_bias, lengths, K,
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
                 semiring="log",
                 num_warps=nw,
                 validate_cache=False,
@@ -2290,8 +2340,11 @@ class TestTritonNumWarps:
         baseline = results[NUM_WARPS_VALUES[0]]
         for nw in NUM_WARPS_VALUES[1:]:
             torch.testing.assert_close(
-                results[nw], baseline,
-                rtol=1e-8, atol=1e-9, check_dtype=False,
+                results[nw],
+                baseline,
+                rtol=1e-8,
+                atol=1e-9,
+                check_dtype=False,
                 msg=f"num_warps={nw} differs from num_warps={NUM_WARPS_VALUES[0]}",
             )
 
