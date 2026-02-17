@@ -25,10 +25,8 @@ def pytest_configure(config):
         "markers",
         "requires_cuda: mark test as requiring CUDA (will be skipped if not available)",
     )
-    config.addinivalue_line(
-        "markers",
-        "gpu_isolated: mark test as requiring isolated GPU execution (run separately to avoid Triton cache contamination)",
-    )
+    # gpu_isolated is registered in pyproject.toml [tool.pytest.ini_options].markers
+    # and excluded by default via addopts. Run with: pytest -m gpu_isolated
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +185,20 @@ def clear_triton_cache_fixture():
     # Clean up CUDA memory after test
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+@pytest.fixture(autouse=True)
+def auto_clear_cache_for_gpu_isolated(request):
+    """Automatically clear Triton cache for tests marked @pytest.mark.gpu_isolated.
+
+    The gpu_isolated marker indicates tests that are sensitive to Triton cache
+    contamination from earlier tests (e.g., different kernel configs, num_warps
+    values). This fixture enforces actual isolation by calling
+    force_clear_triton_cache() before those tests run.
+    """
+    if request.node.get_closest_marker("gpu_isolated"):
+        force_clear_triton_cache()
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)
