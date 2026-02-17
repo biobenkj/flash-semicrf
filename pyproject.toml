@@ -108,9 +108,10 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -m 'not slow'"
+addopts = "-v --tb=short -m 'not slow and not gpu_isolated'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu_isolated: marks tests requiring isolated GPU execution (run with '-m gpu_isolated')",
     "diagnostic: non-gating diagnostic tests intended for local debugging",
     "informational: non-gating profiling/informational tests",
 ]

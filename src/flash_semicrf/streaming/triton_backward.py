@@ -243,6 +243,7 @@ if HAS_TRITON:
         - Flash Attention: Online softmax pattern for memory-efficient attention
         - Mamba SSM: Loop tiling for register-pressure reduction in state space models
         """
+        # Must match NEG_INF in constants.py
         NEG_INF: tl.constexpr = -1e9
 
         batch_idx = tl.program_id(0)

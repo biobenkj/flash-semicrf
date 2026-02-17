@@ -18,6 +18,7 @@ if HAS_TRITON:
     from flash_semicrf.streaming import (
         launch_streaming_triton_backward,
         launch_streaming_triton_kernel,
+        launch_streaming_triton_kernel_max_bp,
     )
 
 
@@ -2042,6 +2043,309 @@ class TestKBasedDispatch:
         # Check output shape and finiteness
         assert partition.shape == (batch,)
         assert torch.isfinite(partition).all()
+
+
+NUM_WARPS_VALUES = [2, 4, 8]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+class TestTritonNumWarps:
+    """Verify Triton kernels produce correct results across num_warps values (2, 4, 8).
+
+    Each num_warps value triggers a separate Triton compilation (it is part of the
+    cache key). Different warp counts change register pressure and thread scheduling,
+    so correctness must be verified for each value in the recommended range.
+
+    All direct launcher tests use validate_cache=False to avoid noisy warnings when
+    switching between num_warps values within a single test session.
+    """
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    def test_forward_log_semiring(self, num_warps):
+        """Triton log-semiring forward matches PyTorch reference at each num_warps."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            semiring="log",
+            num_warps=num_warps,
+            validate_cache=False,
+        )
+
+        torch.testing.assert_close(
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"log semiring failed at num_warps={num_warps}",
+        )
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    def test_forward_max_semiring(self, num_warps):
+        """Triton max-semiring forward matches PyTorch reference at each num_warps."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K, semiring="max"
+        )
+
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            semiring="max",
+            num_warps=num_warps,
+            validate_cache=False,
+        )
+
+        torch.testing.assert_close(
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"max semiring failed at num_warps={num_warps}",
+        )
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    def test_forward_max_bp(self, num_warps):
+        """Triton max-backpointer kernel matches PyTorch Viterbi at each num_warps."""
+        from flash_semicrf.streaming.pytorch_reference import (
+            semi_crf_streaming_viterbi_with_backpointers,
+        )
+
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        scores_pytorch, bp_k_py, bp_c_py, final_labels_py = (
+            semi_crf_streaming_viterbi_with_backpointers(
+                cum_scores, transition, duration_bias, lengths, K
+            )
+        )
+
+        scores_triton, bp_k_tr, bp_c_tr, final_labels_tr = launch_streaming_triton_kernel_max_bp(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            num_warps=num_warps,
+            validate_cache=False,
+        )
+
+        torch.testing.assert_close(
+            scores_triton,
+            scores_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"max_bp scores failed at num_warps={num_warps}",
+        )
+        # Final labels should match (argmax of final alpha)
+        assert torch.equal(
+            final_labels_tr.to(torch.long), final_labels_py
+        ), f"max_bp final_labels mismatch at num_warps={num_warps}"
+        # Note: bp_k/bp_c are NOT compared exactly because argmax tie-breaking
+        # differs between Triton (tl.argmax) and PyTorch (torch.argmax).
+        # When two durations produce equal max scores, the chosen backpointer
+        # is arbitrary. The Viterbi scores and final_labels are the
+        # functionally meaningful outputs; backpointers at off-path positions
+        # are undefined anyway.
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    @pytest.mark.filterwarnings("ignore:Triton cache may be stale:UserWarning")
+    def test_backward_via_autograd(self, num_warps):
+        """Triton backward gradients match PyTorch reference at each num_warps."""
+        from flash_semicrf.streaming import semi_crf_streaming_forward
+
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        # PyTorch reference path
+        cs_py = cum_scores.clone().requires_grad_(True)
+        tr_py = transition.clone().requires_grad_(True)
+        db_py = duration_bias.clone().requires_grad_(True)
+
+        partition_py = semi_crf_streaming_forward(cs_py, tr_py, db_py, lengths, K, use_triton=False)
+        partition_py.sum().backward()
+
+        # Triton path at this num_warps
+        cs_tr = cum_scores.clone().requires_grad_(True)
+        tr_tr = transition.clone().requires_grad_(True)
+        db_tr = duration_bias.clone().requires_grad_(True)
+
+        partition_tr = semi_crf_streaming_forward(
+            cs_tr,
+            tr_tr,
+            db_tr,
+            lengths,
+            K,
+            use_triton=True,
+            num_warps=num_warps,
+        )
+        partition_tr.sum().backward()
+
+        # Forward values should match tightly
+        torch.testing.assert_close(
+            partition_tr,
+            partition_py,
+            rtol=1e-4,
+            atol=1e-4,
+            msg=f"forward partition mismatch at num_warps={num_warps}",
+        )
+
+        # Gradients: looser tolerance due to atomic_add non-determinism
+        torch.testing.assert_close(
+            cs_tr.grad,
+            cs_py.grad,
+            rtol=0.05,
+            atol=0.5,
+            msg=f"grad_cum_scores mismatch at num_warps={num_warps}",
+        )
+        torch.testing.assert_close(
+            tr_tr.grad,
+            tr_py.grad,
+            rtol=0.05,
+            atol=0.5,
+            msg=f"grad_transition mismatch at num_warps={num_warps}",
+        )
+        torch.testing.assert_close(
+            db_tr.grad,
+            db_py.grad,
+            rtol=0.05,
+            atol=0.5,
+            msg=f"grad_duration_bias mismatch at num_warps={num_warps}",
+        )
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    @pytest.mark.parametrize("C", [4, 5])
+    def test_forward_log_with_padding(self, num_warps, C):
+        """Triton log forward is correct with both power-of-2 and non-power-of-2 C."""
+        batch, T, K = 2, 30, 5
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            semiring="log",
+            num_warps=num_warps,
+            validate_cache=False,
+        )
+
+        torch.testing.assert_close(
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"C={C}, num_warps={num_warps} failed",
+        )
+
+    @pytest.mark.parametrize("num_warps", NUM_WARPS_VALUES)
+    def test_forward_duration_dependent_transitions(self, num_warps):
+        """Triton log forward with (K, C, C) transitions at each num_warps."""
+        batch, T, K, C = 2, 30, 5, 4
+
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+
+        projected = torch.randn(batch, T, C, device="cuda", dtype=torch.float32)
+        projected = projected - projected.mean(dim=1, keepdim=True)
+        cum_scores = torch.zeros(batch, T + 1, C, device="cuda", dtype=torch.float32)
+        cum_scores[:, 1:, :] = torch.cumsum(projected, dim=1)
+
+        # Duration-dependent transitions: (K, C, C)
+        transition = torch.randn(K, C, C, device="cuda", dtype=torch.float32) * 0.1
+        duration_bias = torch.randn(K, C, device="cuda", dtype=torch.float32) * 0.1
+        lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
+
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            semiring="log",
+            num_warps=num_warps,
+            validate_cache=False,
+        )
+
+        torch.testing.assert_close(
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"duration-dependent transitions failed at num_warps={num_warps}",
+        )
+
+    def test_cross_num_warps_consistency(self):
+        """All num_warps values produce identical partition values for log semiring."""
+        batch, T, K, C = 2, 30, 5, 4
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda"
+        )
+
+        results = {}
+        for nw in NUM_WARPS_VALUES:
+            partition, _, _, _ = launch_streaming_triton_kernel(
+                cum_scores,
+                transition,
+                duration_bias,
+                lengths,
+                K,
+                semiring="log",
+                num_warps=nw,
+                validate_cache=False,
+            )
+            results[nw] = partition
+
+        baseline = results[NUM_WARPS_VALUES[0]]
+        for nw in NUM_WARPS_VALUES[1:]:
+            torch.testing.assert_close(
+                results[nw],
+                baseline,
+                rtol=1e-8,
+                atol=1e-9,
+                check_dtype=False,
+                msg=f"num_warps={nw} differs from num_warps={NUM_WARPS_VALUES[0]}",
+            )
 
 
 if __name__ == "__main__":
