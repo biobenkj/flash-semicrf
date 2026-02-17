@@ -33,7 +33,7 @@ from ..validation import validate_streaming_shapes
 from .constants import NEG_INF
 from .pytorch_reference import _compute_checkpoint_interval
 
-# Triton is optional
+# Triton is optional but will fall back to pytorch if not found.
 try:
     import triton
     import triton.language as tl
@@ -80,7 +80,7 @@ def _next_power_of_2(n: int) -> int:
 
 if HAS_TRITON:
     # NOTE: @triton.autotune removed - corrupts ring buffer during multi-config benchmarking.
-    # See docs/debugging/DEBUGGING_NAN.md "Autotuning Limitations" for details.
+    # See docs/debugging/DEBUGGING_NAN.md "Autotuning Limitations" for details on dev branch.
     @triton.jit
     def semi_crf_streaming_scan_kernel(
         # Inputs
@@ -150,6 +150,7 @@ if HAS_TRITON:
 
         One program is launched per batch element (grid size = batch_size).
         """
+        # Must match NEG_INF in constants.py
         NEG_INF: tl.constexpr = -1e9
 
         # Batch index (one program per batch element)
@@ -512,6 +513,7 @@ if HAS_TRITON:
         See :func:`semi_crf_streaming_scan_kernel` for detailed documentation of
         parameters and the edge computation formula.
         """
+        # Must match NEG_INF in constants.py
         NEG_INF: tl.constexpr = -1e9
 
         batch_idx = tl.program_id(0)
@@ -745,6 +747,7 @@ if HAS_TRITON:
             bp_c: (batch, T, C) - best source label c_src for each (t, c_dest)
             final_labels: (batch,) - argmax of final alpha (best final label)
         """
+        # Must match NEG_INF in constants.py
         NEG_INF: tl.constexpr = -1e9
 
         batch_idx = tl.program_id(0)
