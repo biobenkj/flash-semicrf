@@ -1913,27 +1913,46 @@ def cmd_run(args):
     print(f"\nResults saved to {output_dir}")
 
 
-def _smoke_test_mamba(device: torch.device) -> None:
-    """Instantiate Mamba1 and Mamba2 encoders, run one fwd/bwd to catch config errors early."""
+def _smoke_test_mamba(device: torch.device, required_version: int | None = None) -> None:
+    """Instantiate Mamba1 and Mamba2 encoders, run one fwd/bwd to catch config errors early.
+
+    Args:
+        device: Device to run the test on.
+        required_version: If set and the smoke test for that version fails, raise a
+            RuntimeError with install instructions rather than just logging a warning.
+    """
     if not HAS_MAMBA:
         return
     versions = [1]
     if HAS_MAMBA2:
         versions.append(2)
+    passed = []
     for version in versions:
-        enc = MambaEncoder(
-            input_dim=4,
-            hidden_dim=64,
-            num_layers=1,
-            mamba_version=version,
-        ).to(device)
-        x = torch.randn(2, 16, 4, device=device)
-        loss = enc(x).sum()
-        loss.backward()
-        del enc, x, loss
+        try:
+            enc = MambaEncoder(
+                input_dim=4,
+                hidden_dim=64,
+                num_layers=1,
+                mamba_version=version,
+            ).to(device)
+            x = torch.randn(2, 16, 4, device=device)
+            loss = enc(x).sum()
+            loss.backward()
+            del enc, x, loss
+            passed.append(version)
+        except Exception as e:
+            if version == required_version:
+                raise RuntimeError(
+                    f"Mamba{version} smoke test failed: {e}\n"
+                    "Mamba2 requires the 'causal_conv1d' CUDA extension in addition to "
+                    "mamba-ssm. Install it with:\n"
+                    "  pip install causal-conv1d\n"
+                    "Or fall back to Mamba1 with --mamba-version 1."
+                ) from e
+            logger.warning(f"Mamba{version} smoke test failed (skipping version {version}): {e}")
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    logger.info(f"Mamba smoke test passed (versions={versions}).")
+    logger.info(f"Mamba smoke test passed (versions={passed}).")
 
 
 def cmd_profile(args):
@@ -2005,7 +2024,9 @@ def cmd_profile(args):
     )
 
     # ---- model ---------------------------------------------------------------
-    _smoke_test_mamba(device)
+    _smoke_test_mamba(
+        device, required_version=args.mamba_version if args.encoder == "mamba" else None
+    )
     model = create_model(
         model_type=args.model,
         encoder_type=args.encoder,
