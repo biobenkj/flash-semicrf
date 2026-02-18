@@ -41,6 +41,7 @@ import argparse
 import gc
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -74,10 +75,25 @@ from torch.utils.data import DataLoader, Dataset
 try:
     from mamba_ssm import Mamba
 
+    try:
+        from mamba_ssm import Mamba2  # mamba-ssm >= 2.0 top-level export
+
+        HAS_MAMBA2 = True
+    except ImportError:
+        try:
+            from mamba_ssm.modules.mamba2 import Mamba2  # fallback submodule path
+
+            HAS_MAMBA2 = True
+        except ImportError:
+            HAS_MAMBA2 = False
+            Mamba2 = None  # type: ignore
+
     HAS_MAMBA = True
 except ImportError:
     HAS_MAMBA = False
+    HAS_MAMBA2 = False
     Mamba = None  # type: ignore
+    Mamba2 = None  # type: ignore
 
 # pytorch-crf baseline (optional)
 try:
@@ -463,6 +479,22 @@ class MambaEncoderStub(nn.Module):
         return self.output_norm(out)
 
 
+def _pick_headdim(d_inner: int) -> int:
+    """Return the largest value in [128, 64, 32, 16, 8] that evenly divides d_inner.
+
+    Mamba2 requires headdim to divide d_model * expand (d_inner). Using min() is
+    insufficient because the result may not divide d_inner (e.g. d_inner=96, min=64,
+    but 96 % 64 != 0).
+    """
+    for hd in (128, 64, 32, 16, 8):
+        if d_inner % hd == 0:
+            return hd
+    raise ValueError(
+        f"No valid headdim found for d_inner={d_inner}. "
+        "Ensure (hidden_dim // 2) * expand is divisible by 8."
+    )
+
+
 class MambaEncoder(nn.Module):
     """
     Bidirectional Mamba SSM encoder.
@@ -479,46 +511,65 @@ class MambaEncoder(nn.Module):
         expand: int = 2,
         num_layers: int = 4,
         dropout: float = 0.1,
-        use_checkpoint: bool = True,
+        use_checkpoint: bool = False,
+        mamba_version: int = 2,
+        chunk_size: int = 256,
     ):
         """
         Args:
-            use_checkpoint: If True (default), apply gradient checkpointing on each
-                Mamba layer.  Recomputes activations during the backward pass in
-                exchange for ~4× lower peak activation memory.  Disable when
-                profiling or when memory is not a concern.
+            use_checkpoint: If True, wrap each Mamba layer with
+                torch.utils.checkpoint (Python-level recomputation).  Default False.
+                Mamba1 already recomputes conv1d_out and delta during its backward
+                CUDA kernel (checkpoint_lvl=1); Mamba2 uses a chunked SSD scan
+                (use_mem_eff_path=True) that amortizes activation memory without any
+                Python-level recomputation.  Adding a Python-level wrapper on top of
+                either causes double recomputation with no additional memory benefit.
+                Enable only if you are OOM after exhausting batch-size / grad-accum
+                options and the built-in kernel recomputation is insufficient.
+            mamba_version: 1 = Mamba (selective scan, checkpoint_lvl=1 internally).
+                2 = Mamba2 (SSD chunked scan, use_mem_eff_path=True; default).
+                Requires mamba-ssm >= 2.0 for version 2.
+            chunk_size: Mamba2 SSD chunk size (ignored for mamba_version=1).
+                Smaller values reduce peak activation memory at the cost of more
+                recomputation. Default 256; try 64–128 if OOM at large T.
         """
         super().__init__()
         if not HAS_MAMBA:
             raise ImportError("mamba-ssm required. Install with: pip install mamba-ssm")
 
         self.use_checkpoint = use_checkpoint
+        self.mamba_version = mamba_version
 
         self.embed = nn.Linear(input_dim, hidden_dim // 2)
         self.norm = nn.LayerNorm(hidden_dim // 2)
 
-        self.forward_layers = nn.ModuleList(
-            [
-                Mamba(
-                    d_model=hidden_dim // 2,
-                    d_state=d_state,
-                    d_conv=d_conv,
-                    expand=expand,
+        if mamba_version == 2:
+            if not HAS_MAMBA2:
+                raise ImportError(
+                    "Mamba2 requires mamba-ssm >= 2.0. "
+                    "Install a newer release or pass mamba_version=1."
                 )
-                for _ in range(num_layers)
-            ]
-        )
-        self.backward_layers = nn.ModuleList(
-            [
-                Mamba(
-                    d_model=hidden_dim // 2,
-                    d_state=d_state,
-                    d_conv=d_conv,
-                    expand=expand,
-                )
-                for _ in range(num_layers)
-            ]
-        )
+            d_inner = (hidden_dim // 2) * expand
+            _kw = {
+                "d_model": hidden_dim // 2,
+                "d_state": d_state,
+                "d_conv": d_conv,
+                "expand": expand,
+                "headdim": _pick_headdim(d_inner),
+                "chunk_size": chunk_size,
+            }
+            _Cls = Mamba2
+        else:
+            _kw = {
+                "d_model": hidden_dim // 2,
+                "d_state": d_state,
+                "d_conv": d_conv,
+                "expand": expand,
+            }
+            _Cls = Mamba
+
+        self.forward_layers = nn.ModuleList([_Cls(**_kw) for _ in range(num_layers)])
+        self.backward_layers = nn.ModuleList([_Cls(**_kw) for _ in range(num_layers)])
 
         self.dropout = nn.Dropout(dropout)
         self.output_norm = nn.LayerNorm(hidden_dim)
@@ -565,7 +616,9 @@ def create_encoder(
     d_conv: int = 4,
     expand: int = 2,
     dropout: float = 0.1,
-    use_checkpoint: bool = True,
+    use_checkpoint: bool = False,
+    mamba_version: int = 2,
+    chunk_size: int = 256,
 ) -> nn.Module:
     """Create encoder based on type."""
     if encoder_type == "bilstm":
@@ -585,6 +638,8 @@ def create_encoder(
             num_layers=num_layers,
             dropout=dropout,
             use_checkpoint=use_checkpoint,
+            mamba_version=mamba_version,
+            chunk_size=chunk_size,
         )
     elif encoder_type == "mamba_stub":
         return MambaEncoderStub(
@@ -807,7 +862,9 @@ def create_model(
     backend: str = "streaming",
     use_triton: bool = True,
     dropout: float = 0.1,
-    use_checkpoint: bool = True,
+    use_checkpoint: bool = False,
+    mamba_version: int = 2,
+    chunk_size: int = 256,
 ) -> nn.Module:
     """
     Create a model based on type.
@@ -829,6 +886,8 @@ def create_model(
         expand=expand,
         dropout=dropout,
         use_checkpoint=use_checkpoint,
+        mamba_version=mamba_version,
+        chunk_size=chunk_size,
     )
 
     if model_type == "softmax":
@@ -910,6 +969,11 @@ class BenchmarkMetrics:
     inference_throughput_seqs_per_sec: float = 0.0
     peak_memory_gb: float = 0.0
 
+    # Encoder configuration — serialized to JSON for reproducibility.
+    mamba_version: int = 2
+    chunk_size: int = 256
+    d_state: int = 16
+
     # Predicted duration distribution — populated from the final test evaluation.
     # Shape: (max_duration, num_classes). Not serialized to JSON.
     pred_dist: torch.Tensor | None = None
@@ -932,6 +996,9 @@ class BenchmarkMetrics:
             "training_time_seconds": self.training_time_seconds,
             "inference_throughput_seqs_per_sec": self.inference_throughput_seqs_per_sec,
             "peak_memory_gb": self.peak_memory_gb,
+            "mamba_version": self.mamba_version,
+            "chunk_size": self.chunk_size,
+            "d_state": self.d_state,
         }
 
 
@@ -1155,6 +1222,7 @@ def train_epoch(
     epoch: int = 0,
     crf_reg: float = 0.0,
     use_amp: bool = True,
+    grad_accum_steps: int = 1,
 ) -> float:
     """Train for one epoch.
 
@@ -1166,38 +1234,55 @@ def train_epoch(
         epoch: Current epoch number
         crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only)
         use_amp: Wrap forward/backward with BF16 autocast (GPU only)
+        grad_accum_steps: Accumulate gradients over this many microbatches before
+            each optimizer step. Effective batch = physical_batch × grad_accum_steps.
+            The last partial window (when len(dataloader) % grad_accum_steps != 0) is
+            scaled by its actual size so every optimizer step is correctly normalized.
     """
     model.train()
     total_loss = 0.0
     num_batches = 0
     _amp = use_amp and device.type == "cuda"
 
+    n = len(dataloader)
+    remainder = n % grad_accum_steps  # 0 → all windows are full
+
+    # zero_grad once before the loop; subsequent resets happen after each step
+    optimizer.zero_grad(set_to_none=True)
+
     for batch_idx, batch in enumerate(dataloader):
         sequence = batch["sequence"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
         lengths = batch["lengths"].to(device, non_blocking=True)
 
-        # Replace -100 padding with 0 for validation (ignored anyway via lengths)
+        # Replace -100 padding with 0 (ignored anyway via lengths)
         labels_clean = labels.clone()
         labels_clean[labels_clean == -100] = 0
 
-        optimizer.zero_grad(set_to_none=True)
+        is_last_batch = batch_idx == n - 1
+        is_update_step = ((batch_idx + 1) % grad_accum_steps == 0) or is_last_batch
+
+        # Last partial window has fewer microbatches than grad_accum_steps.
+        # Use its actual size so the gradient magnitude is correctly normalized.
+        in_last_partial = (remainder != 0) and (batch_idx >= n - remainder)
+        ws = remainder if in_last_partial else grad_accum_steps
+
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=_amp):
-            loss = model.compute_loss(sequence, lengths, labels_clean)
+            loss = model.compute_loss(sequence, lengths, labels_clean) / ws
+            # CRF regularization uses the same window denominator as the data loss
+            if crf_reg > 0 and isinstance(model, SemiCRFModel):
+                loss = loss + crf_reg * model.crf.parameter_penalty() / ws
 
-        # Add CRF parameter regularization for Semi-Markov models
-        if crf_reg > 0 and isinstance(model, SemiCRFModel):
-            loss = loss + crf_reg * model.crf.parameter_penalty()
+        loss.backward()  # accumulates into .grad
 
-        loss.backward()
-
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        optimizer.step()
-
-        total_loss += loss.item()
+        total_loss += loss.item() * ws  # unscale for logging
         num_batches += 1
+
+        if is_update_step:
+            # Clip and step once per accumulation window, not per microbatch
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         # Log first batch diagnostics
         if epoch == 0 and batch_idx == 0:
@@ -1320,7 +1405,7 @@ def train_model(
     max_duration: int = 1000,
     hidden_dim: int = 256,
     num_layers: int = 4,
-    batch_size: int = 16,
+    batch_size: int = 128,
     learning_rate: float = 1e-3,
     epochs: int = 100,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -1333,7 +1418,11 @@ def train_model(
     num_workers: int = 8,
     cache_mode: Literal["ram", "memmap", "none"] = "ram",
     use_amp: bool = True,
-    use_checkpoint: bool = True,
+    use_checkpoint: bool = False,
+    grad_accum_steps: int = 1,
+    mamba_version: int = 2,
+    chunk_size: int = 256,
+    d_state: int = 16,
 ) -> tuple[nn.Module, BenchmarkMetrics]:
     """Train a model and return it with test metrics.
 
@@ -1360,7 +1449,14 @@ def train_model(
         num_workers: DataLoader worker processes (0 = main process only)
         cache_mode: Feature-encoding cache strategy ("ram" | "memmap" | "none")
         use_amp: Enable BF16 autocast for encoder forward/backward (halves Mamba memory)
-        use_checkpoint: Enable gradient checkpointing on Mamba layers (default True)
+        use_checkpoint: Enable Python-level gradient checkpointing on Mamba layers
+            (default False — mamba-ssm already recomputes internally via checkpoint_lvl=1)
+        grad_accum_steps: Accumulate gradients over this many microbatches before each
+            optimizer step. Effective batch = batch_size × grad_accum_steps.
+            Use when physical batch size is limited by VRAM at large T.
+        mamba_version: 1 = Mamba (selective scan), 2 = Mamba2 (SSD chunked scan; default).
+        chunk_size: Mamba2 SSD chunk size (ignored for mamba_version=1).
+        d_state: SSM state dimension (Mamba1 default 16; Mamba2 natural default 128).
     """
     device_obj = torch.device(device)
 
@@ -1422,17 +1518,34 @@ def train_model(
         max_duration=max_duration,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
+        d_state=d_state,
         backend=backend,
         use_triton=use_triton,
         dropout=dropout,
         use_checkpoint=use_checkpoint,
+        mamba_version=mamba_version,
+        chunk_size=chunk_size,
     ).to(device_obj)
 
     num_params = sum(p.numel() for p in model.parameters())
+    expected_steps = math.ceil(len(train_loader) / grad_accum_steps)
     logger.info(
         f"Model: {model_type} + {encoder_type}, "
         f"K={max_duration if model_type.startswith('semicrf') else 1}, "
         f"params={num_params:,}"
+    )
+    _enc_desc = (
+        f"mamba{mamba_version}, d_state={d_state}"
+        + (f", chunk_size={chunk_size}" if mamba_version == 2 else "")
+        if encoder_type == "mamba"
+        else encoder_type
+    )
+    logger.info(
+        f"Encoder: {_enc_desc} | "
+        f"Batch: physical={batch_size}, accum={grad_accum_steps}, "
+        f"effective={batch_size * grad_accum_steps} | "
+        f"steps/epoch={expected_steps} | "
+        f"SM saturation target: ~142 for L40S"
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -1456,6 +1569,7 @@ def train_model(
             epoch=epoch,
             crf_reg=crf_reg,
             use_amp=use_amp,
+            grad_accum_steps=grad_accum_steps,
         )
         scheduler.step()
         loss_curve.append(train_loss)
@@ -1468,10 +1582,19 @@ def train_model(
         # Evaluate periodically
         if (epoch + 1) % log_every == 0 or epoch == epochs - 1:
             val_metrics = evaluate(model, val_loader, device_obj, true_durations, max_duration)
+            mem_info = ""
+            if torch.cuda.is_available():
+                alloc = torch.cuda.memory_allocated() / 1e9
+                reserved = torch.cuda.memory_reserved() / 1e9
+                mem_info = f" | mem alloc={alloc:.2f}GB reserved={reserved:.2f}GB"
+                # Return unused cached blocks to CUDA — prevents the caching allocator
+                # from slowly ratcheting up nvidia-smi reserved memory over long runs.
+                torch.cuda.empty_cache()
             logger.info(
                 f"Epoch {epoch+1}/{epochs} | Loss: {train_loss:.4f} | "
                 f"Val Boundary F1: {val_metrics.boundary_f1:.4f} | "
                 f"Val Duration KL: {val_metrics.duration_kl_mean:.4f}"
+                f"{mem_info}"
             )
 
             if val_metrics.boundary_f1 > best_val_f1:
@@ -1490,6 +1613,9 @@ def train_model(
     test_metrics.loss_curve = loss_curve
     test_metrics.training_time_seconds = training_time
     test_metrics.peak_memory_gb = peak_memory
+    test_metrics.mamba_version = mamba_version
+    test_metrics.chunk_size = chunk_size
+    test_metrics.d_state = d_state
 
     return model, test_metrics
 
@@ -1669,6 +1795,14 @@ def cmd_generate(args):
 
 def cmd_run(args):
     """Run full benchmark."""
+    if args.chunk_size <= 0:
+        logger.error(f"--chunk-size must be > 0, got {args.chunk_size}")
+        import sys
+
+        sys.exit(1)
+    if args.mamba_version == 1 and args.chunk_size != 256:
+        logger.warning("--chunk-size is ignored when --mamba-version 1")
+
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1731,13 +1865,19 @@ def cmd_run(args):
             num_workers=args.num_workers,
             cache_mode=args.cache_mode,
             use_amp=not args.no_amp,
-            use_checkpoint=not args.no_checkpoint,
+            use_checkpoint=args.checkpoint,
+            grad_accum_steps=args.grad_accum,
+            mamba_version=args.mamba_version,
+            chunk_size=args.chunk_size,
+            d_state=args.d_state,
         )
 
         results[model_type] = metrics
 
-        # Save checkpoint
-        checkpoint_path = output_dir / "checkpoints" / f"{model_type}_best.pt"
+        # Save checkpoint (filename encodes the encoder config for traceability)
+        _mv = args.mamba_version if args.encoder == "mamba" else ""
+        _mv_tag = f"_mamba{_mv}" if _mv else ""
+        checkpoint_path = output_dir / "checkpoints" / f"{model_type}{_mv_tag}_best.pt"
         checkpoint_path.parent.mkdir(exist_ok=True)
         torch.save(model.state_dict(), checkpoint_path)
 
@@ -1773,6 +1913,29 @@ def cmd_run(args):
     print(f"\nResults saved to {output_dir}")
 
 
+def _smoke_test_mamba(device: torch.device) -> None:
+    """Instantiate Mamba1 and Mamba2 encoders, run one fwd/bwd to catch config errors early."""
+    if not HAS_MAMBA:
+        return
+    versions = [1]
+    if HAS_MAMBA2:
+        versions.append(2)
+    for version in versions:
+        enc = MambaEncoder(
+            input_dim=4,
+            hidden_dim=64,
+            num_layers=1,
+            mamba_version=version,
+        ).to(device)
+        x = torch.randn(2, 16, 4, device=device)
+        loss = enc(x).sum()
+        loss.backward()
+        del enc, x, loss
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    logger.info(f"Mamba smoke test passed (versions={versions}).")
+
+
 def cmd_profile(args):
     """
     Quick profiling mode: one model, 2 epochs, fixed seed, per-phase timers.
@@ -1781,6 +1944,14 @@ def cmd_profile(args):
     ``args.profile_epochs`` epochs, and prints a per-phase wall-clock
     breakdown so you can see which bottleneck dominates after each change.
     """
+    if args.chunk_size <= 0:
+        logger.error(f"--chunk-size must be > 0, got {args.chunk_size}")
+        import sys
+
+        sys.exit(1)
+    if args.mamba_version == 1 and args.chunk_size != 256:
+        logger.warning("--chunk-size is ignored when --mamba-version 1")
+
     import random
 
     torch.manual_seed(args.seed)
@@ -1834,6 +2005,7 @@ def cmd_profile(args):
     )
 
     # ---- model ---------------------------------------------------------------
+    _smoke_test_mamba(device)
     model = create_model(
         model_type=args.model,
         encoder_type=args.encoder,
@@ -1841,7 +2013,10 @@ def cmd_profile(args):
         max_duration=args.max_duration,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
-        use_checkpoint=not args.no_checkpoint,
+        d_state=args.d_state,
+        use_checkpoint=args.checkpoint,
+        mamba_version=args.mamba_version,
+        chunk_size=args.chunk_size,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -1943,8 +2118,17 @@ def cmd_profile(args):
 
     # ---- report --------------------------------------------------------------
     total = sum(v for k, v in phase_times.items() if k != "encode_cache_s")
+    _enc_tag = (
+        f"mamba{args.mamba_version}, d_state={args.d_state}"
+        + (f", chunk_size={args.chunk_size}" if args.mamba_version == 2 else "")
+        if args.encoder == "mamba"
+        else args.encoder
+    )
     print(f"\n{'─'*55}")
-    print(f"  Profile: model={args.model}  epochs={args.profile_epochs}  seqs={len(train_seqs)}")
+    print(
+        f"  Profile: model={args.model}  encoder={_enc_tag}  "
+        f"epochs={args.profile_epochs}  seqs={len(train_seqs)}"
+    )
     print(f"{'─'*55}")
     print(f"  {'Phase':<28} {'Time (s)':>10}  {'%':>6}")
     print(f"{'─'*55}")
@@ -2045,7 +2229,7 @@ def main():
     run_parser.add_argument("--max-duration", type=int, default=1000, help="Max segment duration K")
     run_parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension")
     run_parser.add_argument("--num-layers", type=int, default=4, help="Number of encoder layers")
-    run_parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    run_parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
     run_parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     run_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     run_parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -2100,10 +2284,46 @@ def main():
         "Use when debugging NaNs or if the GPU does not support BF16.",
     )
     run_parser.add_argument(
-        "--no-checkpoint",
+        "--checkpoint",
         action="store_true",
-        help="Disable gradient checkpointing on Mamba layers (default: enabled). "
-        "Disabling increases peak memory ~4× but removes recomputation overhead.",
+        help="Enable Python-level gradient checkpointing on Mamba layers (default: off). "
+        "mamba-ssm already performs kernel-level recomputation internally "
+        "(checkpoint_lvl=1), so this flag causes double recomputation. "
+        "Only use if you are OOM after exhausting --batch-size / --grad-accum options.",
+    )
+    run_parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps (default: 1 = no accumulation). "
+        "Effective batch = batch_size × grad_accum_steps. "
+        "Use when physical batch is limited by VRAM at large T. "
+        "Example: --batch-size 8 --grad-accum 16 → effective B=128.",
+    )
+    run_parser.add_argument(
+        "--mamba-version",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help="Mamba version (default: 2). "
+        "2 = Mamba2 (SSD chunked scan, better memory at large T; requires mamba-ssm >= 2.0). "
+        "1 = Mamba (selective scan, checkpoint_lvl=1 kernel recomputation).",
+    )
+    run_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Mamba2 SSD chunk size (ignored for --mamba-version 1; default: 256). "
+        "Smaller values reduce peak activation memory at the cost of more recomputation. "
+        "Try 64–128 if OOM at large T.",
+    )
+    run_parser.add_argument(
+        "--d-state",
+        type=int,
+        default=16,
+        help="SSM state dimension (default: 16). "
+        "Mamba2's natural default is 128 (better long-range modeling, ~8× more SSM memory). "
+        "Keep at 16 for direct Mamba1 comparison.",
     )
 
     # Profile command
@@ -2125,7 +2345,7 @@ def main():
     prof_parser.add_argument("--max-duration", type=int, default=1000)
     prof_parser.add_argument("--hidden-dim", type=int, default=256)
     prof_parser.add_argument("--num-layers", type=int, default=4)
-    prof_parser.add_argument("--batch-size", type=int, default=4)
+    prof_parser.add_argument("--batch-size", type=int, default=32)
     prof_parser.add_argument("--profile-epochs", type=int, default=2, help="Epochs to profile")
     prof_parser.add_argument(
         "--profile-seqs", type=int, default=20, help="Training sequences to use"
@@ -2134,7 +2354,32 @@ def main():
     prof_parser.add_argument("--num-workers", type=int, default=min(4, os.cpu_count() or 1))
     prof_parser.add_argument("--cache-mode", choices=["ram", "memmap", "none"], default="ram")
     prof_parser.add_argument("--no-amp", action="store_true")
-    prof_parser.add_argument("--no-checkpoint", action="store_true")
+    prof_parser.add_argument("--checkpoint", action="store_true")
+    prof_parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps (default: 1).",
+    )
+    prof_parser.add_argument(
+        "--mamba-version",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help="Mamba version (default: 2). 2 = Mamba2, 1 = Mamba.",
+    )
+    prof_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Mamba2 SSD chunk size (ignored for --mamba-version 1; default: 256).",
+    )
+    prof_parser.add_argument(
+        "--d-state",
+        type=int,
+        default=16,
+        help="SSM state dimension (default: 16).",
+    )
     prof_parser.add_argument("--seed", type=int, default=42)
 
     # Compare command
