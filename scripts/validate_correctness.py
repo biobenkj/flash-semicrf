@@ -164,9 +164,7 @@ SCALES = {
 
 def make_inputs(batch, T, C, K, device="cuda", seed=42):
     """Create synthetic inputs with deterministic seeding."""
-    torch.manual_seed(seed)
-    if device == "cuda":
-        torch.cuda.manual_seed_all(seed)
+    set_all_seeds(seed)
 
     scores = torch.randn(batch, T, C, device=device) * 0.1
     scores = scores - scores.mean(dim=1, keepdim=True)
@@ -178,6 +176,13 @@ def make_inputs(batch, T, C, K, device="cuda", seed=42):
     lengths = torch.full((batch,), T, device=device, dtype=torch.long)
 
     return cum_scores, transition, duration_bias, lengths
+
+
+def set_all_seeds(seed: int):
+    """Set CPU and CUDA RNG seeds for reproducible results."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def section_header(title):
@@ -197,24 +202,33 @@ def result_line(label, passed, detail=""):
     return passed
 
 
+def prob_range_stats(values: torch.Tensor, tol: float = 5e-3):
+    """Return [0,1]-range diagnostics with tolerance for FP drift."""
+    min_val = values.min().item()
+    max_val = values.max().item()
+    oob_mask = (values < -tol) | (values > (1.0 + tol))
+    frac_oob = oob_mask.float().mean().item()
+    return min_val, max_val, frac_oob
+
+
 # ======================================================================
 # §1  Self-consistency: marginal sum checks
 # ======================================================================
 
 
-def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
+def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
     """Validate that boundary marginals satisfy known invariants.
 
     For a Semi-CRF with boundary marginals p(t) = probability a segment
     starts at position t:
-      - Each p(t) ≥ 0 (non-negative, allow FP noise)
+      - Each p(t) ∈ [0, 1] (allow small FP tolerance)
       - Σ_t p(t) should be a reasonable number of segments ∈ [1, T]
       - Positions beyond the sequence length should have marginal = 0
 
     Additionally, we validate emission marginals via the autograd chain:
       - ∂log Z / ∂emission[t, c] = P(y_t = c), the marginal class probability
       - Recovered from ∂log Z / ∂cum_scores via reverse cumsum (suffix sum)
-      - These must sum to 1 over classes for each position
+      - These must sum to 1 over classes for each position and lie in [0, 1]
     """
     section_header("§1  SELF-CONSISTENCY (Marginal Invariants)")
 
@@ -236,7 +250,9 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
         else:
             print()
 
-        cum_scores, transition, duration_bias, lengths = make_inputs(batch, T, C, K, device=device)
+        cum_scores, transition, duration_bias, lengths = make_inputs(
+            batch, T, C, K, device=device, seed=seed
+        )
 
         # --- Triton forward ---
         log_Z, ring_ckpts, interval, log_norm_ckpts = launch_streaming_triton_kernel(
@@ -260,14 +276,15 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
             interval,
         )  # (batch, T)
 
-        # Check 1: All marginals non-negative (allow FP noise up to -0.01)
-        # Note: values slightly above 1.0 are expected from FP accumulation
-        # in the forward-backward algorithm. The key constraint is non-negativity.
-        min_val = marginals.min().item()
-        max_val = marginals.max().item()
-        non_negative = min_val >= -0.01
+        # Check 1: Boundary marginals should lie in [0, 1] up to FP tolerance.
+        # We allow tiny drift but fail if out-of-range mass becomes non-trivial.
+        # Also gate hard on gross violations to catch immediate failures.
+        min_val, max_val, frac_oob = prob_range_stats(marginals, tol=5e-3)
+        boundary_range_ok = frac_oob <= 5e-4 and min_val >= -0.05 and max_val <= 1.05
         all_passed &= result_line(
-            "Marginals non-negative", non_negative, f"min={min_val:.6f}, max={max_val:.6f}"
+            "Boundary marginals in [0, 1]",
+            boundary_range_ok,
+            f"min={min_val:.6f}, max={max_val:.6f}, frac_oob={frac_oob:.4%}",
         )
 
         # Check 2: Marginal sum ≈ expected number of segments
@@ -330,17 +347,20 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
             f"max |total - T| = {total_deviation:.4f}",
         )
 
-        # Check 4: Emission marginals should be non-negative
-        em_min = emission_marginals.min().item()
+        # Check 4: Emission marginals should also lie in [0, 1]
+        em_min, em_max, em_frac_oob = prob_range_stats(emission_marginals, tol=5e-3)
+        emission_range_ok = em_frac_oob <= 5e-4 and em_min >= -0.05 and em_max <= 1.05
         all_passed &= result_line(
-            "Emission marginals non-negative", em_min >= -0.01, f"min = {em_min:.6f}"
+            "Emission marginals in [0, 1]",
+            emission_range_ok,
+            f"min={em_min:.6f}, max={em_max:.6f}, frac_oob={em_frac_oob:.4%}",
         )
 
     # Check 5: Variable-length masking
     print("\n  Config [variable-length]: Testing masking")
     batch_vl, T_vl, C_vl, K_vl = 4, 100, 8, 10
     cum_scores, transition, duration_bias, _ = make_inputs(
-        batch_vl, T_vl, C_vl, K_vl, device=device
+        batch_vl, T_vl, C_vl, K_vl, device=device, seed=seed
     )
     # Variable lengths: some shorter than T
     lengths_vl = torch.tensor([100, 80, 50, 30], device=device, dtype=torch.long)
@@ -378,7 +398,12 @@ def test_self_consistency(cfg: ScaleConfig, device: str) -> bool:
 # ======================================================================
 
 
-def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | None = None) -> bool:
+def test_finite_differences(
+    cfg: ScaleConfig,
+    device: str,
+    params: list[str] | None = None,
+    seed: int = 42,
+) -> bool:
     """Compare autograd to numerical gradient via central differences.
 
     This is the gold-standard correctness test. If autograd matches finite
@@ -407,7 +432,9 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
     print(f"  Parameters: {', '.join(all_params)}")
     print()
 
-    cum_scores, transition, duration_bias, lengths = make_inputs(batch, T, C, K, device=device)
+    cum_scores, transition, duration_bias, lengths = make_inputs(
+        batch, T, C, K, device=device, seed=seed
+    )
 
     all_passed = True
 
@@ -528,7 +555,7 @@ def test_finite_differences(cfg: ScaleConfig, device: str, params: list[str] | N
 # ======================================================================
 
 
-def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
+def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
     """Train with multiple backends, compare final loss.
 
     All backends compute valid gradients (just with different FP rounding
@@ -554,9 +581,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
     print()
 
     # Generate fixed synthetic data (same for all backends)
-    torch.manual_seed(123)
-    if device == "cuda":
-        torch.cuda.manual_seed_all(123)
+    set_all_seeds(seed)
 
     # Synthetic encoder outputs and labels
     hidden_states = torch.randn(batch, T, hidden_dim, device=device)
@@ -595,7 +620,7 @@ def test_training_convergence(cfg: ScaleConfig, device: str) -> bool:
             continue
 
         # Fresh model with identical initialization
-        torch.manual_seed(456)
+        set_all_seeds(seed + 1)
         from flash_semicrf import SemiMarkovCRFHead
 
         model = SemiMarkovCRFHead(
@@ -769,6 +794,7 @@ def main():
     print("=" * 72)
     print(f"  Scale: {cfg.name}")
     print(f"  Device: {args.device}")
+    print(f"  Seed: {args.seed}")
     if args.device == "cuda" and torch.cuda.is_available():
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
     print(f"  Triton available: {HAS_TRITON}")
@@ -790,11 +816,11 @@ def main():
 
     for test_name in tests_to_run:
         if test_name == "self-consistency":
-            passed = test_self_consistency(cfg, args.device)
+            passed = test_self_consistency(cfg, args.device, args.seed)
         elif test_name == "finite-diff":
-            passed = test_finite_differences(cfg, args.device, params=args.params)
+            passed = test_finite_differences(cfg, args.device, params=args.params, seed=args.seed)
         elif test_name == "convergence":
-            passed = test_training_convergence(cfg, args.device)
+            passed = test_training_convergence(cfg, args.device, args.seed)
         else:
             continue
 
@@ -811,11 +837,16 @@ def main():
     if overall_passed:
         print("  ✓ ALL TESTS PASSED")
         print()
-        print("  The Triton Semi-CRF implementation is mathematically correct:")
-        print("  - Marginals satisfy probabilistic invariants")
-        print("  - Autograd matches finite differences")
-        print("  - Training converges equivalently across all backends")
-        print("    (streaming PyTorch, Triton, pytorch-struct dp_scan, dp_standard)")
+        print("  The Triton Semi-CRF implementation is mathematically correct")
+        print("  for the validation stages executed in this run:")
+        for name, _ in results_summary:
+            if name == "self-consistency":
+                print("  - Marginals satisfy probabilistic invariants")
+            elif name == "finite-diff":
+                print("  - Autograd matches finite differences")
+            elif name == "convergence":
+                print("  - Training converges equivalently across all backends")
+                print("    (streaming PyTorch, Triton, pytorch-struct dp_scan, dp_standard)")
     else:
         print("  ✗ SOME TESTS FAILED")
         print("  Review the detailed output above for diagnostics.")
