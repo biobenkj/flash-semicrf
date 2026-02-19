@@ -377,7 +377,9 @@ if HAS_TRITON:
                     t = seg_start + local_t
                     # Only process if within segment and sequence bounds
                     if t < seg_end and t < seq_len:
-                        alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+                        # Online logsumexp accumulators for alpha_t over k durations
+                        m_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+                        l_alpha = tl.zeros([C_PAD], dtype=tl.float64)
 
                         # Loop over valid segment durations k = 1, 2, ..., K
                         for k in tl.range(1, K + 1):
@@ -489,23 +491,27 @@ if HAS_TRITON:
                                 )
                                 score_for_k = tl.where(c_mask, score_for_k, NEG_INF)
 
-                                # Accumulate via logsumexp
-                                # Guard against both inputs being NEG_INF
-                                # Flash Attention pattern: no epsilon needed
-                                max_alpha = tl.maximum(alpha_t, score_for_k)
-                                is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (
-                                    score_for_k < (NEG_INF + 1.0)
+                                # Online logsumexp: accumulate score_for_k into (m_alpha, l_alpha)
+                                # 2 exp + 0 log per k (vs pairwise: 2 exp + 1 log per k)
+                                score_for_k = score_for_k.to(tl.float64)
+                                m_new = tl.maximum(m_alpha, score_for_k)
+                                is_m_neginf = m_alpha < (NEG_INF + 1.0)
+                                is_score_neginf = score_for_k < (NEG_INF + 1.0)
+                                m_new_safe = tl.where(is_m_neginf & is_score_neginf, 0.0, m_new)
+                                l_alpha = tl.where(
+                                    is_m_neginf,
+                                    tl.exp(score_for_k - m_new_safe),
+                                    l_alpha * tl.exp(m_alpha - m_new_safe)
+                                    + tl.exp(score_for_k - m_new_safe),
                                 )
-                                max_alpha_safe = tl.where(is_both_neginf, 0.0, max_alpha)
-                                log_sum_exp_acc = tl.log(
-                                    tl.exp(alpha_t - max_alpha_safe)
-                                    + tl.exp(score_for_k - max_alpha_safe)
-                                )
-                                alpha_t = tl.where(
-                                    is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc
-                                )
+                                m_alpha = m_new
 
-                        # Store recomputed alpha
+                        # Finalize online logsumexp: alpha_t = m + log(l)
+                        is_all_neginf = m_alpha < (NEG_INF + 1.0)
+                        # Guard: tl.log(l_alpha) is only safe when l_alpha > 0.
+                        # When all inputs were NEG_INF, l_alpha == 0 and log(0) = -inf/NaN.
+                        # The is_all_neginf guard short-circuits to NEG_INF before evaluating log.
+                        alpha_t = tl.where(is_all_neginf, NEG_INF, m_alpha + tl.log(l_alpha))
                         alpha_t = tl.where(c_mask, alpha_t, NEG_INF)
                         tl.store(
                             alpha_buf_seg + local_t * stride_ab_t + c_idx * stride_ab_c,
@@ -528,7 +534,9 @@ if HAS_TRITON:
                         )
 
                         # Compute beta[t] and gradients
-                        new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+                        # Online logsumexp accumulators for new_beta over k durations
+                        m_new_beta = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+                        l_new_beta = tl.zeros([C_PAD], dtype=tl.float64)
 
                         # === TILED BACKWARD COMPUTATION ===
                         # Process c_dst dimension in tiles of TILE_C to reduce register pressure.
@@ -1037,21 +1045,28 @@ if HAS_TRITON:
                                         marginal_sum_all_k,
                                     )
 
-                                # Accumulate beta_k into new_beta via logsumexp over k
-                                # Flash Attention pattern: no epsilon needed inside log
-                                # The is_both_neginf_beta guard handles the case where both
-                                # inputs are NEG_INF (sum of exps would be 0)
-                                max_new = tl.maximum(new_beta, beta_k)
-                                is_both_neginf_beta = (new_beta < (NEG_INF + 1.0)) & (
-                                    beta_k < (NEG_INF + 1.0)
+                                # Online logsumexp: accumulate beta_k into (m_new_beta, l_new_beta)
+                                # 2 exp + 0 log per k (vs pairwise: 2 exp + 1 log per k)
+                                beta_k = beta_k.to(tl.float64)
+                                m_new = tl.maximum(m_new_beta, beta_k)
+                                is_m_neginf = m_new_beta < (NEG_INF + 1.0)
+                                is_bk_neginf = beta_k < (NEG_INF + 1.0)
+                                m_new_safe = tl.where(is_m_neginf & is_bk_neginf, 0.0, m_new)
+                                l_new_beta = tl.where(
+                                    is_m_neginf,
+                                    tl.exp(beta_k - m_new_safe),
+                                    l_new_beta * tl.exp(m_new_beta - m_new_safe)
+                                    + tl.exp(beta_k - m_new_safe),
                                 )
-                                max_new_safe = tl.where(is_both_neginf_beta, 0.0, max_new)
-                                log_sum_exp_new = tl.log(
-                                    tl.exp(new_beta - max_new_safe) + tl.exp(beta_k - max_new_safe)
-                                )
-                                new_beta = tl.where(
-                                    is_both_neginf_beta, NEG_INF, max_new + log_sum_exp_new
-                                )
+                                m_new_beta = m_new
+
+                        # Finalize online logsumexp: new_beta = m + log(l)
+                        is_beta_neginf = m_new_beta < (NEG_INF + 1.0)
+                        # Guard: tl.log(l_new_beta) only safe when l_new_beta > 0 (see alpha finalize)
+                        new_beta = tl.where(
+                            is_beta_neginf, NEG_INF, m_new_beta + tl.log(l_new_beta)
+                        )
+                        new_beta = tl.where(c_mask, new_beta, NEG_INF)
 
                         # === After all k iterations: write accumulated grad_cum_scores[t] ===
                         # Single write instead of K*tiles atomics (20-50* reduction at K=1000)
