@@ -53,6 +53,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+from torch.nn.utils.rnn import pad_sequence as rnn_pad_sequence
+from torch.utils.data import DataLoader, Dataset
 
 # Import data generation
 from synthetic_data import (
@@ -67,9 +70,6 @@ from synthetic_data import (
     load_dataset,
     save_dataset,
 )
-from torch import Tensor
-from torch.nn.utils.rnn import pad_sequence as rnn_pad_sequence
-from torch.utils.data import DataLoader, Dataset
 
 # Mamba SSM encoder (optional)
 try:
@@ -2436,5 +2436,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
