@@ -138,13 +138,11 @@ class CodeSentinel:
 
     def _find_sentinel_dir(self) -> Path:
         """Find the sentinel directory."""
-        # Check common locations (agent-neutral first, then legacy)
+        # Check common locations
         candidates = [
             Path(__file__).parent,
             Path(".sentinel"),
             Path.cwd() / ".sentinel",
-            Path(".claude/skills/code-sentinel"),
-            Path.cwd() / ".claude/skills/code-sentinel",
         ]
         for candidate in candidates:
             if candidate.exists() and (candidate / ".sentinel-meta.yaml").exists():
