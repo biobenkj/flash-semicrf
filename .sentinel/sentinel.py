@@ -97,8 +97,8 @@ class TraceVerification:
 
     @property
     def overall_status(self) -> Status:
-        if self.commit_status == Status.STALE:
-            return Status.STALE
+        if self.commit_status in (Status.STALE, Status.UNKNOWN):
+            return self.commit_status
         if any(a.status != "VERIFIED" for a in self.anchors):
             return Status.DEGRADED
         if any(not a.passed for a in self.assumptions):
@@ -133,6 +133,7 @@ class CodeSentinel:
         self.meta_path = self.sentinel_dir / ".sentinel-meta.yaml"
         self.anchors_path = self.sentinel_dir / "anchors" / "anchors.yaml"
         self.traces_dir = self.sentinel_dir / "traces"
+        self.config = self.load_config()
 
     def _find_sentinel_dir(self) -> Path:
         """Find the sentinel directory."""
@@ -450,13 +451,17 @@ class CodeSentinel:
                 # Only include top-level or class methods (indent <= 4 spaces)
                 if len(indent) <= 4:
                     # Determine importance
+                    critical_pats = self.config.get("init_patterns", {}).get(
+                        "critical", CRITICAL_PATTERNS
+                    )
+                    high_pats = self.config.get("init_patterns", {}).get("high", HIGH_PATTERNS)
                     importance = "medium"
-                    for pat in CRITICAL_PATTERNS:
+                    for pat in critical_pats:
                         if re.search(pat, line):
                             importance = "critical"
                             break
                     if importance == "medium":
-                        for pat in HIGH_PATTERNS:
+                        for pat in high_pats:
                             if re.search(pat, line):
                                 importance = "high"
                                 break
@@ -602,21 +607,67 @@ class CodeSentinel:
         with open(self.anchors_path, "w") as f:
             yaml.dump(anchors, f, default_flow_style=False, sort_keys=False)
 
+    def load_config(self) -> dict:
+        """Load sentinel.yaml project config."""
+        config_path = self.sentinel_dir / "sentinel.yaml"
+        if not config_path.exists():
+            return {}
+        return yaml.safe_load(config_path.read_text()) or {}
+
+
+def _json_envelope(command: str, exit_code: int, strict_mode: bool = False, **payload) -> str:
+    """Build JSON output with stable schema envelope."""
+    envelope = {
+        "schema_version": "1.0",
+        "command": command,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "exit_code": exit_code,
+        "strict_mode_active": strict_mode,
+    }
+    envelope.update(payload)
+    return json.dumps(envelope, indent=2)
+
 
 def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Show overall sentinel health."""
     meta = sentinel.load_meta()
+    use_json = getattr(args, "format", None) == "json"
+    live = getattr(args, "verify", False)
 
-    print("Code Sentinel Status")
-    print("=" * 40)
-    print(f"Last global verification: {meta.get('last_global_verification', 'Unknown')}")
-    print()
-    print("Sentinels:")
-
+    traces_data = {}
     for trace_name, trace_meta in meta.get("sentinels", {}).items():
-        status = trace_meta.get("status", "UNKNOWN")
-        symbol = "[PASS]" if status == "VERIFIED" else "[WARN]" if status == "STALE" else "[FAIL]"
-        print(f"  {symbol} {trace_name}: {status}")
+        if live:
+            result = sentinel.verify_trace(trace_name)
+            traces_data[trace_name] = result.overall_status.value
+        else:
+            traces_data[trace_name] = trace_meta.get("status", "UNKNOWN")
+
+    if use_json:
+        last_ver = meta.get("last_global_verification")
+        if hasattr(last_ver, "isoformat"):
+            last_ver = last_ver.isoformat()
+        print(
+            _json_envelope(
+                "status",
+                exit_code=EXIT_SUCCESS,
+                traces=traces_data,
+                last_global_verification=str(last_ver) if last_ver else None,
+                status_source="live" if live else "metadata",
+            )
+        )
+    else:
+        print("Code Sentinel Status")
+        print("=" * 40)
+        print(f"Last global verification: {meta.get('last_global_verification', 'Unknown')}")
+        if live:
+            print("(live verification)")
+        print()
+        print("Sentinels:")
+        for trace_name, status in traces_data.items():
+            symbol = (
+                "[PASS]" if status == "VERIFIED" else "[WARN]" if status == "STALE" else "[FAIL]"
+            )
+            print(f"  {symbol} {trace_name}: {status}")
 
     return EXIT_SUCCESS
 
@@ -779,6 +830,7 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Verify specific trace or all traces."""
     meta = sentinel.load_meta()
     exit_code = EXIT_SUCCESS
+    use_json = getattr(args, "format", None) == "json"
 
     traces_to_verify = []
     if args.all:
@@ -786,28 +838,78 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     elif args.trace:
         traces_to_verify = [args.trace]
     else:
-        print("Error: Specify --trace NAME or --all")
+        msg = "Specify --trace NAME or --all"
+        if use_json:
+            print(
+                _json_envelope(
+                    "verify",
+                    exit_code=EXIT_GENERAL_ERROR,
+                    traces={},
+                    consistency_errors=[],
+                    error=msg,
+                )
+            )
+        else:
+            print(f"Error: {msg}")
         return EXIT_GENERAL_ERROR
 
+    consistency_errors = []
     # Consistency check if requested
     if args.check_consistency:
-        print("=== Consistency Check ===\n")
-        errors = sentinel.check_consistency()
-        if errors:
-            for err in errors:
-                print(f"  [FAIL] {err}")
-            print(f"\nConsistency: {len(errors)} errors found\n")
+        consistency_errors = sentinel.check_consistency()
+        if not use_json:
+            print("=== Consistency Check ===\n")
+            if consistency_errors:
+                for err in consistency_errors:
+                    print(f"  [FAIL] {err}")
+                print(f"\nConsistency: {len(consistency_errors)} errors found\n")
+                exit_code = EXIT_CONSISTENCY_FAILED
+            else:
+                print("  [PASS] All metadata consistent\n")
+        elif consistency_errors:
             exit_code = EXIT_CONSISTENCY_FAILED
-        else:
-            print("  [PASS] All metadata consistent\n")
 
     # Verify each trace
+    json_traces = {}
     for trace_name in traces_to_verify:
         result = sentinel.verify_trace(trace_name)
-        _print_verification_result(result)
+
+        if use_json:
+            json_traces[trace_name] = {
+                "status": result.overall_status.value,
+                "commit_status": result.commit_status.value,
+                "verified_commit": result.verified_commit,
+                "current_commit": result.current_commit,
+                "uncommitted_changes": result.uncommitted_changes,
+                "anchors": {
+                    "verified": sum(1 for a in result.anchors if a.status == "VERIFIED"),
+                    "total": len(result.anchors),
+                    "details": [
+                        {
+                            "name": a.name,
+                            "status": a.status,
+                            "expected": a.expected_line,
+                            "actual": a.actual_line,
+                        }
+                        for a in result.anchors
+                    ],
+                },
+                "assumptions": {
+                    "passed": sum(1 for a in result.assumptions if a.passed),
+                    "total": len(result.assumptions),
+                    "details": [
+                        {"id": a.id, "passed": a.passed, "message": a.message}
+                        for a in result.assumptions
+                    ],
+                },
+            }
+        else:
+            _print_verification_result(result)
 
         if result.overall_status != Status.VERIFIED:
-            if any(a.status == "MISSING" for a in result.anchors):
+            if result.commit_status == Status.UNKNOWN:
+                exit_code = max(exit_code, EXIT_GENERAL_ERROR)
+            elif any(a.status == "MISSING" for a in result.anchors):
                 exit_code = max(exit_code, EXIT_ANCHOR_MISSING)
             elif any(a.status == "DRIFT" for a in result.anchors):
                 exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
@@ -815,6 +917,16 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
                 exit_code = max(exit_code, EXIT_ANCHOR_AMBIGUOUS)
             elif any(not a.passed for a in result.assumptions):
                 exit_code = max(exit_code, EXIT_ASSUMPTION_FAILED)
+
+    if use_json:
+        print(
+            _json_envelope(
+                "verify",
+                exit_code=exit_code,
+                traces=json_traces,
+                consistency_errors=consistency_errors,
+            )
+        )
 
     return exit_code
 
@@ -1311,10 +1423,13 @@ def _generate_dot_graph(nodes: set[str], edges: list[tuple[str, str]]) -> str:
 def cmd_coverage(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Generate trace coverage metrics."""
     anchors = sentinel.load_anchors()
-    src_dir = sentinel.repo_root / "src"
+    src_root = sentinel.config.get("project", {}).get("src_root", "src")
+    src_dir = Path(src_root)
+    if not src_dir.is_absolute():
+        src_dir = sentinel.repo_root / src_dir
 
     if not src_dir.exists():
-        print(f"Error: src/ directory not found at {src_dir}")
+        print(f"Error: source root not found at {src_dir} (project.src_root={src_root!r})")
         return EXIT_GENERAL_ERROR
 
     # Build map of file -> anchored lines
@@ -1547,6 +1662,134 @@ def cmd_sync_docs(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     return EXIT_SUCCESS
 
 
+def cmd_route(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Route a symptom to the appropriate trace."""
+    symptom = args.symptom
+    use_json = getattr(args, "format", None) == "json"
+    routing = sentinel.config.get("routing", [])
+
+    if not routing:
+        msg = "No routing entries configured in sentinel.yaml"
+        if use_json:
+            print(_json_envelope("route", exit_code=EXIT_GENERAL_ERROR, error=msg))
+        else:
+            print(f"Error: {msg}")
+        return EXIT_GENERAL_ERROR
+
+    # Deterministic match precedence: exact > case-insensitive > substring
+    match = None
+    match_type = None
+
+    # 1. Exact match
+    for entry in routing:
+        if entry["symptom"] == symptom:
+            match = entry
+            match_type = "exact"
+            break
+
+    # 2. Case-insensitive exact match
+    if not match:
+        symptom_lower = symptom.lower()
+        for entry in routing:
+            if entry["symptom"].lower() == symptom_lower:
+                match = entry
+                match_type = "case_insensitive"
+                break
+
+    # 3. Substring containment
+    if not match:
+        for entry in routing:
+            if (
+                symptom_lower in entry["symptom"].lower()
+                or entry["symptom"].lower() in symptom_lower
+            ):
+                match = entry
+                match_type = "substring"
+                break
+
+    if not match:
+        msg = f"No routing match for symptom: {symptom}"
+        if use_json:
+            print(_json_envelope("route", exit_code=EXIT_GENERAL_ERROR, error=msg))
+        else:
+            print(f"Error: {msg}")
+            print("\nAvailable symptoms:")
+            for entry in routing:
+                print(f"  - {entry['symptom']}")
+        return EXIT_GENERAL_ERROR
+
+    trace_name = match["trace"]
+    guidance = match["guidance"]
+
+    # Auto-verify the suggested trace
+    verification_result = sentinel.verify_trace(trace_name)
+    route_exit_code = EXIT_SUCCESS
+    if verification_result.overall_status != Status.VERIFIED:
+        if verification_result.commit_status == Status.UNKNOWN:
+            route_exit_code = EXIT_GENERAL_ERROR
+        elif verification_result.commit_status == Status.STALE:
+            route_exit_code = EXIT_ANCHOR_DRIFT
+        elif any(a.status == "MISSING" for a in verification_result.anchors):
+            route_exit_code = EXIT_ANCHOR_MISSING
+        elif any(a.status == "DRIFT" for a in verification_result.anchors):
+            route_exit_code = EXIT_ANCHOR_DRIFT
+        elif any(a.status == "AMBIGUOUS" for a in verification_result.anchors):
+            route_exit_code = EXIT_ANCHOR_AMBIGUOUS
+        elif any(not a.passed for a in verification_result.assumptions):
+            route_exit_code = EXIT_ASSUMPTION_FAILED
+        else:
+            route_exit_code = EXIT_GENERAL_ERROR
+
+    verification_summary = {
+        "trace": trace_name,
+        "status": verification_result.overall_status.value,
+        "commit_status": verification_result.commit_status.value,
+        "anchors_verified": sum(1 for a in verification_result.anchors if a.status == "VERIFIED"),
+        "anchors_total": len(verification_result.anchors),
+    }
+
+    if use_json:
+        print(
+            _json_envelope(
+                "route",
+                exit_code=route_exit_code,
+                symptom=symptom,
+                matched_key=match["symptom"],
+                trace=trace_name,
+                guidance=guidance,
+                match_type=match_type,
+                verification=verification_summary,
+            )
+        )
+    else:
+        print(f"Symptom: {symptom}")
+        print(f"  Matched: {match['symptom']} ({match_type})")
+        print(f"  Primary trace: {trace_name}")
+        print(f"  Check first: {guidance}")
+        print()
+        print("  Verifying trace...")
+        status_sym = "[PASS]" if verification_result.overall_status == Status.VERIFIED else "[FAIL]"
+        print(f"  Grounded: {trace_name} @ {verification_result.verified_commit} {status_sym}")
+        print()
+        print(f"  Load trace: .sentinel/traces/{trace_name}.md")
+        if route_exit_code != EXIT_SUCCESS:
+            print(
+                "  [WARN] Suggested trace is not grounded; run verify/update before relying on it."
+            )
+
+    return route_exit_code
+
+
+def cmd_update(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Update a sentinel (alias for retrace --auto --apply)."""
+    # Delegate to retrace with auto+apply
+    args.auto = True
+    args.apply = True
+    args.anchors_only = False
+    args.diff_only = False
+    return cmd_retrace(args, sentinel)
+
+
 def cmd_context(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Generate context for LLM consumption."""
     trace_name = args.trace
@@ -1662,13 +1905,15 @@ def main() -> int:
         epilog="""
 Examples:
   ./sentinel.py status                          Show sentinel health
+  ./sentinel.py status --format json            JSON status output
+  ./sentinel.py status --verify                 Live verification status
   ./sentinel.py init src/module.py              Scaffold a new trace
   ./sentinel.py verify --trace triton-forward-k3plus
-  ./sentinel.py verify --all --check-consistency
+  ./sentinel.py verify --all --format json      JSON verification output
+  ./sentinel.py route "NaN in loss"             Route symptom to trace
+  ./sentinel.py update --trace NAME             Auto-update a sentinel
   ./sentinel.py pipeline                        Full pre-commit pipeline
-  ./sentinel.py retrace NAME --auto             Analyze anchor impacts
-  ./sentinel.py retrace NAME --auto --apply     Apply safe updates
-  ./sentinel.py retrace NAME --anchors-only     Force update line numbers
+  ./sentinel.py retrace NAME --auto --apply     Analyze and apply safe updates
   ./sentinel.py report --format json
         """,
     )
@@ -1677,7 +1922,13 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # status
-    subparsers.add_parser("status", help="Show sentinel health")
+    status_parser = subparsers.add_parser("status", help="Show sentinel health")
+    status_parser.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    status_parser.add_argument(
+        "--verify", action="store_true", help="Run live verification (read-only, no state mutation)"
+    )
 
     # init
     init_parser = subparsers.add_parser("init", help="Scaffold a new trace from source file")
@@ -1691,6 +1942,9 @@ Examples:
     verify_parser.add_argument("--all", action="store_true", help="Verify all traces")
     verify_parser.add_argument(
         "--check-consistency", action="store_true", help="Check meta/anchor/trace consistency"
+    )
+    verify_parser.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
     )
 
     # pipeline
@@ -1760,6 +2014,21 @@ Examples:
         "--dry-run", action="store_true", help="Show what would be changed without writing"
     )
 
+    # route
+    route_parser = subparsers.add_parser("route", help="Route a symptom to the appropriate trace")
+    route_parser.add_argument("symptom", help="Symptom description (e.g. 'NaN in loss')")
+    route_parser.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # update
+    update_parser = subparsers.add_parser(
+        "update", help="Update a sentinel (auto-analyze and apply)"
+    )
+    update_parser.add_argument(
+        "--trace", dest="trace_name", required=True, help="Name of trace to update"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1778,6 +2047,8 @@ Examples:
         "verify": cmd_verify,
         "pipeline": cmd_pipeline,
         "retrace": cmd_retrace,
+        "update": cmd_update,
+        "route": cmd_route,
         "install-hooks": cmd_install_hooks,
         "report": cmd_report,
         "graph": cmd_graph,

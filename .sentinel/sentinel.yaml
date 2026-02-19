@@ -1,0 +1,55 @@
+version: "1.0"
+
+project:
+  name: flash-semicrf
+  src_root: src/flash_semicrf
+
+# Domain-specific patterns for `sentinel init` scaffolding
+# (previously hardcoded as CRITICAL_PATTERNS / HIGH_PATTERNS in sentinel.py)
+init_patterns:
+  critical:
+    - 'def forward\('
+    - 'def backward\('
+    - '\.apply\('
+    - '@triton\.jit'
+    - 'def semi_crf'
+    - 'def launch_'
+  high:
+    - 'def __init__\('
+    - 'logsumexp'
+    - 'NEG_INF'
+    - 'torch\.isfinite'
+    - 'torch\.isnan'
+    - 'torch\.clamp'
+    - 'def _score'
+    - 'def decode'
+
+# Symptom -> trace routing for `sentinel route`
+# Ordered list (not a map) -- match priority is list order, not YAML key order.
+# This avoids YAML implementation differences in map ordering across parsers.
+routing:
+  - symptom: "NaN in loss"
+    trace: triton-forward-k3plus
+    guidance: "Check NEG_INF guards"
+  - symptom: "NaN in backward"
+    trace: triton-backward-k3plus
+    guidance: "Check partition validation"
+  - symptom: "wrong gradients"
+    trace: triton-backward-k3plus
+    guidance: "Cross-reference outputs"
+  - symptom: "OOM on GPU"
+    trace: triton-backward-k3plus
+    guidance: "Recomputation Logic section"
+  - symptom: "K=1/K=2 mismatch"
+    trace: k1-linear-crf
+    guidance: "Dispatch conditions"
+  - symptom: "Triton vs PyTorch diff"
+    trace: triton-forward-k3plus
+    guidance: "Ring buffer indexing"
+
+# CI and strictness config
+ci:
+  fail_on_verify: true
+  strict_mode: false  # advisory: stale => warning (exit 0). strict: stale => exit 2
+  report_format: json
+  report_artifact: sentinel-report.json
