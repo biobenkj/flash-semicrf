@@ -47,6 +47,26 @@ routing:
     trace: triton-forward-k3plus
     guidance: "Ring buffer indexing"
 
+# Agent adapter registration
+# Each adapter has a template (source of truth in .sentinel/adapters/)
+# and a target (where the agent expects to find it).
+# mode:
+#   - copy: exact file copy (default)
+#   - managed_block: update only sentinel-owned block inside target file
+# Run `sentinel install-adapter <name>` to install.
+adapters:
+  claude:
+    template: adapters/claude.skill.md
+    target: .claude/skills/code-sentinel/SKILL.md
+    description: Claude Code skill definition
+  codex:
+    template: adapters/codex.instructions.md
+    target: AGENTS.md
+    description: OpenAI Codex agent instructions (managed block in AGENTS.md)
+    mode: managed_block
+    block_start: "<!-- sentinel:codex:start -->"
+    block_end: "<!-- sentinel:codex:end -->"
+
 # CI and strictness config
 ci:
   fail_on_verify: true

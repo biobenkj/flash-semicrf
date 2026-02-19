@@ -1,21 +1,20 @@
 # Code Sentinel
 
-**Persistent execution traces ("Sentinels") for flash-semicrf development.**
+**Mechanically-anchored execution traces for verified code understanding.**
 
-Code Sentinel prevents hallucinations about code execution paths by maintaining verified baseline documentation that can be mechanically checked against source code. It transforms the traditional "trust the model's understanding" approach into a "verify then trust" methodology.
+Code Sentinel maintains persistent documentation of code execution paths ("traces") that are anchored to specific git commits and mechanically verified against source code. Traces capture *why* code works — algorithm flow, critical invariants, numerical stability patterns — knowledge that source code alone does not express.
+
+## What Sentinel Does
+
+- **Anchors documentation to git state**: Every trace records the commit it was verified against. Pattern-based anchors detect when source lines drift.
+- **Detects staleness mechanically**: Committed changes, uncommitted edits, and anchor drift are detected automatically — no human judgment required.
+- **Routes debugging by symptom**: Maps failure symptoms (NaN, wrong gradients, OOM) to the specific trace and section to check.
+- **Gates agent advice on verification**: Agents call `verify` before providing code-path-level advice. If the trace is stale, the agent knows to re-verify before proceeding.
+- **Provides structured output for tooling**: JSON output with stable schema for CI pipelines, agent adapters, and cross-tool integration.
 
 ## Philosophy
 
-When using LLMs for code assistance, the model constructs a mental map of your codebase from context. This map can drift from reality through:
-
-1. **Stale context**: Code changed since the model last read it
-2. **Agentic assumptions**: Model "fills in gaps" with plausible but incorrect details
-3. **Hallucinated connections**: Inventing function calls or data flows that don't exist
-
-Code Sentinel addresses this by:
-- **Grounding** model understanding in verified trace documents
-- **Detecting drift** through mechanical anchor verification
-- **Forcing synchronization** before providing advice
+Code understanding drifts from reality through stale context, plausible-but-wrong assumptions, and invented connections. This applies equally to human developers, LLM agents, and documentation. Sentinel addresses it by making documentation *verifiable* — if the code has changed since the trace was written, the system detects it mechanically and flags it before anyone relies on outdated information.
 
 ## Quick Start
 
@@ -325,6 +324,34 @@ Install git hooks for automatic verification on commit.
 ./sentinel.py install-hooks
 ```
 
+### `sentinel.py install-adapter`
+
+Install/update agent registration files from canonical templates in `.sentinel/adapters/`.
+
+```bash
+# Show adapter install state
+./sentinel.py install-adapter --list
+
+# Install/update one adapter
+./sentinel.py install-adapter claude
+./sentinel.py install-adapter codex
+
+# Overwrite copy-mode target even when it differs
+./sentinel.py install-adapter claude --force
+
+# Preview managed-block changes without writing
+./sentinel.py install-adapter codex --dry-run
+```
+
+Install status values:
+- `up-to-date`: target content matches template (or managed block matches template)
+- `drifted`: target exists but differs from template/managed block
+- `missing`: target file does not exist
+- `invalid`: bad adapter config (missing template, unsafe path, unsupported mode)
+
+In `managed_block` mode, if a target exists but has no block markers yet, sentinel
+appends a managed block and preserves existing content. Use `--dry-run` to preview.
+
 ### `sentinel.py report`
 
 Generate machine-readable verification report.
@@ -483,6 +510,26 @@ trace-name:
     drift_tolerance: 20
     after: "class ClassName"  # Optional: disambiguate repeated patterns
 ```
+
+### sentinel.yaml (adapter install config)
+
+```yaml
+adapters:
+  claude:
+    template: adapters/claude.skill.md
+    target: .claude/skills/code-sentinel/SKILL.md
+    mode: copy  # default
+
+  codex:
+    template: adapters/codex.instructions.md
+    target: AGENTS.md
+    mode: managed_block
+    block_start: "<!-- sentinel:codex:start -->"
+    block_end: "<!-- sentinel:codex:end -->"
+```
+
+`managed_block` mode updates only the sentinel-owned block in the target file, so
+other agent instructions can coexist in `AGENTS.md` without being overwritten.
 
 ## Best Practices
 

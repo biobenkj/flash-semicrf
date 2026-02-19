@@ -62,9 +62,10 @@ HIGH_PATTERNS = [
 
 class Status(Enum):
     VERIFIED = "VERIFIED"
-    STALE = "STALE"
+    STALE_COMMIT = "STALE_COMMIT"
+    STALE_CONTENT = "STALE_CONTENT"
     DEGRADED = "DEGRADED"
-    UNKNOWN = "UNKNOWN"
+    MISSING = "MISSING"
 
 
 @dataclass
@@ -97,7 +98,7 @@ class TraceVerification:
 
     @property
     def overall_status(self) -> Status:
-        if self.commit_status in (Status.STALE, Status.UNKNOWN):
+        if self.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT, Status.MISSING):
             return self.commit_status
         if any(a.status != "VERIFIED" for a in self.anchors):
             return Status.DEGRADED
@@ -258,7 +259,7 @@ class CodeSentinel:
         if not trace_meta:
             return TraceVerification(
                 name=trace_name,
-                commit_status=Status.UNKNOWN,
+                commit_status=Status.MISSING,
                 verified_commit="",
                 current_commit=None,
                 uncommitted_changes=False,
@@ -280,9 +281,9 @@ class CodeSentinel:
                 uncommitted = True
 
         if current_commit and current_commit != verified_commit:
-            commit_status = Status.STALE
+            commit_status = Status.STALE_COMMIT
         elif uncommitted:
-            commit_status = Status.STALE
+            commit_status = Status.STALE_CONTENT
 
         # Verify anchors
         anchor_results = []
@@ -628,6 +629,27 @@ def _json_envelope(command: str, exit_code: int, strict_mode: bool = False, **pa
     return json.dumps(envelope, indent=2)
 
 
+def _resolve_strict(args: argparse.Namespace, sentinel: CodeSentinel) -> tuple[bool, str | None]:
+    """Resolve strictness mode with precedence: CLI flag > env > config > default.
+
+    Returns `(strict_mode, error_message)`. If `error_message` is not None,
+    strictness flags were invalid and callers should return EXIT_GENERAL_ERROR.
+    """
+    has_strict = getattr(args, "strict", False)
+    has_no_strict = getattr(args, "no_strict", False)
+
+    if has_strict and has_no_strict:
+        return False, "conflicting strictness flags (--strict and --no-strict)"
+
+    if has_strict:
+        return True, None
+    if has_no_strict:
+        return False, None
+    if os.environ.get("SENTINEL_STRICT") == "1":
+        return True, None
+    return sentinel.config.get("ci", {}).get("strict_mode", False), None
+
+
 def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Show overall sentinel health."""
     meta = sentinel.load_meta()
@@ -665,7 +687,7 @@ def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print("Sentinels:")
         for trace_name, status in traces_data.items():
             symbol = (
-                "[PASS]" if status == "VERIFIED" else "[WARN]" if status == "STALE" else "[FAIL]"
+                "[PASS]" if status == "VERIFIED" else "[WARN]" if "STALE" in status else "[FAIL]"
             )
             print(f"  {symbol} {trace_name}: {status}")
 
@@ -831,6 +853,22 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     meta = sentinel.load_meta()
     exit_code = EXIT_SUCCESS
     use_json = getattr(args, "format", None) == "json"
+    strict, strict_err = _resolve_strict(args, sentinel)
+    if strict_err:
+        if use_json:
+            print(
+                _json_envelope(
+                    "verify",
+                    exit_code=EXIT_GENERAL_ERROR,
+                    strict_mode=strict,
+                    traces={},
+                    consistency_errors=[],
+                    error=strict_err,
+                )
+            )
+        else:
+            print(f"Error: {strict_err}", file=sys.stderr)
+        return EXIT_GENERAL_ERROR
 
     traces_to_verify = []
     if args.all:
@@ -844,6 +882,7 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
                 _json_envelope(
                     "verify",
                     exit_code=EXIT_GENERAL_ERROR,
+                    strict_mode=strict,
                     traces={},
                     consistency_errors=[],
                     error=msg,
@@ -907,9 +946,13 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             _print_verification_result(result)
 
         if result.overall_status != Status.VERIFIED:
-            if result.commit_status == Status.UNKNOWN:
+            if result.commit_status == Status.MISSING:
                 exit_code = max(exit_code, EXIT_GENERAL_ERROR)
-            elif any(a.status == "MISSING" for a in result.anchors):
+            if result.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT):
+                if strict:
+                    exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
+                # advisory mode: stale is warning only, no exit code change
+            if any(a.status == "MISSING" for a in result.anchors):
                 exit_code = max(exit_code, EXIT_ANCHOR_MISSING)
             elif any(a.status == "DRIFT" for a in result.anchors):
                 exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
@@ -923,6 +966,7 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             _json_envelope(
                 "verify",
                 exit_code=exit_code,
+                strict_mode=strict,
                 traces=json_traces,
                 consistency_errors=consistency_errors,
             )
@@ -938,13 +982,11 @@ def _print_verification_result(result: TraceVerification) -> None:
     else:
         print(f"Grounded: {result.name} @ {result.verified_commit}")
 
-        if result.commit_status == Status.STALE:
-            status_type = (
-                "UNCOMMITTED_CHANGES" if result.uncommitted_changes else "COMMITTED_CHANGES"
-            )
-            if result.uncommitted_changes and result.current_commit != result.verified_commit:
-                status_type = "BOTH"
-            print(f"  Commit: STALE ({status_type})")
+        if result.commit_status == Status.MISSING:
+            print("  Trace: MISSING (not found in .sentinel-meta.yaml)")
+
+        elif result.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT):
+            print(f"  Commit: {result.commit_status.value}")
             print(
                 f"    Verified: {result.verified_commit} | Current: {result.current_commit or 'unknown'}"
             )
@@ -976,8 +1018,13 @@ def _print_verification_result(result: TraceVerification) -> None:
 
 def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Run full pre-commit pipeline."""
+    strict, strict_err = _resolve_strict(args, sentinel)
+    if strict_err:
+        print(f"Error: {strict_err}", file=sys.stderr)
+        return EXIT_GENERAL_ERROR
+
     print("=" * 60)
-    print("Code Sentinel Pipeline")
+    print(f"Code Sentinel Pipeline{' (strict)' if strict else ''}")
     print("=" * 60)
     print()
 
@@ -1028,6 +1075,10 @@ def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print(f"      Assumptions: {assumption_status}")
 
         if result.overall_status != Status.VERIFIED:
+            if result.commit_status == Status.MISSING:
+                exit_code = max(exit_code, EXIT_GENERAL_ERROR)
+            if result.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT) and strict:
+                exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
             if any(a.status != "VERIFIED" for a in result.anchors):
                 exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
             if any(not a.passed for a in result.assumptions):
@@ -1249,6 +1300,281 @@ def cmd_install_hooks(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     else:
         print("Failed to install pre-commit hooks")
         return EXIT_GENERAL_ERROR
+
+
+def _normalize_text_for_compare(content: str) -> str:
+    """Normalize text for stable comparisons across platforms."""
+    return content.replace("\r\n", "\n").rstrip("\n")
+
+
+def _resolve_path_within(
+    base_dir: Path, configured_path: str, field_name: str
+) -> tuple[Path | None, str | None]:
+    """Resolve a configured path and ensure it stays under base_dir."""
+    if not configured_path:
+        return None, f"{field_name} is empty"
+
+    raw = Path(configured_path)
+    if raw.is_absolute():
+        return None, f"{field_name} must be relative, got absolute path: {configured_path}"
+
+    resolved = (base_dir / raw).resolve()
+    try:
+        resolved.relative_to(base_dir.resolve())
+    except ValueError:
+        return None, f"{field_name} escapes base directory: {configured_path}"
+
+    return resolved, None
+
+
+def _managed_block_markers(spec: dict, adapter_name: str) -> tuple[str, str]:
+    """Get managed block markers for an adapter."""
+    start = spec.get("block_start", f"<!-- sentinel:{adapter_name}:start -->")
+    end = spec.get("block_end", f"<!-- sentinel:{adapter_name}:end -->")
+    return start, end
+
+
+def _extract_managed_block_content(content: str, block_start: str, block_end: str) -> str | None:
+    """Extract managed block body, or None if markers are missing."""
+    start_idx = content.find(block_start)
+    if start_idx < 0:
+        return None
+    end_idx = content.find(block_end, start_idx + len(block_start))
+    if end_idx < 0:
+        return None
+    return content[start_idx + len(block_start) : end_idx].strip("\r\n")
+
+
+def _render_managed_block(template_content: str, block_start: str, block_end: str) -> str:
+    """Render a managed block wrapper around template content."""
+    return f"{block_start}\n{template_content.rstrip()}\n{block_end}\n"
+
+
+def _prepare_adapter_install(
+    sentinel: CodeSentinel, adapter_name: str, spec: dict
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate adapter config and resolve safe paths."""
+    template_rel = spec.get("template", "")
+    target_rel = spec.get("target", "")
+    mode = spec.get("mode", "copy")
+
+    if mode not in {"copy", "managed_block"}:
+        return None, f"adapter '{adapter_name}' has unsupported mode: {mode}"
+
+    template_path, template_err = _resolve_path_within(
+        sentinel.sentinel_dir, template_rel, f"adapter '{adapter_name}' template"
+    )
+    if template_err:
+        return None, template_err
+
+    target_path, target_err = _resolve_path_within(
+        sentinel.repo_root, target_rel, f"adapter '{adapter_name}' target"
+    )
+    if target_err:
+        return None, target_err
+
+    block_start, block_end = _managed_block_markers(spec, adapter_name)
+    return {
+        "name": adapter_name,
+        "mode": mode,
+        "template_rel": template_rel,
+        "target_rel": target_rel,
+        "template_path": template_path,
+        "target_path": target_path,
+        "block_start": block_start,
+        "block_end": block_end,
+    }, None
+
+
+def _adapter_install_status(adapter_cfg: dict[str, Any]) -> tuple[str, str]:
+    """Return adapter status: up_to_date, drifted, missing, invalid."""
+    template_path: Path = adapter_cfg["template_path"]
+    target_path: Path = adapter_cfg["target_path"]
+
+    if not template_path.exists():
+        return "invalid", f"template missing: {adapter_cfg['template_rel']}"
+    if not template_path.is_file():
+        return "invalid", f"template is not a file: {adapter_cfg['template_rel']}"
+
+    template_content = template_path.read_text()
+    if not target_path.exists():
+        return "missing", "target file does not exist"
+
+    target_content = target_path.read_text()
+    mode = adapter_cfg["mode"]
+    if mode == "copy":
+        if _normalize_text_for_compare(target_content) == _normalize_text_for_compare(
+            template_content
+        ):
+            return "up_to_date", "target matches template"
+        return "drifted", "target differs from template"
+
+    managed_content = _extract_managed_block_content(
+        target_content, adapter_cfg["block_start"], adapter_cfg["block_end"]
+    )
+    if managed_content is None:
+        return "drifted", "managed block markers not found in target"
+    if _normalize_text_for_compare(managed_content) == _normalize_text_for_compare(
+        template_content
+    ):
+        return "up_to_date", "managed block matches template"
+    return "drifted", "managed block differs from template"
+
+
+def cmd_install_adapter(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Install an agent adapter from template."""
+    adapters = sentinel.config.get("adapters", {})
+    dry_run = getattr(args, "dry_run", False)
+
+    if args.list:
+        if not adapters:
+            print("No adapters configured in sentinel.yaml")
+            return EXIT_SUCCESS
+        print("Available adapters:")
+        status_labels = {
+            "up_to_date": "[up-to-date]",
+            "drifted": "[drifted]",
+            "missing": "[missing]",
+            "invalid": "[invalid]",
+        }
+        for name, spec in adapters.items():
+            target = spec.get("target", "?")
+            desc = spec.get("description", "")
+            adapter_cfg, prep_err = _prepare_adapter_install(sentinel, name, spec)
+            if prep_err:
+                status = status_labels["invalid"]
+                detail = prep_err
+            else:
+                status_key, detail = _adapter_install_status(adapter_cfg)
+                status = status_labels[status_key]
+            print(f"  {name:<12} {status}  -> {target}")
+            if desc:
+                print(f"               {desc}")
+            if detail:
+                print(f"               {detail}")
+        return EXIT_SUCCESS
+
+    adapter_name = args.adapter
+    if not adapter_name:
+        print("Error: specify an adapter name or --list")
+        return EXIT_GENERAL_ERROR
+
+    if adapter_name not in adapters:
+        print(f"Error: unknown adapter '{adapter_name}'")
+        print(f"Available: {', '.join(adapters.keys())}")
+        return EXIT_GENERAL_ERROR
+
+    adapter_cfg, prep_err = _prepare_adapter_install(sentinel, adapter_name, adapters[adapter_name])
+    if prep_err:
+        print(f"Error: {prep_err}")
+        return EXIT_GENERAL_ERROR
+
+    status_key, status_detail = _adapter_install_status(adapter_cfg)
+    if status_key == "invalid":
+        print(f"Error: {status_detail}")
+        return EXIT_GENERAL_ERROR
+
+    template_path: Path = adapter_cfg["template_path"]
+    target_path: Path = adapter_cfg["target_path"]
+    template_rel = adapter_cfg["template_rel"]
+    target_rel = adapter_cfg["target_rel"]
+    content = template_path.read_text()
+    mode = adapter_cfg["mode"]
+
+    if mode == "copy":
+        # Check if target already exists and differs
+        if target_path.exists() and not args.force:
+            existing = target_path.read_text()
+            if _normalize_text_for_compare(existing) == _normalize_text_for_compare(content):
+                print(f"Already up to date: {target_rel}")
+                return EXIT_SUCCESS
+            print(f"Target exists and differs: {target_rel}")
+            print("Use --force to overwrite")
+            return EXIT_GENERAL_ERROR
+
+        # Install
+        action = "overwrite existing target" if target_path.exists() else "create target"
+        if dry_run:
+            print(f"Dry run: would install {adapter_name} adapter: {target_rel}")
+            print(f"  Source: {template_rel}")
+            print(f"  Mode: {mode} ({action})")
+            return EXIT_SUCCESS
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content)
+        print(f"Installed {adapter_name} adapter: {target_rel}")
+        print(f"  Source: {template_rel}")
+        return EXIT_SUCCESS
+
+    # managed_block mode: only update sentinel-managed block content.
+    block_start = adapter_cfg["block_start"]
+    block_end = adapter_cfg["block_end"]
+    managed_block = _render_managed_block(content, block_start, block_end)
+    target_existed = target_path.exists()
+
+    if target_existed:
+        existing = target_path.read_text()
+        managed_content = _extract_managed_block_content(existing, block_start, block_end)
+
+        if managed_content is not None:
+            if _normalize_text_for_compare(managed_content) == _normalize_text_for_compare(content):
+                print(f"Already up to date: {target_rel}")
+                return EXIT_SUCCESS
+
+            start_idx = existing.find(block_start)
+            end_idx = existing.find(block_end, start_idx + len(block_start))
+            suffix_idx = end_idx + len(block_end)
+            if existing.startswith("\r\n", suffix_idx):
+                suffix_idx += 2
+            elif existing.startswith("\n", suffix_idx):
+                suffix_idx += 1
+            new_content = existing[:start_idx] + managed_block + existing[suffix_idx:]
+            action = "updated managed block"
+        elif _normalize_text_for_compare(existing) == _normalize_text_for_compare(content):
+            # Legacy full-file adapter: migrate in-place to managed block.
+            new_content = managed_block
+            action = "migrated legacy adapter file to managed block"
+        else:
+            # Preserve non-sentinel content and append sentinel-owned block.
+            prefix = existing.rstrip("\n")
+            if prefix:
+                new_content = f"{prefix}\n\n{managed_block}"
+            else:
+                new_content = managed_block
+            action = "appended managed block to existing file"
+            print("Warning: target has no managed block markers; appending sentinel block.")
+    else:
+        new_content = managed_block
+        action = "created managed block target"
+
+    if dry_run:
+        print(f"Dry run: would install {adapter_name} adapter: {target_rel}")
+        print(f"  Source: {template_rel}")
+        print(f"  Mode: {mode} ({action})")
+        if target_existed and action in {
+            "updated managed block",
+            "appended managed block to existing file",
+        }:
+            print("  Note: only sentinel-managed block content would be updated.")
+        return EXIT_SUCCESS
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(new_content)
+    print(f"Installed {adapter_name} adapter: {target_rel}")
+    print(f"  Source: {template_rel}")
+    print(f"  Mode: {mode} ({action})")
+    if (
+        not args.force
+        and target_existed
+        and action
+        in {
+            "updated managed block",
+            "appended managed block to existing file",
+        }
+    ):
+        print("  Note: only sentinel-managed block content was updated.")
+
+    return EXIT_SUCCESS
 
 
 def cmd_report(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
@@ -1725,9 +2051,9 @@ def cmd_route(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     verification_result = sentinel.verify_trace(trace_name)
     route_exit_code = EXIT_SUCCESS
     if verification_result.overall_status != Status.VERIFIED:
-        if verification_result.commit_status == Status.UNKNOWN:
+        if verification_result.commit_status == Status.MISSING:
             route_exit_code = EXIT_GENERAL_ERROR
-        elif verification_result.commit_status == Status.STALE:
+        elif verification_result.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT):
             route_exit_code = EXIT_ANCHOR_DRIFT
         elif any(a.status == "MISSING" for a in verification_result.anchors):
             route_exit_code = EXIT_ANCHOR_MISSING
@@ -1868,7 +2194,9 @@ def cmd_context(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print()
         print(f"Status: {result.overall_status.value}")
         print(f"Commit: {result.verified_commit}")
-        print(f"Staleness: {'current' if result.commit_status == Status.VERIFIED else 'STALE'}")
+        print(
+            f"Staleness: {'current' if result.commit_status == Status.VERIFIED else result.commit_status.value}"
+        )
         print()
 
         print("Anchors:")
@@ -1914,6 +2242,9 @@ Examples:
   ./sentinel.py update --trace NAME             Auto-update a sentinel
   ./sentinel.py pipeline                        Full pre-commit pipeline
   ./sentinel.py retrace NAME --auto --apply     Analyze and apply safe updates
+  ./sentinel.py install-adapter --list          List available adapters
+  ./sentinel.py install-adapter claude          Install Claude Code adapter
+  ./sentinel.py install-adapter codex --dry-run Preview AGENTS managed-block update
   ./sentinel.py report --format json
         """,
     )
@@ -1946,6 +2277,12 @@ Examples:
     verify_parser.add_argument(
         "--format", choices=["text", "json"], default="text", help="Output format"
     )
+    verify_parser.add_argument(
+        "--strict", action="store_true", help="Stale traces cause non-zero exit"
+    )
+    verify_parser.add_argument(
+        "--no-strict", action="store_true", help="Stale traces are warning-only (overrides env)"
+    )
 
     # pipeline
     pipeline_parser = subparsers.add_parser("pipeline", help="Run full pre-commit pipeline")
@@ -1953,6 +2290,12 @@ Examples:
         "--files", nargs="*", help="Specific files to check (default: staged files)"
     )
     pipeline_parser.add_argument("--ci", action="store_true", help="CI mode (non-interactive)")
+    pipeline_parser.add_argument(
+        "--strict", action="store_true", help="Stale traces cause non-zero exit"
+    )
+    pipeline_parser.add_argument(
+        "--no-strict", action="store_true", help="Stale traces are warning-only (overrides env)"
+    )
 
     # retrace
     retrace_parser = subparsers.add_parser("retrace", help="Update a sentinel")
@@ -1970,6 +2313,17 @@ Examples:
 
     # install-hooks
     subparsers.add_parser("install-hooks", help="Install git pre-commit hooks")
+
+    # install-adapter
+    adapter_parser = subparsers.add_parser(
+        "install-adapter", help="Install an agent adapter from template"
+    )
+    adapter_parser.add_argument("adapter", nargs="?", help="Adapter name (e.g. claude, codex)")
+    adapter_parser.add_argument("--list", action="store_true", help="List available adapters")
+    adapter_parser.add_argument("--force", action="store_true", help="Overwrite existing target")
+    adapter_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview adapter install without writing files"
+    )
 
     # report
     report_parser = subparsers.add_parser("report", help="Generate verification report")
@@ -2050,6 +2404,7 @@ Examples:
         "update": cmd_update,
         "route": cmd_route,
         "install-hooks": cmd_install_hooks,
+        "install-adapter": cmd_install_adapter,
         "report": cmd_report,
         "graph": cmd_graph,
         "coverage": cmd_coverage,

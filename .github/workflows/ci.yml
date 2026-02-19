@@ -39,6 +39,31 @@ jobs:
       - name: Format (black)
         run: black --check .
 
+      - name: Install sentinel dependencies
+        if: matrix.python-version == '3.12'
+        run: pip install -e ".[sentinel]"
+
+      - name: Sentinel verification
+        id: sentinel
+        if: matrix.python-version == '3.12'
+        run: |
+          set -o pipefail
+          python3 .sentinel/sentinel.py verify --all --check-consistency --strict --format json | tee sentinel-report.json
+
+      - name: Sentinel backward-compat shim check
+        if: matrix.python-version == '3.12'
+        run: |
+          python3 .claude/skills/code-sentinel/sentinel.py status --format json > /dev/null
+          echo "Shim OK"
+
+      - name: Upload sentinel report
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-report
+          path: sentinel-report.json
+          if-no-files-found: warn
+
       - name: Tests
         run: pytest --cov=flash_semicrf --cov-report=xml
 
