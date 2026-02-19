@@ -100,8 +100,7 @@ Assumptions are verifiable claims embedded in trace documents. Two types:
 ## Directory Structure
 
 ```
-.claude/skills/code-sentinel/
-├── SKILL.md                    # Claude Code skill definition
+.sentinel/
 ├── README.md                   # This file
 ├── sentinel.py                 # Main CLI orchestrator
 ├── verify-assumptions.py       # Assumption verification

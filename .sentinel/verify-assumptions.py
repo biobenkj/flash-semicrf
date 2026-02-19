@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 SCRIPT_DIR = Path(__file__).parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent
+REPO_ROOT = SCRIPT_DIR.parent
 TRACES_DIR = SCRIPT_DIR / "traces"
 ANCHORS_DIR = SCRIPT_DIR / "anchors"
 ASSUMPTIONS_PATH = ANCHORS_DIR / "assumptions.yaml"

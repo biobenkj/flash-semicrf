@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: sentinel-pipeline
         name: Code Sentinel Pipeline
-        entry: .claude/skills/code-sentinel/hooks/pre-commit-anchors.sh
+        entry: .sentinel/hooks/pre-commit-anchors.sh
         language: script
         # Cover all traced source files:
         # - streaming/ (triton, pytorch reference, autograd)

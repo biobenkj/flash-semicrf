@@ -60,6 +60,9 @@ benchmarks = [
 ]
 # NOTE: mamba-ssm requires CUDA. Install separately: pip install mamba-ssm
 cuda = []  # CUDA extension is optional, built separately
+sentinel = [
+    "pyyaml>=5.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/biobenkj/flash-semicrf"

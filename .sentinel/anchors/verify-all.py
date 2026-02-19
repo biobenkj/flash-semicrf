@@ -11,7 +11,7 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).parent
 SENTINEL_DIR = SCRIPT_DIR.parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
 
 
 def verify_anchor(
