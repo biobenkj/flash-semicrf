@@ -12,7 +12,7 @@ last_global_verification: 2026-02-13T00:00:00Z
 
 sentinels:
   triton-forward-k3plus:
-    verified_commit: 559cebd
+    verified_commit: ddfed0a
     source_files:
       - src/flash_semicrf/streaming/triton_forward.py
     assumptions_mechanical: [A1, A2, A3, A5]
@@ -70,12 +70,18 @@ sentinels:
 
   # Remaining traces (lighter coverage)
   triton-backward-k3plus:
-    verified_commit: 559cebd
+    verified_commit: ddfed0a
     source_files:
       - src/flash_semicrf/streaming/triton_backward.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - BACKWARD_KERNEL_ENTRY
+      - BACKWARD_LAUNCHER
+      - MARGINALS_LAUNCHER
+      - BARRIER_CHECKPOINT_LOAD
+      - VALIDATE_SHAPES
+      - GRAD_WORKSPACE_ALLOC
     linked_tests:
       - tests/test_streaming_triton.py::TestTritonGradients
       - tests/test_streaming_k_boundaries.py::TestK3TritonBoundary
@@ -89,7 +95,11 @@ sentinels:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - FORWARD_ENTRY
+      - EDGE_BLOCK_COMPUTE
+      - RING_CHECKPOINT_ALLOC
+      - FORWARD_LOGSUMEXP
     linked_tests: []
     status: VERIFIED
     depends_on: []
@@ -100,7 +110,10 @@ sentinels:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - BACKWARD_ENTRY
+      - MARGINALS_ENTRY
+      - VITERBI_ENTRY
     linked_tests: []
     status: VERIFIED
     depends_on:
@@ -112,7 +125,10 @@ sentinels:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - K1_FORWARD
+      - K1_BACKWARD
+      - K1_VITERBI
     linked_tests: []
     status: VERIFIED
     depends_on: []
@@ -123,7 +139,10 @@ sentinels:
       - src/flash_semicrf/streaming/pytorch_reference.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - K2_FORWARD
+      - K2_BACKWARD
+      - K2_VITERBI
     linked_tests: []
     status: VERIFIED
     depends_on: []
@@ -134,7 +153,12 @@ sentinels:
       - src/flash_semicrf/semimarkov.py
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: []
+    anchors:
+      - SEMIMARKOV_CLASS
+      - LOGPARTITION_ENTRY
+      - DP_STANDARD
+      - DP_SCAN_STREAMING
+      - DP_BINARY_TREE
     linked_tests: []
     status: VERIFIED
     depends_on: []

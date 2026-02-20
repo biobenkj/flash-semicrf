@@ -1,6 +1,6 @@
 # Sentinel: Triton Forward Kernel (K >= 3)
 
-**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `559cebd`
+**Verified against:** `src/flash_semicrf/streaming/triton_forward.py` @ commit `ddfed0a`
 **Linked tests:** `tests/test_streaming_triton.py::TestTritonBasic`, `tests/test_streaming_triton.py::TestTritonStreamingKernel`, `tests/test_streaming_k_boundaries.py::TestK3TritonBoundary`
 
 ## Summary

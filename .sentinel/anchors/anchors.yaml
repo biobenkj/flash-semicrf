@@ -76,6 +76,141 @@ autograd-kernel-interface:
     after: class SemiCRFStreamingTriton(
     expected_line: 234
     drift_tolerance: 30
+triton-backward-k3plus:
+  BACKWARD_KERNEL_ENTRY:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "def semi_crf_streaming_backward_kernel("
+    expected_line: 62
+    drift_tolerance: 20
+  BACKWARD_LAUNCHER:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "def launch_streaming_triton_backward("
+    expected_line: 1127
+    drift_tolerance: 50
+  MARGINALS_LAUNCHER:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "def launch_streaming_triton_marginals("
+    expected_line: 1549
+    drift_tolerance: 50
+  BARRIER_CHECKPOINT_LOAD:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "tl.debug_barrier()"
+    after: "def semi_crf_streaming_backward_kernel("
+    expected_line: 372
+    drift_tolerance: 30
+  VALIDATE_SHAPES:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "validate_streaming_shapes("
+    after: "def launch_streaming_triton_backward("
+    expected_line: 1224
+    drift_tolerance: 30
+  GRAD_WORKSPACE_ALLOC:
+    file: src/flash_semicrf/streaming/triton_backward.py
+    pattern: "grad_tr_workspace = torch.zeros("
+    after: "def launch_streaming_triton_backward("
+    expected_line: 1355
+    drift_tolerance: 30
+pytorch-forward-k3plus:
+  FORWARD_ENTRY:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_streaming_forward_pytorch("
+    expected_line: 609
+    drift_tolerance: 50
+  EDGE_BLOCK_COMPUTE:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def compute_edge_block_streaming("
+    expected_line: 570
+    drift_tolerance: 30
+  RING_CHECKPOINT_ALLOC:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "ring_checkpoints = torch.full("
+    after: "def semi_crf_streaming_forward_pytorch("
+    expected_line: 657
+    drift_tolerance: 30
+  FORWARD_LOGSUMEXP:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "scores_over_src = torch.logsumexp("
+    after: "def semi_crf_streaming_forward_pytorch("
+    expected_line: 708
+    drift_tolerance: 30
+pytorch-backward-k3plus:
+  BACKWARD_ENTRY:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_streaming_backward_pytorch("
+    expected_line: 917
+    drift_tolerance: 50
+  MARGINALS_ENTRY:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_streaming_marginals_pytorch("
+    expected_line: 1192
+    drift_tolerance: 50
+  VITERBI_ENTRY:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_streaming_viterbi_with_backpointers("
+    expected_line: 797
+    drift_tolerance: 50
+k1-linear-crf:
+  K1_FORWARD:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def linear_crf_forward_pytorch("
+    expected_line: 34
+    drift_tolerance: 20
+  K1_BACKWARD:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def linear_crf_backward_pytorch("
+    expected_line: 94
+    drift_tolerance: 30
+  K1_VITERBI:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def linear_crf_viterbi_pytorch("
+    expected_line: 203
+    drift_tolerance: 30
+k2-fast-path:
+  K2_FORWARD:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_k2_forward_pytorch("
+    expected_line: 283
+    drift_tolerance: 30
+  K2_BACKWARD:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_k2_backward_pytorch("
+    expected_line: 346
+    drift_tolerance: 30
+  K2_VITERBI:
+    file: src/flash_semicrf/streaming/pytorch_reference.py
+    pattern: "def semi_crf_k2_viterbi_pytorch("
+    expected_line: 476
+    drift_tolerance: 30
+non-streaming-backends:
+  SEMIMARKOV_CLASS:
+    file: src/flash_semicrf/semimarkov.py
+    pattern: "class SemiMarkov("
+    expected_line: 7
+    drift_tolerance: 10
+  LOGPARTITION_ENTRY:
+    file: src/flash_semicrf/semimarkov.py
+    pattern: "def logpartition("
+    after: "class SemiMarkov("
+    expected_line: 35
+    drift_tolerance: 30
+  DP_STANDARD:
+    file: src/flash_semicrf/semimarkov.py
+    pattern: "def _dp_standard("
+    after: "class SemiMarkov("
+    expected_line: 228
+    drift_tolerance: 30
+  DP_SCAN_STREAMING:
+    file: src/flash_semicrf/semimarkov.py
+    pattern: "def _dp_scan_streaming("
+    after: "class SemiMarkov("
+    expected_line: 148
+    drift_tolerance: 30
+  DP_BINARY_TREE:
+    file: src/flash_semicrf/semimarkov.py
+    pattern: "def _dp_binary_tree("
+    after: "class SemiMarkov("
+    expected_line: 85
+    drift_tolerance: 30
 crf-heads:
   CLASS_DEFINITION:
     file: src/flash_semicrf/nn.py
