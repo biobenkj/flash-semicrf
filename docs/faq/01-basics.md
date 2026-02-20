@@ -12,7 +12,7 @@ At its core, the library solves a dynamic programming problem: given a set of sc
 
 - **Partition function** — the normalizing constant for the probability distribution over all valid segmentations
 - **Best segmentation** — Viterbi decoding
-- **Marginal probabilities** — how likely is a boundary at each position?
+- **Marginal probabilities** — e.g., how likely is a boundary at each position?
 - **Entropy** — how uncertain is the model overall?
 
 These are the same computations that underpin CRF-based NER taggers, gene finders, and speech recognizers. The difference is scale: flash-semicrf is designed to handle sequences of 100,000+ positions on a GPU.
@@ -29,13 +29,21 @@ If your task doesn't have meaningful segment structure (e.g., per-token sentimen
 
 ## Q: What is the partition function and why do I keep seeing it?
 
-The partition function $Z$ is the sum of scores over *all possible segmentations* of a sequence. You need it for two things:
+The partition function $Z$ is the sum of exponentiated scores over *all possible segmentations* of a sequence:
+
+$$
+Z = \sum_{y \in \mathcal{Y}(x)} \exp(\mathrm{score}(y))
+$$
+
+You need it for two things:
 
 1. **Turning raw scores into probabilities** — dividing by $Z$ normalizes the distribution
-2. **Computing the training loss** — the negative log-likelihood is $\log Z$ minus the score of the correct segmentation
+2. **Computing the training loss** — in canonical CRF form, the negative log-likelihood is $\log Z$ minus the score of the correct segmentation
+
+In flash-semicrf, emissions are centered before cumulative sums for numerical stability at long sequence lengths. This shifts the absolute score scale, so reported loss values can be shifted (and may become negative) while still providing valid training gradients.
 
 Computing $\log Z$ efficiently is the core algorithmic challenge, and it's what most of the library's code is devoted to.
 
 ---
 
-**See also:** [Using the Library](02-using-the-library.md) · [Jargon Decoder](03-jargon-decoder.md) · [Semirings guide](../semirings.md)
+**See also:** [Using the Library](02-using-the-library.md) · [Jargon Decoder](03-jargon-decoder.md) · [Semirings guide](../guides/semirings.md)

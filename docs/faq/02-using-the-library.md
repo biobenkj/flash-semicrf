@@ -43,17 +43,19 @@ A semiring is a way to swap out the arithmetic in the dynamic program without re
 | `EntropySemiring` | Entropy H(P) of the segmentation distribution | Uncertainty quantification, active learning |
 | `CrossEntropySemiring` | Cross-entropy H(P,Q) between two distributions | Model distillation, comparing two models |
 
+In the high-level `SemiMarkovCRFHead`, streaming kernels support `log` and `max` semirings. Semirings like entropy/cross-entropy require the exact edge-tensor path.
+
 ## Backends
 
 ### Q: What is a "backend" and which one should I use?
 
-A backend is the algorithm that runs the dynamic program. The library offers several, but the two that matter in practice are: (1) the **streaming Triton kernel** for sequences longer than about 10,000 positions, and (2) the **vectorized linear scan** for shorter sequences or CPU-only environments. The `backend="auto"` setting picks the right one automatically.
+A backend is the algorithm that runs the dynamic program. In practice, `backend="auto"` should usually be your default: it selects between streaming and exact modes using a memory heuristic based on `T`, `K`, and `C`.
 
 | Backend | Memory | Best For |
 |---------|--------|----------|
-| Streaming (Triton) | O(KC) — independent of T | Genome-scale sequences (T > 10K), GPU required |
-| Vectorized linear scan | O(TKC²) — pre-materialized edges | Short–moderate sequences, CPU or GPU |
-| Binary tree (parallel scan) | O(T·(KC)²) | Small state spaces only; mostly historical |
+| Streaming (Triton or PyTorch fallback) | O(KC) DP state; no full edge tensor | Large sequences or memory-constrained runs (Triton is fastest on CUDA) |
+| Exact edge-tensor DP | O(TKC²) — pre-materialized edges | Short–moderate sequences; required for semirings beyond `log`/`max` |
+| Binary tree (sharded) | Reference path with full edge tensor | Validation and ablations; not a production default |
 
 ### Q: What does "streaming" mean in this context?
 
@@ -97,12 +99,14 @@ Log partition / Viterbi path / Marginals
 
 ### Q: How do I train a model with this?
 
-The training loss is the standard CRF negative log-likelihood: `loss = log_Z - gold_score`. You compute `log_Z` with the LogSemiring, score the gold segmentation by summing the edge potentials along the labeled path, and backpropagate. The library provides autograd-compatible functions for all of this, including through the Triton kernel.
+The canonical CRF training loss is `loss = log_Z - gold_score`. You compute `log_Z` with the LogSemiring, score the gold segmentation by summing the edge potentials along the labeled path, and backpropagate.
+
+In flash-semicrf, emissions are centered before cumulative sums for numerical stability at long sequence lengths. This can shift absolute reported loss values (including occasionally negative values), while gradients and optimization behavior remain valid.
 
 ### Q: How do I decode (get predictions)?
 
-Use the MaxSemiring. The "marginals" under MaxSemiring become hard 0/1 indicators for the best path. Call `SemiMarkov.from_parts(hard_marginals)` to extract the predicted label sequence and segment boundaries.
+Use `decode_with_traceback(...)` to get the best segmentation with explicit segment boundaries and labels. Use `decode(...)` when you only need the Viterbi score and not the path.
 
 ---
 
-**See also:** [The Basics](01-basics.md) · [Engineering Decisions](04-engineering-decisions.md) · [Parameter guide](../parameter_guide.md) · [Semirings guide](../semirings.md) · [Workflow integration](../workflow_integration.md)
+**See also:** [The Basics](01-basics.md) · [Engineering Decisions](04-engineering-decisions.md) · [Parameter guide](../guides/parameter_guide.md) · [Semirings guide](../guides/semirings.md) · [Workflow integration](../guides/workflow_integration.md)

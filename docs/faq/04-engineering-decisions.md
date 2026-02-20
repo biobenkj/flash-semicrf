@@ -12,11 +12,11 @@ The supplementary note *"Why Banded Matrices Do Not Provide a Viable Exact Backe
 
 ### Q: Why Triton instead of CUDA?
 
-Triton provides Python-level syntax with auto-tuned memory access patterns, which dramatically reduces development time compared to raw CUDA while achieving comparable performance. For the semi-CRF use case, where the kernel logic is complex (nested loops, conditional loads, online reductions), Triton's productivity advantage outweighs any small performance gap. The Triton kernel also compiles to PTX, so it runs on standard NVIDIA GPUs without additional dependencies.
+Triton provides Python-level syntax with explicit control over tiling and memory access patterns, which dramatically reduces development time compared to raw CUDA while achieving comparable performance. For the semi-CRF use case, where the kernel logic is complex (nested loops, conditional loads, online reductions), Triton's productivity advantage outweighs any small performance gap. The Triton kernel also compiles to PTX, so it runs on standard NVIDIA GPUs without additional dependencies.
 
 ### Q: Why is the backward pass non-deterministic?
 
-The Triton backward kernel uses `atomic_add` to accumulate gradients for shared parameters (transition matrix, duration bias) from multiple positions simultaneously. Because floating-point addition is not associative, different thread execution orders produce slightly different results. The magnitude is small:
+The Triton backward kernel uses `atomic_add` to accumulate gradients for shared parameters (transition matrix, duration bias) from multiple positions simultaneously. This is common practice in many AI/ML libraries, but it comes with a caveat: floating-point addition is not associative. Different thread execution orders can produce slightly different results. The magnitude for run to run variation in flash-semicrf is small:
 
 | Gradient | Typical Variance Across Runs |
 |----------|------------------------------|
@@ -24,13 +24,15 @@ The Triton backward kernel uses `atomic_add` to accumulate gradients for shared 
 | `grad_duration_bias` | ~7–14% relative difference |
 | `grad_cum_scores` | Position-dependent, lower variance |
 
-This is within normal SGD noise, so training converges correctly. If exact reproducibility is required, a two-phase kernel approach is documented but not yet implemented.
+This is usually within normal optimization noise during **stochastic gradient descent (SGD)**, so training converges correctly.
 
-To reduce this variance, the library allocates **per-segment workspace buffers** so that gradient accumulation across checkpoint segments is deterministic. Only within-segment atomic contention remains.
+A fully deterministic two-phase accumulation strategy has been designed conceptually and is part of potential future implementations. In the current implementation, flash-semicrf makes efforts to reduce the atomic add/floating-point addition non-determinism by allocating **per-segment workspace buffers** so that accumulation across checkpoint segments is deterministic, leaving only within-segment atomic contention.
 
 ### Q: Why does the backward pass use float64?
 
-Gradient accumulation for shared parameters sums contributions from every (position, duration, label) combination in the sequence. For T=100,000, K=1,000, C=24, that's billions of small floating-point additions. In float32, the accumulated rounding error can reach ~10⁻³, which is noticeable. Float64 reduces this to ~10⁻¹⁰, which is negligible. The forward pass remains in float32 because checkpoint normalization handles the stability there.
+Gradient accumulation for shared parameters sums contributions from every (position, duration, label) combination in the sequence. For T=100,000, K=1,000, C=24, that's billions of small floating-point additions. In float32, the accumulated rounding error can reach ~10⁻³, which is noticeable. Float64 reduces this to ~10⁻¹⁰, which is negligible.
+
+In the current implementation, streaming kernels also compute forward recurrences internally in float64 for numerical stability at long T (the returned tensor is cast back to the input dtype at the high-level API boundary).
 
 ### Q: How does checkpoint normalization work?
 
@@ -40,28 +42,28 @@ Inspired by FlashAttention, the forward pass periodically extracts a normalizati
 
 The full edge tensor has shape (batch, T, K, C, C) and stores one score for every possible segment at every position. For genomic sequences, this tensor alone exceeds available GPU memory. The decomposition factors it into three much smaller pieces:
 
-| Component | Shape | Size (T=50K, K=100, C=8) |
+| Component | Shape | Size (T=100K, K=1000, C=24, batch=1, float64) |
 |-----------|-------|--------------------------|
-| Cumulative scores | (batch, T+1, C) | 1.6 MB |
-| Transition matrix | (C, C) | 256 bytes |
-| Duration bias | (K, C) | 3.2 KB |
-| **Total** | | **~1.6 MB** |
-| Full edge tensor | (batch, T, K, C, C) | **320 GB** |
+| Cumulative scores | (batch, T+1, C) | 19.2 MB |
+| Transition matrix | (C, C) | 4.6 KB |
+| Duration bias | (K, C) | 192 KB |
+| **Total parameter + prefix-sum state** | | **~19.4 MB** |
+| Full edge tensor | (batch, T, K, C, C) | **460.8 GB** |
 
 The emission score for any segment can be recovered in O(1) by subtracting two cumulative-score entries. This is the mathematical foundation of the streaming approach.
 
 ### Q: What is the memory profile for realistic genomics use cases?
 
-| Component | Standard Approach | Streaming Approach |
+| Component | Standard Approach | Streaming DP State (Forward/Inference) |
 |-----------|-------------------|--------------------|
-| Edge tensor | 320 GB (not feasible) | Not materialized |
-| Cumulative scores | 1.6 MB | 1.6 MB |
-| Ring buffer (forward) | — | 6.4 KB |
-| Ring buffer (backward) | — | 12.8 KB |
-| Checkpoints | — | ~50 KB |
-| **Total working memory** | **320+ GB** | **< 2 MB** |
+| Edge tensor | 460.8 GB (not feasible) | Not materialized |
+| Cumulative scores | 19.2 MB | 19.2 MB |
+| Ring buffer (forward) | — | 192 KB |
+| Ring buffer (backward) | — | 384 KB |
+| Checkpoints | — | 19.2 MB |
+| **Total DP state** | **460.8+ GB** | **~39 MB** |
 
-*(Example: T=50,000, K=100, C=8, batch=1)*
+*(Example: T=100,000, K=1000, C=24, batch=1, float64. Training additionally allocates gradient workspaces.)*
 
 ### Q: Why does K=1 use a different code path?
 
@@ -77,7 +79,7 @@ The ring buffer and checkpoint machinery are designed for K≥3, where there are
 
 At K=1, flash-semicrf is functionally equivalent to a linear-chain CRF like pytorch-crf. The two implementations produce the same accuracy on identical data. They define slightly different probability models (different handling of the first position), so their NLL values are not directly comparable, but this difference has no practical impact on prediction quality.
 
-The advantage of using flash-semicrf even for K=1 is a clean upgrade path: when you later need K>1, the API stays the same. See the [Linear CRF Equivalence](../linear_crf_equivalence.md) document for the formal comparison and empirical validation.
+The advantage of using flash-semicrf even for K=1 is a clean upgrade path: when you later need K>1, the API stays the same. See the [Linear CRF Equivalence](../internals/linear_crf_equivalence.md) document for the formal comparison and empirical validation.
 
 ### Q: What are the complexity characteristics of each backend?
 
@@ -92,4 +94,4 @@ The streaming kernel achieves the same O(TKC²) compute as the linear scan but w
 
 ---
 
-**See also:** [Jargon Decoder](03-jargon-decoder.md) · [Troubleshooting](05-troubleshooting.md) · [Backend algorithm supplement](../backend_algorithm_supplement.pdf) · [Streaming algorithm supplement](../streaming_algorithm_supplement.pdf)
+**See also:** [Jargon Decoder](03-jargon-decoder.md) · [Troubleshooting](05-troubleshooting.md) · [Backend algorithm supplement](../manuscript/backend_algorithm_supplement.pdf) · [Streaming algorithm supplement](../manuscript/streaming_algorithm_supplement.pdf)
