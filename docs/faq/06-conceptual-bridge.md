@@ -233,8 +233,8 @@ to 1-position intron segments. The encoder learns to smooth its
 representations to avoid producing structurally implausible outputs. A
 per-position loss has no mechanism to provide this feedback.
 
-This insight — that the CRF loss shapes the encoder's learned
-representations, not just the output — was first demonstrated for
+This idea that the CRF loss shapes the encoder's learned
+representations, not just the output, was first demonstrated for
 semi-CRFs by Kong et al. (2016).
 
 ---
