@@ -251,6 +251,7 @@ def run_sweep(
                 backend,
                 {backend: oom_history[backend]},
                 max_memory_gb,
+                B=B,
             )
             if skip:
                 r = _skip_result(T, K, C, B, backend, semiring, phase, reason)

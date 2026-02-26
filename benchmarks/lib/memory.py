@@ -22,7 +22,7 @@ def estimate_memory_breakdown(T: int, K: int, C: int, B: int, backend: str) -> d
     - autograd: Saved tensors for backward pass
 
     Backends:
-    - binary_tree: O((KC)^2 * log(T)) - binary tree matmul intermediates
+    - binary_tree: O(n^3) peak matmul intermediate where n=(K-1)*C, dominates memory
     - banded: Similar to binary_tree with banded reduction
     - block_triangular: O(K(K+1)/2 * C^2 * log(T)) - exploits sparsity
     - linear_scan: O(T*K*C) - full DP table
@@ -49,30 +49,26 @@ def estimate_memory_breakdown(T: int, K: int, C: int, B: int, backend: str) -> d
         potentials_bytes = B * N * K * C * C * float_bytes
 
         if backend == "binary_tree":
-            # Binary tree: O((KC)^2) per matmul, log2(N) levels
-            # Plus intermediate results at each level
+            # Binary tree uses O(n^2) chart + O(n^3) matmul intermediates
+            # where n = (K-1)*C. Autograd accumulates across all tree levels,
+            # making precise estimation hard. We estimate conservatively here
+            # and rely on runtime OOM catching for the actual cutoff.
+            n = (K - 1) * C
             log_levels = max(1, int(math.ceil(math.log2(N))))
-            # Matmul workspace: (KC, KC) intermediate
-            matmul_workspace = KC * KC * float_bytes
-            # DP state: accumulator at each level
-            dp_state_bytes = B * KC * KC * float_bytes * log_levels
-            workspace_bytes = matmul_workspace * B
-            # Autograd: saves all intermediate results for backward
-            autograd_bytes = potentials_bytes + dp_state_bytes
+            bin_N = 1 << log_levels
+            dp_state_bytes = B * bin_N * n * n * float_bytes
+            workspace_bytes = 0  # hard to estimate; let runtime catch OOM
+            autograd_bytes = dp_state_bytes  # conservative lower bound
 
         elif backend == "binary_tree_sharded":
-            # Same algorithm as binary_tree but using CheckpointShardSemiring
-            # which splits the O((KC)^3) matmul into smaller shards
-            # This reduces peak memory at the cost of more serial computation
+            # Sharded variant processes matmul in chunks, reducing peak memory.
+            # Still uses O(n^2) chart; workspace bounded by shard size.
+            n = (K - 1) * C
             log_levels = max(1, int(math.ceil(math.log2(N))))
-            shard_size = 10000  # default shard size from checkpoint.py
-            # DP state: same as binary_tree
-            dp_state_bytes = B * KC * KC * float_bytes * log_levels
-            # Workspace is reduced because we shard the matmul
-            # Instead of (KC)^2 all at once, we do it in chunks
-            workspace_bytes = B * min(KC * KC, shard_size) * float_bytes
-            # Autograd still needs to save inputs but recomputes forward in backward
-            autograd_bytes = potentials_bytes + dp_state_bytes // 2  # ~half of non-sharded
+            bin_N = 1 << log_levels
+            dp_state_bytes = B * bin_N * n * n * float_bytes
+            workspace_bytes = 0
+            autograd_bytes = potentials_bytes + dp_state_bytes
 
         elif backend == "banded":
             # Banded: similar to binary_tree but with bandwidth reduction
@@ -162,6 +158,7 @@ def should_skip_config(
     backend: str,
     oom_history: dict[str, list[tuple[int, int, int]]],
     max_memory_gb: float = 40.0,
+    B: int = 2,
 ) -> tuple[bool, str]:
     """
     Determine if we should skip this config based on:
@@ -179,8 +176,8 @@ def should_skip_config(
                 if T > oom_t or K > oom_k or C > oom_c:
                     return True, f"adjacent OOM at T={oom_t},K={oom_k},C={oom_c}"
 
-    # Estimate memory and skip if too large
-    breakdown = estimate_memory_breakdown(T, K, C, 4, backend)  # assume B=4
+    # Estimate memory using actual batch size
+    breakdown = estimate_memory_breakdown(T, K, C, B, backend)
     if breakdown["total_estimated_gb"] > max_memory_gb:
         return True, f"predicted {breakdown['total_estimated_gb']:.1f}GB > {max_memory_gb}GB limit"
 

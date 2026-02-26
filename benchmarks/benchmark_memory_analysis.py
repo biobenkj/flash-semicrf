@@ -344,6 +344,7 @@ def main():
                             backend,
                             {backend: oom_history.get(oom_key, [])},
                             args.max_memory_gb,
+                            B=args.B,
                         )
                         if skip:
                             print(
