@@ -31,9 +31,11 @@ float64 internally, so the test only measures cumsum quantization — not DP pre
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import warnings
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 
@@ -149,18 +151,22 @@ def make_imbalanced_emissions(
 # ======================================================================
 
 
-def test_numerical_stability(T_values, C, K, device):
-    section_header("§1  NUMERICAL STABILITY (Cumsum Magnitude)")
-
-    batch = 2
+def _get_proportions(C):
+    """Get label proportions for C classes."""
     proportions = IMBALANCED_PROPORTIONS[:C] if C >= 4 else [1.0 / C] * C
-    # Pad or truncate proportions to match C
     if C > 4:
-        # Spread remaining mass equally across extra labels
         extra = C - 4
         proportions = [p * 0.9 for p in IMBALANCED_PROPORTIONS] + [0.1 / extra] * extra
         total = sum(proportions)
         proportions = [p / total for p in proportions]
+    return proportions
+
+
+def test_numerical_stability(T_values, C, K, device):
+    section_header("§1  NUMERICAL STABILITY (Cumsum Magnitude)")
+
+    batch = 2
+    proportions = _get_proportions(C)
 
     print(f"  Config: batch={batch}, C={C}, K={K}")
     print("  Using imbalanced emissions (trained-encoder-like, nonzero per-label mean)")
@@ -175,6 +181,7 @@ def test_numerical_stability(T_values, C, K, device):
 
     import math
 
+    rows = []
     for T in T_values:
         scores = make_imbalanced_emissions(
             batch, T, C, proportions, signal=2.0, noise=0.3, device=device
@@ -186,6 +193,15 @@ def test_numerical_stability(T_values, C, K, device):
             peak_mag = cum_scores.abs().max().item()
             peak_over_sqrt_T = peak_mag / math.sqrt(T)
             peak_over_T = peak_mag / T
+
+            rows.append({
+                "T": T,
+                "mode": mode,
+                "endpoint_mag": endpoint_mag,
+                "peak_mag": peak_mag,
+                "peak_sqrt_t": peak_over_sqrt_T,
+                "peak_over_t": peak_over_T,
+            })
 
             print(
                 f"  {T:>7}  {mode:>10}  {endpoint_mag:>14.2f}  "
@@ -200,6 +216,8 @@ def test_numerical_stability(T_values, C, K, device):
     print("    mean:     Peak/√T ≈ constant (O(√T) random walk after centering)")
     print("    position: Peak/T  ≈ constant (O(T) drift, reduced coefficient)")
     print("    none:     Peak/T  ≈ constant (O(T) drift from nonzero label means)")
+
+    return {"config": {"batch": batch, "C": C, "K": K}, "rows": rows}
 
 
 # ======================================================================
@@ -312,6 +330,8 @@ def test_duration_prior(device):
     print(f"  Labels: {', '.join(label_names)}")
     print()
 
+    json_scenarios = {}
+
     for scenario_name, proportions in [
         ("IMBALANCED", proportions_imbalanced),
         ("BALANCED", proportions_balanced),
@@ -340,8 +360,16 @@ def test_duration_prior(device):
             print(f"{'-'*8}", end="  ")
         print()
 
+        penalty_rows = []
         for c in range(C):
             nu = per_label_mean[c].item()
+            row = {
+                "label": label_names[c],
+                "nu": nu,
+            }
+            for k in k_vals:
+                row[f"k{k}"] = -nu * k
+            penalty_rows.append(row)
             print(f"    {label_names[c]:>12}  {nu:>8.3f}  ", end="")
             for k in k_vals:
                 penalty = -nu * k
@@ -399,11 +427,19 @@ def test_duration_prior(device):
         print(f"    {'Mode':>10}  {'log Z':>14}  " f"{'TV vs position':>16}  {'Marginal std':>14}")
         print(f"    {'-'*10}  {'-'*14}  " f"{'-'*16}  {'-'*14}")
 
+        partition_rows = []
         for mode in CENTERING_MODES:
             m = marginals_by_mode[mode]
             marginal_std = m.std().item()
             # TV distance: 0.5 * Σ_c |p(t,c) - q(t,c)| averaged over positions
             tv = 0.5 * (m - ref_marginals).abs().sum(dim=2).mean().item()
+
+            partition_rows.append({
+                "mode": mode,
+                "log_z": logZ_by_mode[mode],
+                "tv": tv,
+                "marginal_std": marginal_std,
+            })
 
             print(
                 f"    {mode:>10}  {logZ_by_mode[mode]:>14.4f}  "
@@ -479,9 +515,18 @@ def test_duration_prior(device):
         )
         print(f"    {'-'*12}  {'-'*10}  {'-'*10}  " f"{'-'*10}  {'-'*6}  {'-'*6}")
 
+        viterbi_rows = []
         for c in range(C):
             for mode in CENTERING_MODES:
                 s = seg_stats_by_mode[mode][c]
+                viterbi_rows.append({
+                    "label": label_names[c],
+                    "mode": mode,
+                    "n_segments": s["count"],
+                    "mean_len": s["mean"],
+                    "min_len": s["min"],
+                    "max_len": s["max"],
+                })
                 print(
                     f"    {label_names[c]:>12}  {mode:>10}  {s['count']:>10}  "
                     f"{s['mean']:>10.1f}  {s['min']:>6}  {s['max']:>6}"
@@ -490,6 +535,18 @@ def test_duration_prior(device):
                 print()
 
         print()
+
+        json_scenarios[scenario_name.lower()] = {
+            "proportions": proportions,
+            "penalty": penalty_rows,
+            "partition": partition_rows,
+            "viterbi": viterbi_rows,
+        }
+
+    return {
+        "config": {"T": T, "C": C, "K": K, "batch": batch, "label_names": label_names},
+        "scenarios": json_scenarios,
+    }
 
 
 # ======================================================================
@@ -520,6 +577,12 @@ def main():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device (default: cuda if available)",
     )
+    parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="Export results to JSON file for downstream processing (e.g., LaTeX tables)",
+    )
     args = parser.parse_args()
 
     C = 24
@@ -544,13 +607,21 @@ def main():
 
     sections = ["stability", "prior"] if args.section == "all" else [args.section]
 
+    json_data = {}
     for section in sections:
         if section == "stability":
-            test_numerical_stability(T_values, C, K, args.device)
+            json_data["stability"] = test_numerical_stability(T_values, C, K, args.device)
         elif section == "precision":
             test_precision_loss(T_values, C, K, args.device, n_seeds=n_seeds)
         elif section == "prior":
-            test_duration_prior(args.device)
+            json_data["prior"] = test_duration_prior(args.device)
+
+    # Export JSON if requested
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.json, "w") as f:
+            json.dump(json_data, f, indent=2)
+        print(f"\n  Results exported to {args.json}")
 
     section_header("SUMMARY")
     print("  Centering mode comparison:")
