@@ -47,7 +47,7 @@ A semiring is a way to swap out the arithmetic in the dynamic program without re
 
 ### Q: What is a "backend" and which one should I use?
 
-A backend is the algorithm that runs the dynamic program. The library offers several, but the two that matter in practice are: (1) the **streaming Triton kernel** for sequences longer than about 10,000 positions, and (2) the **vectorized linear scan** for shorter sequences or CPU-only environments. The `backend="auto"` setting picks the right one automatically.
+A backend is the algorithm that runs the dynamic program. The library offers several, but the two that matter in practice are: (1) the **streaming Triton kernel** (GPU, fastest) and (2) the **streaming PyTorch reference** (CPU or GPU without Triton). The `backend="auto"` setting always uses streaming for log/max semirings. On GPU with Triton installed, this means the fused Triton kernel; on CPU it uses the PyTorch reference. The exact backend is only needed for semirings beyond log/max (entropy, KL divergence, etc.).
 
 | Backend | Memory | Best For |
 |---------|--------|----------|

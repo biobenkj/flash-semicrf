@@ -18,7 +18,7 @@ class SemiMarkovCRFHead(nn.Module):
         hidden_dim: int = None,        # Optional: projection from encoder dim
         init_scale: float = 0.1,       # Parameter initialization scale
         duration_distribution: str = None,  # "learned", "geometric", "poisson", etc.
-        edge_memory_threshold: float = 8e9,  # Memory threshold for backend selection (8GB)
+        edge_memory_threshold: float = 8e9,  # Memory threshold for non-log/max semirings (8GB)
         num_warps: int = 4,            # Triton kernel parallelism (2-8 recommended)
     ):
         """
@@ -46,7 +46,7 @@ class SemiMarkovCRFHead(nn.Module):
 
         Args:
             backend: Backend selection mode:
-                - "auto": Select based on memory heuristic (default)
+                - "auto": Streaming for log/max semirings, exact for others (default)
                 - "streaming": Force streaming backend (genome-scale)
                 - "exact": Force exact backend via semimarkov.py
                 - "binary_tree_sharded": Memory-efficient reference with checkpointing
@@ -145,17 +145,17 @@ hidden_states (batch, T, hidden_dim)
        ▼ [cumulative sum in float32]
    cum_scores (batch, T+1, C)
        │
-       ▼ [backend selection based on edge_memory_threshold]
+       ▼ [backend selection: streaming for log/max, exact for others]
        │
-       ├── streaming (T*K*C² > threshold)
+       ├── streaming (log/max semirings — always default)
        │        │
        │        ▼
        │   semi_crf_streaming_forward()
        │        │
-       │        ▼ [Triton kernel with O(KC) ring buffer]
+       │        ▼ [Triton kernel on CUDA, PyTorch reference on CPU]
        │   partition (batch,)
        │
-       └── exact (T*K*C² ≤ threshold)
+       └── exact (non-log/max semirings or explicitly requested)
                 │
                 ▼
            _build_edge_tensor() → edge (batch, T, K, C, C)
@@ -233,7 +233,7 @@ class UncertaintySemiMarkovCRFHead(SemiMarkovCRFHead):
 
         Args:
             backend: Backend selection mode:
-                - "auto": Select based on memory heuristic (default)
+                - "auto": Streaming for log/max semirings, exact for others (default)
                 - "streaming": Force streaming forward-backward algorithm
                 - "exact": Force exact marginals via edge tensor
 

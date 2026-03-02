@@ -77,7 +77,7 @@ This is computed by `compute_position_marginals()` using autograd on the streami
 | **Exact** (edge tensor marginals) | O(T×K×C²) | T < 10K | `backend="exact"` |
 | **Auto** (recommended) | varies | Any | `backend="auto"` (default) |
 
-For clinical applications, **streaming is the default** because it scales to any sequence length. The `backend="auto"` option automatically selects the best backend based on memory heuristics.
+For clinical applications, **streaming is the default** because it scales to any sequence length. The `backend="auto"` option always uses streaming for log/max semirings. On GPU with Triton installed, this means the fused Triton kernel; on CPU it uses the PyTorch reference.
 
 ## Computing uncertainty at scale
 
@@ -152,7 +152,7 @@ boundary_probs = model.compute_boundary_marginals(
 ```
 
 **Backend selection:**
-- `"auto"` (default): Automatically selects based on memory heuristic
+- `"auto"` (default): Streaming for log/max semirings (Triton on GPU, PyTorch reference on CPU)
 - `"streaming"`: Force streaming gradient-based method (required for T >= 10K)
 - `"exact"`: Force exact marginals via edge tensor (T < 10K only)
 

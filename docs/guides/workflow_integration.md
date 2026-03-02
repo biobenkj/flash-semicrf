@@ -598,7 +598,7 @@ def extract_segments(labels):
    # Create CRF head with automatic backend selection
    crf = SemiMarkovCRFHead(num_classes=C, max_duration=K, hidden_dim=hidden_dim)
 
-   # Forward pass (auto-selects streaming vs exact based on memory)
+   # Forward pass (auto uses streaming; Triton on GPU, PyTorch reference on CPU)
    result = crf(hidden_states, lengths)
    partition = result['partition']
 
