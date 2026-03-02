@@ -18,8 +18,8 @@ Three validation strategies:
    - This is the gold standard: if it passes, the implementation is correct
 
 3. **Training convergence** (§3): Do all backends converge to the same loss?
-   - Train identical models with four backends: streaming PyTorch, streaming
-     Triton, pytorch-struct dp_scan (ring buffer), pytorch-struct dp_standard
+   - Train identical models with three backends: streaming PyTorch, streaming
+     Triton, pytorch-struct dp_standard
    - All should reach similar final NLL
    - Validates end-to-end correctness against established SOTA implementations
 
@@ -45,9 +45,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -216,7 +218,7 @@ def prob_range_stats(values: torch.Tensor, tol: float = 5e-3):
 # ======================================================================
 
 
-def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
+def test_self_consistency(cfg: ScaleConfig, device: str, seed: int = 42) -> tuple[bool, dict]:
     """Validate that boundary marginals satisfy known invariants.
 
     For a Semi-CRF with boundary marginals p(t) = probability a segment
@@ -233,6 +235,7 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
     section_header("§1  SELF-CONSISTENCY (Marginal Invariants)")
 
     all_passed = True
+    json_configs = []
     configs = [
         (cfg.batch, cfg.T, cfg.C, cfg.K, "main"),
     ]
@@ -276,6 +279,8 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             interval,
         )  # (batch, T)
 
+        cfg_data = {"label": label, "batch": batch, "T": T, "C": C, "K": K, "checks": []}
+
         # Check 1: Boundary marginals should lie in [0, 1] up to FP tolerance.
         # We allow tiny drift but fail if out-of-range mass becomes non-trivial.
         # Also gate hard on gross violations to catch immediate failures.
@@ -285,6 +290,15 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             "Boundary marginals in [0, 1]",
             boundary_range_ok,
             f"min={min_val:.6f}, max={max_val:.6f}, frac_oob={frac_oob:.4%}",
+        )
+        cfg_data["checks"].append(
+            {
+                "name": "boundary_range_check",
+                "passed": bool(boundary_range_ok),
+                "min": min_val,
+                "max": max_val,
+                "frac_oob": frac_oob,
+            }
         )
 
         # Check 2: Marginal sum ≈ expected number of segments
@@ -298,6 +312,15 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             "Marginal sum in [1, T]",
             sum_reasonable,
             f"mean={mean_sum:.2f}, range=[{marginal_sums.min().item():.2f}, {marginal_sums.max().item():.2f}]",
+        )
+        cfg_data["checks"].append(
+            {
+                "name": "marginal_sum_in_range",
+                "passed": bool(sum_reasonable),
+                "mean": mean_sum,
+                "range_min": marginal_sums.min().item(),
+                "range_max": marginal_sums.max().item(),
+            }
         )
 
         # Check 3: Emission marginals via autograd (reverse cumsum)
@@ -334,6 +357,13 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             max_deviation < 0.02,
             f"max deviation = {max_deviation:.6f}",
         )
+        cfg_data["checks"].append(
+            {
+                "name": "emission_marginals_sum_to_1",
+                "passed": max_deviation < 0.02,
+                "max_deviation": max_deviation,
+            }
+        )
 
         # Total across all positions and classes should be T
         # Threshold scales with T: accumulated FP error is ~0.00004 per position
@@ -346,6 +376,14 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             total_deviation < total_threshold,
             f"max |total - T| = {total_deviation:.4f}",
         )
+        cfg_data["checks"].append(
+            {
+                "name": "total_emission_marginals",
+                "passed": total_deviation < total_threshold,
+                "max_deviation": total_deviation,
+                "T": T,
+            }
+        )
 
         # Check 4: Emission marginals should also lie in [0, 1]
         em_min, em_max, em_frac_oob = prob_range_stats(emission_marginals, tol=5e-3)
@@ -355,6 +393,15 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
             emission_range_ok,
             f"min={em_min:.6f}, max={em_max:.6f}, frac_oob={em_frac_oob:.4%}",
         )
+        cfg_data["checks"].append(
+            {
+                "name": "emission_marginals_non_negative",
+                "passed": em_min >= -0.01,
+                "min": em_min,
+            }
+        )
+
+        json_configs.append(cfg_data)
 
     # Check 5: Variable-length masking
     print("\n  Config [variable-length]: Testing masking")
@@ -390,7 +437,12 @@ def test_self_consistency(cfg: ScaleConfig, device: str, seed: int) -> bool:
                 print(f"    WARNING: batch {b}, L={L}: max padding marginal = {padding_vals:.6e}")
     all_passed &= result_line("Padding positions have zero marginals", padding_ok)
 
-    return all_passed
+    json_data = {
+        "configs": json_configs,
+        "variable_length_passed": bool(padding_ok),
+        "all_passed": bool(all_passed),
+    }
+    return all_passed, json_data
 
 
 # ======================================================================
@@ -403,7 +455,7 @@ def test_finite_differences(
     device: str,
     params: list[str] | None = None,
     seed: int = 42,
-) -> bool:
+) -> tuple[bool, dict]:
     """Compare autograd to numerical gradient via central differences.
 
     This is the gold-standard correctness test. If autograd matches finite
@@ -437,6 +489,7 @@ def test_finite_differences(
     )
 
     all_passed = True
+    json_params = []
 
     def forward_fn(cs, tr, db):
         """Compute log Z given current parameters."""
@@ -547,7 +600,26 @@ def test_finite_differences(
         )
         print()
 
-    return all_passed
+        json_params.append(
+            {
+                "name": param_name,
+                "elements": flat_param.numel(),
+                "elapsed_s": round(elapsed, 1),
+                "cosine_similarity": cos_sim,
+                "normalized_max_err": normalized_max_err,
+                "fraction_allclose": frac_close,
+                "mean_rel_err": mean_rel,
+                "max_abs_diff": abs_diff.max().item(),
+                "passed": bool(passed),
+            }
+        )
+
+    json_data = {
+        "config": {"batch": batch, "T": T, "C": C, "K": K, "eps": eps},
+        "parameters": json_params,
+        "all_passed": bool(all_passed),
+    }
+    return all_passed, json_data
 
 
 # ======================================================================
@@ -555,7 +627,7 @@ def test_finite_differences(
 # ======================================================================
 
 
-def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
+def test_training_convergence(cfg: ScaleConfig, device: str, seed: int = 42) -> tuple[bool, dict]:
     """Train with multiple backends, compare final loss.
 
     All backends compute valid gradients (just with different FP rounding
@@ -565,7 +637,6 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
     Backends tested:
       - pytorch: Streaming PyTorch reference (on-the-fly edge computation)
       - triton: Streaming Triton kernel (on-the-fly edge computation)
-      - dp_scan: pytorch-struct _dp_scan_streaming (materialized edge + ring buffer)
       - dp_standard: pytorch-struct _dp_standard (materialized edge + list comprehension)
     """
     section_header("§3  TRAINING CONVERGENCE")
@@ -606,7 +677,6 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
     backends = [
         ("pytorch", False, "streaming"),
         ("triton", True, "streaming"),
-        ("dp_scan", False, "exact"),
         ("dp_standard", False, "dp_standard"),
     ]
 
@@ -675,12 +745,10 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
         )
 
     # Compare all backends against the reference (first available)
-    ref_name = next(
-        (name for name in ["pytorch", "dp_standard", "dp_scan"] if name in results), None
-    )
+    ref_name = next((name for name in ["pytorch", "dp_standard"] if name in results), None)
     if ref_name is None or len(results) < 2:
         print("  Cannot compare: need at least two backends")
-        return False
+        return False, {"all_passed": False}
 
     ref_loss = results[ref_name]["final_loss"]
     ref_losses = results[ref_name]["losses"]
@@ -698,6 +766,9 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
             f"    {name:<14} {res['final_loss']:>12.6f} {loss_diff:>12.6f} {loss_rel:>9.4%} {marker}"
         )
 
+    # Build JSON comparisons while checking
+    json_comparisons = []
+
     # Check all backends agree within 5% relative to reference
     for name, res in results.items():
         if name == ref_name:
@@ -706,6 +777,13 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
         loss_rel = loss_diff / (abs(ref_loss) + 1e-8)
         all_passed &= result_line(
             f"{name} vs {ref_name} agreement", loss_rel < 0.05, f"rel_diff={loss_rel:.4%}"
+        )
+        json_comparisons.append(
+            {
+                "name": name,
+                "abs_diff": loss_diff,
+                "rel_diff": loss_rel,
+            }
         )
 
     # Check all backends converge (loss decreases)
@@ -728,8 +806,40 @@ def test_training_convergence(cfg: ScaleConfig, device: str, seed: int) -> bool:
         all_passed &= result_line(
             f"{name} vs {ref_name} loss curve", cos_sim > 0.99, f"cosine_sim={cos_sim:.6f}"
         )
+        # Attach curve cosine to the existing comparison entry
+        for comp in json_comparisons:
+            if comp["name"] == name:
+                comp["loss_curve_cosine"] = cos_sim
+                break
 
-    return all_passed
+    json_backends = []
+    for name, res in results.items():
+        json_backends.append(
+            {
+                "name": name,
+                "final_loss": res["final_loss"],
+                "elapsed_s": round(res["elapsed"], 1),
+                "epochs": len(res["losses"]),
+                "is_reference": name == ref_name,
+            }
+        )
+
+    json_data = {
+        "config": {
+            "batch": batch,
+            "T": T,
+            "C": C,
+            "K": K,
+            "epochs": n_epochs,
+            "lr": lr,
+            "hidden_dim": hidden_dim,
+        },
+        "reference": ref_name,
+        "backends": json_backends,
+        "comparisons": json_comparisons,
+        "all_passed": bool(all_passed),
+    }
+    return all_passed, json_data
 
 
 # ======================================================================
@@ -780,6 +890,12 @@ def main():
         default=42,
         help="Random seed (default: 42)",
     )
+    parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="Export results to JSON file for downstream processing (e.g., LaTeX tables)",
+    )
     args = parser.parse_args()
 
     # Handle --genome shortcut
@@ -813,19 +929,41 @@ def main():
 
     overall_passed = True
     results_summary = []
+    json_data = {
+        "config": {
+            "scale": cfg.name,
+            "device": args.device,
+            "gpu": (
+                torch.cuda.get_device_name(0)
+                if args.device == "cuda" and torch.cuda.is_available()
+                else None
+            ),
+            "pytorch": torch.__version__,
+        },
+    }
 
     for test_name in tests_to_run:
         if test_name == "self-consistency":
-            passed = test_self_consistency(cfg, args.device, args.seed)
+            passed, data = test_self_consistency(cfg, args.device, args.seed)
+            json_data["self_consistency"] = data
         elif test_name == "finite-diff":
-            passed = test_finite_differences(cfg, args.device, params=args.params, seed=args.seed)
+            passed, data = test_finite_differences(cfg, args.device, params=args.params, seed=args.seed)
+            json_data["finite_diff"] = data
         elif test_name == "convergence":
-            passed = test_training_convergence(cfg, args.device, args.seed)
+            passed, data = test_training_convergence(cfg, args.device, args.seed)
+            json_data["convergence"] = data
         else:
             continue
 
         results_summary.append((test_name, passed))
         overall_passed &= passed
+
+    # Export JSON if requested
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.json, "w") as f:
+            json.dump(json_data, f, indent=2)
+        print(f"\n  Results exported to {args.json}")
 
     # Final summary
     section_header("SUMMARY")
@@ -846,7 +984,7 @@ def main():
                 print("  - Autograd matches finite differences")
             elif name == "convergence":
                 print("  - Training converges equivalently across all backends")
-                print("    (streaming PyTorch, Triton, pytorch-struct dp_scan, dp_standard)")
+                print("    (streaming PyTorch, Triton, pytorch-struct dp_standard)")
     else:
         print("  ✗ SOME TESTS FAILED")
         print("  Review the detailed output above for diagnostics.")

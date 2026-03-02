@@ -49,7 +49,7 @@ In the high-level `SemiMarkovCRFHead`, streaming kernels support `log` and `max`
 
 ### Q: What is a "backend" and which one should I use?
 
-A backend is the algorithm that runs the dynamic program. In practice, `backend="auto"` should usually be your default: it selects between streaming and exact modes using a memory heuristic based on `T`, `K`, and `C`.
+A backend is the algorithm that runs the dynamic program. The library offers several, but the two that matter in practice are: (1) the **streaming Triton kernel** (GPU, fastest) and (2) the **streaming PyTorch reference** (CPU or GPU without Triton). The `backend="auto"` setting always uses streaming for log/max semirings. On GPU with Triton installed, this means the fused Triton kernel; on CPU it uses the PyTorch reference. The exact backend is only needed for semirings beyond log/max (entropy, KL divergence, etc.).
 
 | Backend | Memory | Best For |
 |---------|--------|----------|

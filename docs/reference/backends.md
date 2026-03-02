@@ -28,9 +28,7 @@ result = crf.forward(hidden, lengths, backend="streaming")
 result = crf.forward(hidden, lengths, backend="exact")
 ```
 
-The automatic backend selection uses a memory threshold (default 8GB) to decide:
-- If the edge tensor would exceed the threshold, use streaming
-- Otherwise, use exact backend via `SemiMarkov.logpartition()`
+The automatic backend selection always uses streaming for log/max semirings (the common case). The exact backend is only used for other semirings (entropy, KL divergence, etc.) or when explicitly requested. On GPU with Triton installed, streaming uses the fused Triton kernel; otherwise it falls back to the PyTorch reference implementation.
 
 ## Recommendation
 

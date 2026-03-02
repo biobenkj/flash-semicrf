@@ -33,20 +33,32 @@ class TestBackendRouting:
         crf2 = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=8e9)
         assert crf2._should_use_streaming(5000) is False
 
-    def test_select_backend_auto_small(self):
-        """Test auto backend selection for small sequences."""
+    def test_select_backend_always_streaming_for_log(self):
+        """Test auto backend always selects streaming for log semiring."""
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        # Small T — previously would have returned exact
         backend_type, use_triton = crf._select_backend(T=100, semiring="log", use_triton=True)
-        assert backend_type == "exact"
-        assert use_triton is False  # Exact backend doesn't use Triton
-
-    def test_select_backend_auto_large(self):
-        """Test auto backend selection for large sequences."""
-        # With small threshold to force streaming
-        crf = SemiMarkovCRFHead(num_classes=24, max_duration=100, edge_memory_threshold=1e6)
-        backend_type, use_triton = crf._select_backend(T=1000, semiring="log", use_triton=True)
         assert backend_type == "streaming"
         assert use_triton is True
+
+        # Large T
+        backend_type, use_triton = crf._select_backend(T=100000, semiring="log", use_triton=True)
+        assert backend_type == "streaming"
+        assert use_triton is True
+
+    def test_select_backend_always_streaming_for_max(self):
+        """Test auto backend always selects streaming for max semiring."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        backend_type, use_triton = crf._select_backend(T=100, semiring="max", use_triton=True)
+        assert backend_type == "streaming"
+        assert use_triton is True
+
+    def test_select_backend_use_triton_false(self):
+        """Test streaming with use_triton=False passes through correctly."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        backend_type, use_triton = crf._select_backend(T=100, semiring="log", use_triton=False)
+        assert backend_type == "streaming"
+        assert use_triton is False
 
     def test_select_backend_semiring_constraint(self):
         """Test that non-log/max semirings require exact backend."""
@@ -68,7 +80,7 @@ class TestBackendRouting:
         hidden_states = torch.randn(2, 20, 16)
         lengths = torch.full((2,), 20)
 
-        # Auto should select exact for small T
+        # Auto always selects streaming for log/max semirings
         result = crf(hidden_states, lengths, backend="auto", use_triton=False)
         assert result["partition"].shape == (2,)
 
@@ -145,6 +157,37 @@ class TestBackendRouting:
         )
 
         torch.testing.assert_close(loss_streaming, loss_exact, rtol=1e-4, atol=1e-4)
+
+    def test_forward_auto_uses_streaming_small_t(self, monkeypatch):
+        """Behavioral regression: backend='auto' executes streaming for small T.
+
+        Monkeypatches semi_crf_streaming_forward to verify it is actually called
+        by forward() and decode() when backend='auto', even for small T.
+        """
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        # Track whether the streaming function was called
+        call_log = []
+        original_fn = semi_crf_streaming_forward
+
+        def tracking_wrapper(*args, **kwargs):
+            call_log.append(True)
+            return original_fn(*args, **kwargs)
+
+        monkeypatch.setattr("flash_semicrf.nn.semi_crf_streaming_forward", tracking_wrapper)
+
+        # forward() with auto should call streaming
+        call_log.clear()
+        result = crf(hidden_states, lengths, backend="auto", use_triton=False)
+        assert len(call_log) == 1, "forward(backend='auto') did not use streaming path"
+        assert result["partition"].shape == (2,)
+
+        # decode() with auto should also call streaming
+        call_log.clear()
+        crf.decode(hidden_states, lengths, backend="auto", use_triton=False)
+        assert len(call_log) == 1, "decode(backend='auto') did not use streaming path"
 
 
 class TestUncertaintyBackendRouting:

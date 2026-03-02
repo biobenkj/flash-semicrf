@@ -92,13 +92,17 @@ crf = SemiMarkovCRFHead(
     hidden_dim=512       # matches encoder output
 )
 
+# Move to GPU for Triton-accelerated inference (falls back to CPU gracefully)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+crf = crf.to(device)
+
 # Encoder output (from Mamba, Transformer, CNN, etc.)
 batch, T = 4, 1000
-hidden_states = torch.randn(batch, T, 512)
-lengths = torch.full((batch,), T)
+hidden_states = torch.randn(batch, T, 512, device=device)
+lengths = torch.full((batch,), T, device=device)
 
 # Training: compute NLL loss
-labels = torch.randint(0, 24, (batch, T))
+labels = torch.randint(0, 24, (batch, T), device=device)
 loss = crf.compute_loss(hidden_states, lengths, labels)
 loss.backward()
 
@@ -217,4 +221,4 @@ This library builds on [pytorch-struct](https://github.com/harvardnlp/pytorch-st
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+PolyForm Noncommercial License - see [LICENSE](LICENSE.md) for details.

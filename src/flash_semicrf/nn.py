@@ -68,7 +68,10 @@ class SemiMarkovCRFHead(nn.Module):
 
             Default: ``None`` (uses learned duration bias)
         edge_memory_threshold (float, optional): Memory threshold in bytes for
-            switching to streaming backend. Default: ``8e9`` (8GB)
+            the edge tensor. Used only for non-log/max semirings to determine
+            whether the exact backend can fit in memory. Log/max semirings
+            always use the streaming backend regardless of this threshold.
+            Default: ``8e9`` (8GB)
         num_warps (int, optional): Number of warps per block for Triton kernels.
             Higher values increase parallelism but also register pressure.
             Recommended range: 2-8. Default: ``4``
@@ -168,23 +171,29 @@ class SemiMarkovCRFHead(nn.Module):
         return edge_tensor_bytes > self.edge_memory_threshold
 
     def _select_backend(self, T: int, semiring: str, use_triton: bool) -> tuple[str, bool]:
-        """Select backend based on memory and semiring requirements."""
+        """Select backend based on semiring requirements.
+
+        For log/max semirings, always returns streaming. Triton vs PyTorch
+        reference is decided downstream in autograd.py based on device,
+        HAS_TRITON, and K value.
+
+        For other semirings, returns exact (required for full semiring support).
+        Raises ValueError if the edge tensor would exceed memory threshold.
+        """
         # Semirings beyond log/max require exact backend
         if semiring not in ("log", "max"):
             if self._should_use_streaming(T):
                 K, C = self.max_duration, self.num_classes
                 raise ValueError(
                     f"Semiring '{semiring}' requires exact backend, but T={T}, K={K}, C={C} "
-                    f"would require ~{T * K * C * C * 4 / 1e9:.1f}GB edge tensor. "
+                    f"would require ~{T * K * C * C * 8 / 1e9:.1f}GB edge tensor. "
                     f"Use 'log' or 'max' semiring for streaming, or reduce T/K/C."
                 )
             return "exact", False
 
-        # Heuristic-based automatic selection
-        if self._should_use_streaming(T):
-            return "streaming", use_triton
-        else:
-            return "exact", False
+        # log/max: always streaming. Triton vs PyTorch-reference decided
+        # downstream (autograd.py checks is_cuda, HAS_TRITON, K>=3).
+        return "streaming", use_triton
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
         """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
@@ -347,8 +356,8 @@ class SemiMarkovCRFHead(nn.Module):
             use_triton (bool, optional): Whether to use Triton kernels. Default: ``True``
             backend (str, optional): Backend selection mode:
 
-                - ``"auto"``: Select based on memory heuristic (default)
-                - ``"streaming"``: Force streaming backend (genome-scale)
+                - ``"auto"``: Streaming for log/max semirings, exact for others (default)
+                - ``"streaming"``: Force streaming backend
                 - ``"exact"``: Force exact backend via ``semimarkov.py``
 
         Returns:
