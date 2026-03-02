@@ -51,11 +51,11 @@ The backward pass uses a ring buffer of size 2K (not K) to avoid a subtle aliasi
 
 ### Q: What is checkpointing (gradient checkpointing)?
 
-During the forward pass, you normally save all intermediate results so the backward pass can use them to compute gradients. For long sequences, this uses too much memory. Gradient checkpointing saves only occasional snapshots (every Δ ≈ √(T·K) steps). During the backward pass, the forward computation is re-run from the nearest snapshot to regenerate the needed intermediates. This trades compute (roughly 2×) for memory (roughly √T× reduction).
+During the forward pass, you normally save all intermediate results so the backward pass can use them to compute gradients. For long sequences, this uses too much memory. Gradient checkpointing saves only occasional snapshots (with interval chosen from a √(T·K)-style heuristic, plus stability bounds). During the backward pass, the forward computation is re-run from the nearest snapshot to regenerate the needed intermediates. This trades extra compute for much lower memory.
 
 ### Q: What is the prefix-sum decomposition?
 
-The key trick that makes streaming possible. Instead of storing a score for every (position, duration, label) triple, you store cumulative scores: `S[t,c] = sum of emission scores from position 0 to t−1 for label c`. Then the emission score for a segment spanning positions [a, b] is just `S[b+1,c] − S[a,c]`, computed in O(1) time. This is why the library only needs O(TC) storage for cumulative scores rather than O(TKC) for all possible segments.
+The key trick that makes streaming possible. Instead of storing a score for every (position, duration, label) triple, you store cumulative scores: `S[t,c] = sum of emission scores from position 0 to t−1 for label c`. Then the emission score for a segment spanning positions `[a, b)` is `S[b,c] − S[a,c]`, computed in O(1) time. This is why the library only needs O(TC) storage for cumulative scores rather than O(TKC) for all possible segments.
 
 ### Q: What is logsumexp and why is it everywhere?
 
@@ -75,9 +75,11 @@ When computing cumulative sums over 100,000+ positions, the running total can dr
 
 In flash-semicrf, a semiring is a Python object that defines two operations: `combine` (how to merge candidates at a position, e.g., logsumexp or max) and `extend` (how to add a new segment's score, typically addition in log-space). The DP loop calls these operations without knowing which semiring it's using. Swapping the semiring object changes the question the DP answers, with no changes to the DP code itself.
 
+In the streaming kernels, only `log` and `max` semirings are supported; richer semirings (entropy, cross-entropy, etc.) use the exact edge-tensor path.
+
 ### Q: What is NEG_INF and why isn't it negative infinity?
 
-The library uses −1×10⁹ (a very large negative number) instead of true −∞ for masking invalid states. True −∞ causes problems in gradient computation: −∞ − (−∞) = NaN, which propagates and corrupts training. Using a finite sentinel avoids this while being negative enough that it never contributes to logsumexp results.
+Most streaming kernels use `NEG_INF = -1e9` instead of true `-inf` for masking invalid states. True `-inf` can cause undefined arithmetic in some intermediate expressions and gradient paths (for example, `-inf - (-inf)`), which can produce NaNs. Using a finite sentinel avoids this while remaining effectively zero-contribution in logsumexp. (A few exact-path utilities use an even smaller finite sentinel such as `-1e18` for the same reason.)
 
 ### Q: What does "on-the-fly" mean for edge computation?
 
@@ -93,4 +95,4 @@ The content term comes from a subtraction of two entries in the cumulative score
 
 ---
 
-**See also:** [Engineering Decisions](04-engineering-decisions.md) · [Streaming internals](../streaming_internals.md) · [Backend algorithm supplement](../backend_algorithm_supplement.pdf)
+**See also:** [Engineering Decisions](04-engineering-decisions.md) · [Streaming internals](../internals/streaming_internals.md) · [Backend algorithm supplement](../manuscript/backend_algorithm_supplement.pdf)

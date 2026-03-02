@@ -2,6 +2,8 @@ import torch
 
 from .blocktriangular import BlockTriangularMatrix, block_triang_matmul
 from .helpers import _Struct
+from .semirings import MaxSemiring
+from .semirings.semirings import _BaseLog
 
 
 class SemiMarkov(_Struct):
@@ -403,7 +405,9 @@ class SemiMarkov(_Struct):
                 right_bt = BlockTriangularMatrix.from_dense(right_dense, K_1, C, span_length)
 
                 prod_bt = block_triang_matmul(left_bt, right_bt, semiring, span_length)
-                prod_dense = prod_bt.to_dense().reshape(batch, -1, K_1 * C, K_1 * C)
+                prod_dense = prod_bt.to_dense(semiring=semiring).reshape(
+                    batch, -1, K_1 * C, K_1 * C
+                )
                 result_parts.append(prod_dense)
 
             chart = torch.stack(result_parts, dim=0)
@@ -593,10 +597,10 @@ class SemiMarkov(_Struct):
                     left_banded = BandedMatrix.from_dense(left_matrices, lu, ld, fill_value)
                     right_banded = BandedMatrix.from_dense(right_matrices, lu, ld, fill_value)
 
-                    if hasattr(semiring, "zero") and semiring.zero == -1e9:
-                        result_banded = right_banded.multiply_log(left_banded.transpose())
-                    elif hasattr(semiring, "one") and semiring.one == -1e9:
+                    if issubclass(semiring, MaxSemiring):
                         result_banded = right_banded.multiply_max(left_banded.transpose())
+                    elif issubclass(semiring, _BaseLog):
+                        result_banded = right_banded.multiply_log(left_banded.transpose())
                     else:
                         result_banded = right_banded.multiply(left_banded.transpose())
 

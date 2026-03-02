@@ -224,8 +224,9 @@ if HAS_TRITON:
             # Cast t to int32 to match seq_len type for consistent comparison
             active = t.to(tl.int32) <= seq_len
 
-            # Accumulate alpha[t] = logsumexp over (k, c_src)
-            alpha_t = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+            # Online logsumexp accumulators for alpha[t] over (k, c_src)
+            m_alpha = tl.full([C_PAD], NEG_INF, dtype=tl.float64)
+            l_alpha = tl.zeros([C_PAD], dtype=tl.float64)
 
             # Loop over valid segment durations k = 1, 2, ..., min(K, t)
             for k in tl.range(1, K + 1):
@@ -328,18 +329,26 @@ if HAS_TRITON:
                 # Mask invalid durations and labels
                 score_for_k = tl.where(k_valid & c_mask, score_for_k, NEG_INF)
 
-                # Accumulate into alpha_t via logsumexp
-                # Guard against both inputs being NEG_INF to prevent undefined arithmetic
-                # Flash Attention pattern: no epsilon needed
-                max_alpha = tl.maximum(alpha_t, score_for_k)
-                is_both_neginf = (alpha_t < (NEG_INF + 1.0)) & (score_for_k < (NEG_INF + 1.0))
-                max_alpha_safe = tl.where(is_both_neginf, 0.0, max_alpha)
-                log_sum_exp_acc = tl.log(
-                    tl.exp(alpha_t - max_alpha_safe) + tl.exp(score_for_k - max_alpha_safe)
+                # Online logsumexp: accumulate score_for_k into (m_alpha, l_alpha)
+                # 2 exp + 0 log per k (vs pairwise: 2 exp + 1 log per k)
+                score_for_k = score_for_k.to(tl.float64)
+                m_new = tl.maximum(m_alpha, score_for_k)
+                is_m_neginf = m_alpha < (NEG_INF + 1.0)
+                is_score_neginf = score_for_k < (NEG_INF + 1.0)
+                m_new_safe = tl.where(is_m_neginf & is_score_neginf, 0.0, m_new)
+                l_alpha = tl.where(
+                    is_m_neginf,
+                    tl.exp(score_for_k - m_new_safe),
+                    l_alpha * tl.exp(m_alpha - m_new_safe) + tl.exp(score_for_k - m_new_safe),
                 )
-                alpha_t = tl.where(is_both_neginf, NEG_INF, max_alpha + log_sum_exp_acc)
+                m_alpha = m_new
 
-            # Mask inactive sequences
+            # Finalize online logsumexp: alpha_t = m + log(l)
+            is_all_neginf = m_alpha < (NEG_INF + 1.0)
+            # Guard: tl.log(l_alpha) is only safe when l_alpha > 0.
+            # When all inputs were NEG_INF, l_alpha == 0 and log(0) = -inf/NaN.
+            # The is_all_neginf guard short-circuits to NEG_INF before evaluating log.
+            alpha_t = tl.where(is_all_neginf, NEG_INF, m_alpha + tl.log(l_alpha))
             alpha_t = tl.where(active & c_mask, alpha_t, NEG_INF)
 
             # Store to live ring buffer

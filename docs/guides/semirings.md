@@ -33,7 +33,7 @@ for n in 1..N:
     beta[n] = combine(candidates)
 ```
 
-The key observation is that the *shape* of this computation never changes.
+The critical component is that the *shape* of this computation never changes.
 What changes is what you mean by:
 
 - **extend**: "how do I add the score of a new segment onto what I already have?"

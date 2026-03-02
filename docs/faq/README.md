@@ -11,3 +11,5 @@
 4. **[Engineering Decisions](04-engineering-decisions.md)** — Why cumulative scores? Why ring buffers? Design rationale.
 
 5. **[Troubleshooting](05-troubleshooting.md)** — Common errors, numerical issues, and debugging tips.
+
+6. **[Conceptual Bridge](06-conceptual-bridge.md)** — For genomics and biostatistics researchers: how semi-CRF concepts map to HMMs, posterior inference, empirical Bayes, and other frameworks you already know.
