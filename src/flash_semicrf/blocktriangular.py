@@ -158,10 +158,10 @@ class BlockTriangularMatrix:
 
         fill_value = semiring.zero.item() if semiring is not None else 0.0
         dense = self.values.new_full((B, N, N), fill_value=fill_value)
-        for b, (k1, k2) in enumerate(self.block_indices.tolist()):
+        for blk, (k1, k2) in enumerate(self.block_indices.tolist()):
             i_start = k1 * self.C
             j_start = k2 * self.C
-            dense[:, i_start : i_start + self.C, j_start : j_start + self.C] = self.values[:, b]
+            dense[:, i_start : i_start + self.C, j_start : j_start + self.C] = self.values[:, blk]
         return dense
 
 
