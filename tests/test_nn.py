@@ -631,6 +631,211 @@ class TestSemiMarkovCRFHeadGPU:
         )
 
 
+class TestBoundaryProjections:
+    """Tests for use_boundary_projections=True in SemiMarkovCRFHead."""
+
+    def test_boundary_projections_loss_finite(self):
+        """compute_loss with use_boundary_projections=True produces finite loss
+        and both boundary layers receive non-zero gradients."""
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                use_boundary_projections=True)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss = crf.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        assert torch.isfinite(loss), f"Expected finite loss, got {loss}"
+
+        loss.backward()
+        assert crf.proj_start_layer.weight.grad is not None
+        assert crf.proj_end_layer.weight.grad is not None
+        assert crf.proj_start_layer.weight.grad.abs().sum() > 0
+        assert crf.proj_end_layer.weight.grad.abs().sum() > 0
+
+    def test_boundary_projections_hidden_dim_none_raises(self):
+        """use_boundary_projections=True with hidden_dim=None raises ValueError."""
+        with pytest.raises(ValueError, match="hidden_dim"):
+            SemiMarkovCRFHead(num_classes=4, max_duration=8,
+                              use_boundary_projections=True)
+
+    def test_boundary_projections_zero_weights_equals_no_boundary(self):
+        """Boundary model with zeroed weights matches no-boundary model loss."""
+        torch.manual_seed(7)
+        crf_base = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        crf_boundary = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                         use_boundary_projections=True)
+
+        # Copy all shared parameters from base to boundary model
+        with torch.no_grad():
+            crf_boundary.transition.copy_(crf_base.transition)
+            crf_boundary.duration_dist.load_state_dict(crf_base.duration_dist.state_dict())
+            crf_boundary.projection.weight.copy_(crf_base.projection.weight)
+            crf_boundary.projection.bias.copy_(crf_base.projection.bias)
+            # Zero out boundary weights so they contribute nothing
+            crf_boundary.proj_start_layer.weight.zero_()
+            crf_boundary.proj_end_layer.weight.zero_()
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss_base = crf_base.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        loss_boundary = crf_boundary.compute_loss(hidden_states, lengths, labels, use_triton=False)
+
+        torch.testing.assert_close(loss_base, loss_boundary, rtol=1e-5, atol=1e-5)
+
+    def test_boundary_projections_non_streaming_backend_raises(self):
+        """Boundary guard raises ValueError for non-streaming backends."""
+        torch.manual_seed(0)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                use_boundary_projections=True)
+        hidden_states = torch.randn(2, 10, 16)
+        lengths = torch.full((2,), 10)
+        labels = torch.randint(0, 4, (2, 10))
+
+        # forward() also accepts dp_standard
+        for bad_backend in ("exact", "binary_tree_sharded", "dp_standard"):
+            with pytest.raises(ValueError, match="[Bb]oundary"):
+                crf(hidden_states, lengths, backend=bad_backend, use_triton=False)
+
+        # decode() and decode_with_traceback() don't accept dp_standard
+        for bad_backend in ("exact", "binary_tree_sharded"):
+            with pytest.raises(ValueError, match="[Bb]oundary"):
+                crf.decode(hidden_states, lengths, backend=bad_backend, use_triton=False)
+            with pytest.raises(ValueError, match="[Bb]oundary"):
+                crf.decode_with_traceback(hidden_states, lengths, backend=bad_backend,
+                                          use_triton=False)
+
+    def test_boundary_projections_decode_with_traceback(self):
+        """Sum of segment scores matches Viterbi score from decode_with_traceback."""
+        torch.manual_seed(99)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                use_boundary_projections=True)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result = crf.decode_with_traceback(hidden_states, lengths, use_triton=False)
+
+        for b in range(2):
+            segments = result.segments[b]
+            assert len(segments) > 0
+            seg_score_sum = sum(seg.score for seg in segments)
+            viterbi_score = result.scores[b].item()
+            assert abs(seg_score_sum - viterbi_score) < 1e-4, (
+                f"Batch {b}: seg_score_sum={seg_score_sum:.6f} != viterbi_score={viterbi_score:.6f}"
+            )
+
+    def test_boundary_grad_with_frozen_geometric_duration(self):
+        """With frozen geometric duration, boundary layers still get non-zero gradients."""
+        from flash_semicrf.duration import GeometricDuration
+        torch.manual_seed(5)
+        dur = GeometricDuration(max_duration=8, num_classes=4, learn_rate=False)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                duration_distribution=dur,
+                                use_boundary_projections=True)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss = crf.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        assert torch.isfinite(loss)
+        loss.backward()
+
+        assert crf.proj_start_layer.weight.grad.abs().sum() > 0
+        assert crf.proj_end_layer.weight.grad.abs().sum() > 0
+        # Duration dist parameters should have no grad (frozen buffers)
+        for param in crf.duration_dist.parameters():
+            assert param.grad is None or param.grad.abs().sum() == 0
+
+    def test_boundary_grad_finite_difference(self):
+        """Finite-difference gradient check on proj_start_layer.weight."""
+        torch.manual_seed(13)
+        crf = SemiMarkovCRFHead(num_classes=3, max_duration=4, hidden_dim=8,
+                                use_boundary_projections=True)
+        # Use double precision for FD check
+        crf = crf.double()
+        hidden_states = torch.randn(1, 6, 8, dtype=torch.float64, requires_grad=True)
+        lengths = torch.tensor([6])
+        labels = torch.randint(0, 3, (1, 6))
+
+        def loss_fn(hs):
+            return crf.compute_loss(hs, lengths, labels, use_triton=False)
+
+        torch.autograd.gradcheck(loss_fn, (hidden_states,), eps=1e-5, atol=1e-3, rtol=1e-3)
+
+    def test_extra_repr_includes_boundary(self):
+        """extra_repr includes 'use_boundary_projections=True' when enabled."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
+                                use_boundary_projections=True)
+        assert "use_boundary_projections=True" in crf.extra_repr()
+
+        crf_no_boundary = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        assert "use_boundary_projections" not in crf_no_boundary.extra_repr()
+
+
+class TestScoreGoldBoundary:
+    """Tests for boundary projection terms in score_gold_vectorized."""
+
+    def test_score_gold_T1_boundary(self):
+        """Verify T=1 branch in score_gold_vectorized with boundary projections."""
+        from flash_semicrf.helpers import score_gold_vectorized
+        torch.manual_seed(0)
+        batch, C = 2, 4
+        cum_scores = torch.randn(batch, 2, C, dtype=torch.float64)
+        labels = torch.tensor([[1], [2]])  # (batch, T=1)
+        lengths = torch.tensor([1, 1])
+        transition = torch.zeros(C, C, dtype=torch.float64)
+        duration_bias = torch.zeros(4, C, dtype=torch.float64)
+        proj_start = torch.randn(batch, 1, C, dtype=torch.float64)
+        proj_end = torch.randn(batch, 1, C, dtype=torch.float64)
+
+        score_no_boundary = score_gold_vectorized(
+            cum_scores, labels, lengths, transition, duration_bias, max_duration=4
+        )
+        score_with_boundary = score_gold_vectorized(
+            cum_scores, labels, lengths, transition, duration_bias, max_duration=4,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        # Expected delta: proj_start[b, 0, label[b]] + proj_end[b, 0, label[b]]
+        for b in range(batch):
+            lbl = labels[b, 0].item()
+            expected_delta = proj_start[b, 0, lbl].item() + proj_end[b, 0, lbl].item()
+            actual_delta = (score_with_boundary[b] - score_no_boundary[b]).item()
+            assert abs(actual_delta - expected_delta) < 1e-9
+
+    def test_score_gold_K1_boundary(self):
+        """Verify K=1 branch in score_gold_vectorized with boundary projections."""
+        from flash_semicrf.helpers import score_gold_vectorized
+        torch.manual_seed(1)
+        batch, T, C = 2, 6, 4
+        cum_scores = torch.randn(batch, T + 1, C, dtype=torch.float64)
+        labels = torch.randint(0, C, (batch, T))
+        lengths = torch.full((batch,), T)
+        transition = torch.zeros(C, C, dtype=torch.float64)
+        duration_bias = torch.zeros(1, C, dtype=torch.float64)  # K=1
+        proj_start = torch.randn(batch, T, C, dtype=torch.float64)
+        proj_end = torch.randn(batch, T, C, dtype=torch.float64)
+
+        score_no_boundary = score_gold_vectorized(
+            cum_scores, labels, lengths, transition, duration_bias, max_duration=1
+        )
+        score_with_boundary = score_gold_vectorized(
+            cum_scores, labels, lengths, transition, duration_bias, max_duration=1,
+            proj_start=proj_start, proj_end=proj_end
+        )
+
+        # For K=1, each position t is its own segment: delta = sum_t proj_start[b,t,lbl] + proj_end[b,t,lbl]
+        for b in range(batch):
+            expected_delta = 0.0
+            for t in range(T):
+                lbl = labels[b, t].item()
+                expected_delta += proj_start[b, t, lbl].item() + proj_end[b, t, lbl].item()
+            actual_delta = (score_with_boundary[b] - score_no_boundary[b]).item()
+            assert abs(actual_delta - expected_delta) < 1e-9
+
+
 class TestTracebackSingleRegression:
     """Regression tests for _traceback_single 2D/3D shape fix."""
 

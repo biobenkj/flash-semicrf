@@ -130,6 +130,7 @@ class SemiMarkovCRFHead(nn.Module):
         duration_distribution: Optional[Union[str, DurationDistribution]] = None,
         edge_memory_threshold: float = 8e9,
         num_warps: int = 4,
+        use_boundary_projections: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -154,6 +155,21 @@ class SemiMarkovCRFHead(nn.Module):
             self.projection = nn.Linear(hidden_dim, num_classes)
         else:
             self.projection = None
+
+        # Optional boundary projections: learn per-position segment-start / segment-end scores
+        # Requires hidden_dim so we have encoder representations to project from.
+        if use_boundary_projections:
+            if hidden_dim is None:
+                raise ValueError(
+                    "use_boundary_projections=True requires hidden_dim to be provided"
+                )
+            self.proj_start_layer = nn.Linear(hidden_dim, num_classes, bias=False)
+            self.proj_end_layer = nn.Linear(hidden_dim, num_classes, bias=False)
+            nn.init.normal_(self.proj_start_layer.weight, std=init_scale)
+            nn.init.normal_(self.proj_end_layer.weight, std=init_scale)
+        else:
+            self.proj_start_layer = None
+            self.proj_end_layer = None
 
     @property
     def duration_bias(self) -> Tensor:
@@ -194,6 +210,38 @@ class SemiMarkovCRFHead(nn.Module):
         # log/max: always streaming. Triton vs PyTorch-reference decided
         # downstream (autograd.py checks is_cuda, HAS_TRITON, K>=3).
         return "streaming", use_triton
+
+    def _validate_backend_for_boundaries(self, backend: str) -> None:
+        """Raise if boundary projections are enabled with a non-streaming backend.
+
+        Non-streaming backends (exact, binary_tree_sharded, dp_standard) compute
+        the partition function without boundary terms. If _score_gold includes
+        boundaries but the partition does not, NLL = log Z - score(y*) is
+        incorrectly normalized.
+        """
+        if self.proj_start_layer is not None and backend not in ("auto", "streaming"):
+            raise ValueError(
+                f"Boundary projections require streaming backend, got backend={backend!r}. "
+                f"Non-streaming backends do not include boundary terms in the partition "
+                f"function, which would produce incorrect NLL."
+            )
+
+    def _compute_boundary_projections(self, hidden_states: Tensor):
+        """Project encoder hidden states to boundary scores.
+
+        Uses float64 internally for numerical stability at genomic-scale
+        sequence lengths (T > 100K), consistent with cum_scores precision.
+
+        Returns:
+            Tuple of (proj_start, proj_end), each (batch, T, C) in float64,
+            or (None, None) if boundary projections are disabled.
+        """
+        if self.proj_start_layer is None:
+            return None, None
+        return (
+            self.proj_start_layer(hidden_states).double(),  # (batch, T, C)
+            self.proj_end_layer(hidden_states).double(),    # (batch, T, C)
+        )
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
         """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
@@ -389,7 +437,7 @@ class SemiMarkovCRFHead(nn.Module):
                 "contain NaN values (e.g., via torch.isnan(param).any() for each param)."
             )
 
-        # Select backend
+        # Select backend (validate value first so typos get the standard error)
         if backend == "auto":
             backend_type, use_triton_final = self._select_backend(T, "log", use_triton)
         elif backend == "streaming":
@@ -405,6 +453,7 @@ class SemiMarkovCRFHead(nn.Module):
                 f"Unknown backend: {backend}. "
                 "Use 'auto', 'streaming', 'exact', 'dp_standard', or 'binary_tree_sharded'."
             )
+        self._validate_backend_for_boundaries(backend)
 
         # Build cumulative scores for prefix-sum edge retrieval
         # CRITICAL: Use float64 for numerical stability at T > 100K
@@ -425,6 +474,9 @@ class SemiMarkovCRFHead(nn.Module):
                 "extreme values in the input scores or projection layer weights."
             )
 
+        # Compute boundary projections (None, None if not enabled)
+        proj_start, proj_end = self._compute_boundary_projections(hidden_states)
+
         if backend_type == "streaming":
             # Compute partition function via streaming algorithm
             partition = semi_crf_streaming_forward(
@@ -436,6 +488,8 @@ class SemiMarkovCRFHead(nn.Module):
                 semiring="log",
                 use_triton=use_triton_final,
                 num_warps=self.num_warps,
+                proj_start=proj_start,
+                proj_end=proj_end,
             )
         elif backend_type == "binary_tree_sharded":
             # Use sharded binary tree backend for memory-efficient reference implementation
@@ -447,7 +501,7 @@ class SemiMarkovCRFHead(nn.Module):
             # Use exact backend via semimarkov.py (_dp_scan_streaming)
             partition = self._forward_exact(scores, lengths, "log")
 
-        return {"partition": partition, "cum_scores": cum_scores}
+        return {"partition": partition, "cum_scores": cum_scores, "proj_start": proj_start, "proj_end": proj_end}
 
     def compute_loss(
         self,
@@ -492,9 +546,11 @@ class SemiMarkovCRFHead(nn.Module):
         result = self.forward(hidden_states, lengths, use_triton, backend)
         partition = result["partition"]
         cum_scores = result["cum_scores"]
+        proj_start = result.get("proj_start")
+        proj_end = result.get("proj_end")
 
         # Score the gold segmentation
-        gold_score = self._score_gold(cum_scores, labels, lengths)
+        gold_score = self._score_gold(cum_scores, labels, lengths, proj_start, proj_end)
 
         # NLL = partition - gold_score
         nll = partition - gold_score
@@ -516,6 +572,9 @@ class SemiMarkovCRFHead(nn.Module):
         """
         penalty = self.transition.norm(p=p).pow(p)
         penalty = penalty + self.duration_bias.norm(p=p).pow(p)
+        if self.proj_start_layer is not None:
+            penalty = penalty + self.proj_start_layer.weight.norm(p=p).pow(p)
+            penalty = penalty + self.proj_end_layer.weight.norm(p=p).pow(p)
         return penalty
 
     def _score_gold(
@@ -523,8 +582,15 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores: Tensor,
         labels: Tensor,
         lengths: Tensor,
+        proj_start: Optional[Tensor] = None,
+        proj_end: Optional[Tensor] = None,
     ) -> Tensor:
-        """Score the gold segmentation. Returns shape (batch,)."""
+        """Score the gold segmentation. Returns shape (batch,).
+
+        Args:
+            proj_start: Optional start boundary scores of shape (batch, T, C).
+            proj_end: Optional end boundary scores of shape (batch, T, C).
+        """
         return score_gold_vectorized(
             cum_scores=cum_scores,
             labels=labels,
@@ -532,6 +598,8 @@ class SemiMarkovCRFHead(nn.Module):
             transition=self.transition,
             duration_bias=self.duration_bias,
             max_duration=self.max_duration,
+            proj_start=proj_start,
+            proj_end=proj_end,
         )
 
     @torch.no_grad()
@@ -566,7 +634,7 @@ class SemiMarkovCRFHead(nn.Module):
         else:
             scores = hidden_states
 
-        # Select backend
+        # Select backend (validate value first so typos get the standard error)
         if backend == "auto":
             backend_type, use_triton_final = self._select_backend(T, "max", use_triton)
         elif backend == "streaming":
@@ -580,6 +648,7 @@ class SemiMarkovCRFHead(nn.Module):
                 f"Unknown backend: {backend}. "
                 "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
             )
+        self._validate_backend_for_boundaries(backend)
 
         # Build cumulative scores
         # Zero-center before cumsum to prevent magnitude drift at long sequences
@@ -592,6 +661,9 @@ class SemiMarkovCRFHead(nn.Module):
         )
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
+        # Compute boundary projections (None, None if not enabled)
+        proj_start, proj_end = self._compute_boundary_projections(hidden_states)
+
         if backend_type == "streaming":
             # Use max semiring for Viterbi
             max_score = semi_crf_streaming_forward(
@@ -603,6 +675,8 @@ class SemiMarkovCRFHead(nn.Module):
                 semiring="max",
                 use_triton=use_triton_final,
                 num_warps=self.num_warps,
+                proj_start=proj_start,
+                proj_end=proj_end,
             )
         elif backend_type == "binary_tree_sharded":
             # Use sharded binary tree backend for memory-efficient reference implementation
@@ -660,7 +734,7 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores = torch.zeros(batch, T + 1, self.num_classes, dtype=torch.float64, device=device)
         cum_scores[:, 1:] = torch.cumsum(scores_float, dim=1)
 
-        # Select backend
+        # Select backend (validate value first so typos get the standard error)
         if backend == "auto":
             backend_type = "streaming"
         elif backend == "streaming":
@@ -672,6 +746,10 @@ class SemiMarkovCRFHead(nn.Module):
                 f"Unknown backend: {backend}. "
                 "Use 'auto', 'streaming', 'exact', or 'binary_tree_sharded'."
             )
+        self._validate_backend_for_boundaries(backend)
+
+        # Compute boundary projections once (None, None if not enabled)
+        proj_start, proj_end = self._compute_boundary_projections(hidden_states)
 
         # Check which sequences need traceback
         needs_traceback = lengths <= max_traceback_length
@@ -684,6 +762,8 @@ class SemiMarkovCRFHead(nn.Module):
 
             for b in range(batch):
                 seq_len = int(lengths[b].item())
+                proj_start_b = proj_start[b:b+1] if proj_start is not None else None
+                proj_end_b = proj_end[b:b+1] if proj_end is not None else None
                 if seq_len > max_traceback_length:
                     # Skip traceback for long sequences
                     all_segments.append([])
@@ -696,11 +776,15 @@ class SemiMarkovCRFHead(nn.Module):
                         self.max_duration,
                         semiring="max",
                         use_triton=False,
+                        proj_start=proj_start_b,
+                        proj_end=proj_end_b,
                     )
                     max_scores_list.append(score)
                 else:
                     # Use _traceback_single for per-sequence Viterbi with backpointers
-                    segments = self._traceback_single(cum_scores[b:b+1], seq_len)
+                    segments = self._traceback_single(
+                        cum_scores[b:b+1], seq_len, proj_start_b, proj_end_b
+                    )
                     all_segments.append(segments)
                     # Compute max score from segments
                     if segments:
@@ -721,6 +805,8 @@ class SemiMarkovCRFHead(nn.Module):
                             self.max_duration,
                             semiring="max",
                             use_triton=False,
+                            proj_start=proj_start_b,
+                            proj_end=proj_end_b,
                         )
                         max_scores_list.append(score.squeeze(0))
 
@@ -739,6 +825,8 @@ class SemiMarkovCRFHead(nn.Module):
                     self.duration_bias,
                     lengths,
                     self.max_duration,
+                    proj_start=proj_start,
+                    proj_end=proj_end,
                 )
             else:
                 max_scores, bp_k, bp_c, final_labels = semi_crf_streaming_viterbi_with_backpointers(
@@ -747,11 +835,13 @@ class SemiMarkovCRFHead(nn.Module):
                     self.duration_bias,
                     lengths,
                     self.max_duration,
+                    proj_start=proj_start,
+                    proj_end=proj_end,
                 )
 
             # Fast O(T) traceback using backpointers
             all_segments = self._traceback_from_backpointers(
-                bp_k, bp_c, final_labels, lengths, cum_scores
+                bp_k, bp_c, final_labels, lengths, cum_scores, proj_start, proj_end
             )
 
             # Clear segments for sequences that exceeded max_traceback_length
@@ -769,6 +859,8 @@ class SemiMarkovCRFHead(nn.Module):
                 semiring="max",
                 use_triton=use_triton,
                 num_warps=self.num_warps,
+                proj_start=proj_start,
+                proj_end=proj_end,
             )
             all_segments = [[] for _ in range(batch)]
 
@@ -778,6 +870,8 @@ class SemiMarkovCRFHead(nn.Module):
         self,
         cum_scores: Tensor,  # (1, T+1, C)
         seq_len: int,
+        proj_start_b: Optional[Tensor] = None,  # (1, T, C)
+        proj_end_b: Optional[Tensor] = None,    # (1, T, C)
     ) -> list[Segment]:
         """Viterbi traceback for single sequence. O(TC) memory."""
         device = cum_scores.device
@@ -808,6 +902,8 @@ class SemiMarkovCRFHead(nn.Module):
                     self.duration_bias,
                     start,
                     k,
+                    proj_start=proj_start_b,
+                    proj_end=proj_end_b,
                 )  # (1, C_dest, C_src)
 
                 # scores[c_dest, c_src] = alpha[start, c_src] + edge[c_dest, c_src]
@@ -845,7 +941,11 @@ class SemiMarkovCRFHead(nn.Module):
             # Always include transition, even for first segment - the forward pass
             # computes: max_{c_src} [alpha[0, c_src] + segment_score + transition[c_src, c_dest]]
             # where alpha[0, c_src] = 0, so transition from c_prev is part of the score
-            seg_score = self._compute_segment_score(cum_scores[0], start, end, c, c_prev)
+            seg_score = self._compute_segment_score(
+                cum_scores[0], start, end, c, c_prev,
+                proj_start_b=proj_start_b[0] if proj_start_b is not None else None,
+                proj_end_b=proj_end_b[0] if proj_end_b is not None else None,
+            )
 
             segments.append(Segment(start=start, end=end, label=c, score=seg_score))
 
@@ -863,6 +963,8 @@ class SemiMarkovCRFHead(nn.Module):
         final_labels: Tensor,
         lengths: Tensor,
         cum_scores: Tensor,
+        proj_start: Optional[Tensor] = None,
+        proj_end: Optional[Tensor] = None,
     ) -> list[list[Segment]]:
         """O(T) traceback using pre-computed backpointers."""
         batch = lengths.shape[0]
@@ -895,7 +997,11 @@ class SemiMarkovCRFHead(nn.Module):
                 # Always include transition, even for first segment - the forward pass
                 # computes: max_{c_src} [alpha[0, c_src] + segment_score + transition[c_src, c_dest]]
                 # where alpha[0, c_src] = 0, so transition from c_prev is part of the score
-                seg_score = self._compute_segment_score(cum_scores[b], start, end, c, c_prev)
+                seg_score = self._compute_segment_score(
+                    cum_scores[b], start, end, c, c_prev,
+                    proj_start_b=proj_start[b] if proj_start is not None else None,
+                    proj_end_b=proj_end[b] if proj_end is not None else None,
+                )
 
                 segments.append(Segment(start=start, end=end, label=c, score=seg_score))
 
@@ -915,8 +1021,10 @@ class SemiMarkovCRFHead(nn.Module):
         end: int,
         label: int,
         prev_label: Optional[int],
+        proj_start_b: Optional[Tensor] = None,  # (T, C)
+        proj_end_b: Optional[Tensor] = None,    # (T, C)
     ) -> float:
-        """Compute content + duration_bias + transition for a segment."""
+        """Compute content + duration_bias + transition + boundary for a segment."""
         # Content score
         content = (cum_scores[end + 1, label] - cum_scores[start, label]).item()
 
@@ -930,7 +1038,13 @@ class SemiMarkovCRFHead(nn.Module):
         if prev_label is not None:
             trans = self.transition[prev_label, label].item()
 
-        return content + dur_bias + trans
+        boundary = 0.0
+        if proj_start_b is not None:
+            boundary += proj_start_b[start, label].item()
+        if proj_end_b is not None:
+            boundary += proj_end_b[end, label].item()
+
+        return content + dur_bias + trans + boundary
 
     def extra_repr(self) -> str:
         parts = [
@@ -940,4 +1054,6 @@ class SemiMarkovCRFHead(nn.Module):
         if self.projection is not None:
             parts.append(f"hidden_dim={self.projection.in_features}")
         parts.append(f"duration_dist={self.duration_dist.__class__.__name__}")
+        if self.proj_start_layer is not None:
+            parts.append("use_boundary_projections=True")
         return ", ".join(parts)
