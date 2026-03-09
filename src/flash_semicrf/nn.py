@@ -700,7 +700,7 @@ class SemiMarkovCRFHead(nn.Module):
                     max_scores_list.append(score)
                 else:
                     # Use _traceback_single for per-sequence Viterbi with backpointers
-                    segments = self._traceback_single(cum_scores[b], seq_len)
+                    segments = self._traceback_single(cum_scores[b:b+1], seq_len)
                     all_segments.append(segments)
                     # Compute max score from segments
                     if segments:
@@ -776,7 +776,7 @@ class SemiMarkovCRFHead(nn.Module):
 
     def _traceback_single(
         self,
-        cum_scores: Tensor,
+        cum_scores: Tensor,  # (1, T+1, C)
         seq_len: int,
     ) -> list[Segment]:
         """Viterbi traceback for single sequence. O(TC) memory."""

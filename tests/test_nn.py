@@ -629,3 +629,30 @@ class TestSemiMarkovCRFHeadGPU:
             rtol=1e-4,
             atol=1e-4,
         )
+
+
+class TestTracebackSingleRegression:
+    """Regression tests for _traceback_single 2D/3D shape fix."""
+
+    def test_traceback_single_exact_backend(self):
+        """Regression: _traceback_single must work with 3D cum_scores.
+
+        Prior to the fix, _traceback_single received cum_scores[b] (2D, shape
+        (T+1, C)), but compute_edge_block_streaming indexes cum_scores[:, t+k, :]
+        requiring a batch dimension. This test exercises the exact-backend path
+        (decode_with_traceback accepts 'exact' at the backend dispatch),
+        which is the only path that calls _traceback_single directly.
+        """
+        torch.manual_seed(0)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        # use_triton=False for determinism/CI portability — backend="exact" doesn't
+        # use Triton, but being explicit avoids ambiguity if backend selection is
+        # ever refactored and removes dependency on Triton availability in CI.
+        result = crf.decode_with_traceback(
+            hidden_states, lengths, backend="exact", use_triton=False
+        )
+        assert len(result.segments) == 2
+        for segs in result.segments:
+            assert len(segs) > 0
