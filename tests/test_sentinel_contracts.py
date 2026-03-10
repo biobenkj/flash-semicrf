@@ -1,9 +1,11 @@
 import argparse
 import importlib.util
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -896,3 +898,418 @@ def test_status_json_written_by_fix(tmp_path):
     assert "traces" in data
     assert "summary" in data
     assert "timestamp" in data
+
+
+# ── v2 Phase 2a tests ──────────────────────────────────────────────────────────
+
+
+# --- _FileDebouncer (4 tests) ---
+
+
+def test_debouncer_fires_after_delay():
+    module = _load_sentinel_module()
+    debouncer = module._FileDebouncer(delay_ms=500)
+
+    with patch.object(module.time, "monotonic") as mock_mono:
+        mock_mono.return_value = 0.0
+        debouncer.record("/tmp/a.py")
+
+        mock_mono.return_value = 0.3
+        assert debouncer.ready() == []
+
+        mock_mono.return_value = 0.6
+        assert debouncer.ready() == ["/tmp/a.py"]
+
+
+def test_debouncer_resets_on_re_record():
+    module = _load_sentinel_module()
+    debouncer = module._FileDebouncer(delay_ms=500)
+
+    with patch.object(module.time, "monotonic") as mock_mono:
+        mock_mono.return_value = 0.0
+        debouncer.record("/tmp/a.py")
+
+        mock_mono.return_value = 0.4
+        debouncer.record("/tmp/a.py")  # reset timer
+
+        mock_mono.return_value = 0.6
+        assert debouncer.ready() == []  # only 0.2s since re-record
+
+        mock_mono.return_value = 1.0
+        assert debouncer.ready() == ["/tmp/a.py"]
+
+
+def test_debouncer_has_pending():
+    module = _load_sentinel_module()
+    debouncer = module._FileDebouncer(delay_ms=500)
+
+    assert debouncer.has_pending() is False
+
+    with patch.object(module.time, "monotonic") as mock_mono:
+        mock_mono.return_value = 0.0
+        debouncer.record("/tmp/a.py")
+        assert debouncer.has_pending() is True
+
+        mock_mono.return_value = 0.6
+        debouncer.ready()
+        assert debouncer.has_pending() is False
+
+
+def test_debouncer_multiple_files_independent():
+    module = _load_sentinel_module()
+    debouncer = module._FileDebouncer(delay_ms=500)
+
+    with patch.object(module.time, "monotonic") as mock_mono:
+        mock_mono.return_value = 0.0
+        debouncer.record("/tmp/a.py")
+
+        mock_mono.return_value = 0.2
+        debouncer.record("/tmp/b.py")
+
+        # At t=0.6: a.py has waited 0.6s (fires), b.py only 0.4s (not yet)
+        mock_mono.return_value = 0.6
+        fired = debouncer.ready()
+        assert fired == ["/tmp/a.py"]
+
+        # At t=0.8: b.py has waited 0.6s (fires)
+        mock_mono.return_value = 0.8
+        fired = debouncer.ready()
+        assert fired == ["/tmp/b.py"]
+
+
+# --- build_file_trace_index (3 tests) ---
+
+
+class _IndexFakeSentinel:
+    """Fake sentinel for build_file_trace_index / get_monitored_dirs tests."""
+
+    def __init__(self, repo_root, meta):
+        self.repo_root = repo_root
+        self._meta = meta
+
+    def load_meta(self):
+        return self._meta
+
+
+def test_build_file_trace_index_maps_files_to_traces(tmp_path):
+    module = _load_sentinel_module()
+    # Create directory structure so Path.resolve() works
+    (tmp_path / "src" / "a").mkdir(parents=True)
+    (tmp_path / "src" / "b").mkdir(parents=True)
+    (tmp_path / "src" / "a" / "foo.py").touch()
+    (tmp_path / "src" / "b" / "bar.py").touch()
+
+    meta = {
+        "sentinels": {
+            "trace-1": {"source_files": ["src/a/foo.py"]},
+            "trace-2": {"source_files": ["src/a/foo.py", "src/b/bar.py"]},
+        }
+    }
+    sentinel = _IndexFakeSentinel(tmp_path, meta)
+    index = module.CodeSentinel.build_file_trace_index(sentinel)
+
+    foo_path = str((tmp_path / "src" / "a" / "foo.py").resolve())
+    bar_path = str((tmp_path / "src" / "b" / "bar.py").resolve())
+
+    assert set(index[foo_path]) == {"trace-1", "trace-2"}
+    assert index[bar_path] == ["trace-2"]
+
+
+def test_get_monitored_dirs_returns_parent_dirs(tmp_path):
+    module = _load_sentinel_module()
+    (tmp_path / "src" / "a").mkdir(parents=True)
+    (tmp_path / "src" / "b").mkdir(parents=True)
+    (tmp_path / "src" / "a" / "foo.py").touch()
+    (tmp_path / "src" / "b" / "bar.py").touch()
+
+    meta = {
+        "sentinels": {
+            "trace-1": {"source_files": ["src/a/foo.py"]},
+            "trace-2": {"source_files": ["src/b/bar.py"]},
+        }
+    }
+    sentinel = _IndexFakeSentinel(tmp_path, meta)
+    dirs = module.CodeSentinel.get_monitored_dirs(sentinel)
+
+    expected = {
+        str((tmp_path / "src" / "a").resolve()),
+        str((tmp_path / "src" / "b").resolve()),
+    }
+    assert dirs == expected
+
+
+def test_build_file_trace_index_empty_meta(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _IndexFakeSentinel(tmp_path, {"sentinels": {}})
+
+    assert module.CodeSentinel.build_file_trace_index(sentinel) == {}
+    assert module.CodeSentinel.get_monitored_dirs(sentinel) == set()
+
+
+# --- _is_relevant_git_event (1 test) ---
+
+
+def test_is_relevant_git_event_filtering(tmp_path):
+    module = _load_sentinel_module()
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+
+    def check(rel_path):
+        return module._is_relevant_git_event(str((git_dir / rel_path).resolve()), tmp_path)
+
+    # Relevant: HEAD, index, refs/heads/*
+    assert check("HEAD") is True
+    assert check("index") is True
+    assert check("refs/heads/main") is True
+    assert check("refs/heads/feature/foo") is True
+
+    # Irrelevant: objects, logs, config, non-git paths
+    assert check("objects/ab/cdef1234") is False
+    assert check("logs/HEAD") is False
+    assert check("config") is False
+    assert module._is_relevant_git_event(str(tmp_path / "src" / "foo.py"), tmp_path) is False
+
+
+# --- _handle_file_change (3 tests) ---
+
+
+def _make_anchor_result(module, name, status="VERIFIED", content_hash_match=None):
+    return module.AnchorResult(
+        name=name,
+        status=status,
+        expected_line=10,
+        actual_line=10,
+        drift=0,
+        message="ok",
+        content_hash_match=content_hash_match,
+    )
+
+
+def _make_verification(module, name, commit_status, anchors=None):
+    return module.TraceVerification(
+        name=name,
+        commit_status=commit_status,
+        verified_commit="abc123",
+        current_commit="def456",
+        uncommitted_changes=False,
+        anchors=anchors or [],
+    )
+
+
+def test_handle_file_change_verifies_only_affected_traces(tmp_path):
+    module = _load_sentinel_module()
+    verified = _make_verification(module, "trace-1", module.Status.VERIFIED)
+    verified2 = _make_verification(module, "trace-2", module.Status.VERIFIED)
+
+    verify_calls = []
+
+    class _WatchSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+        def __init__(self):
+            self.sentinel_dir.mkdir(exist_ok=True)
+
+        def verify_trace(self, name, check_assumptions=True):  # noqa: ARG002
+            verify_calls.append(name)
+            return {"trace-1": verified, "trace-2": verified2}[name]
+
+    sentinel = _WatchSentinel()
+    index = {"/src/a.py": ["trace-1"], "/src/b.py": ["trace-2"]}
+    cache = {"trace-1": verified, "trace-2": verified2}
+
+    mod_name = module.__name__
+    with (
+        patch(f"{mod_name}._emit_watch_event"),
+        patch(f"{mod_name}._write_status_json") as mock_write,
+    ):
+        module._handle_file_change(sentinel, ["/src/a.py"], index, False, True, cache)
+
+    assert verify_calls == ["trace-1"]
+    # _write_status_json called with full cache (both traces)
+    mock_write.assert_called_once()
+    written_verifications = mock_write.call_args[0][1]
+    assert len(written_verifications) == 2
+
+
+def test_handle_file_change_emits_fix_applied_on_auto_fix(tmp_path):
+    module = _load_sentinel_module()
+    stale_anchor = _make_anchor_result(module, "A1", status="DRIFT", content_hash_match=True)
+    stale_verification = _make_verification(
+        module, "trace-1", module.Status.STALE_COMMIT, anchors=[stale_anchor]
+    )
+    fixed_verification = _make_verification(module, "trace-1", module.Status.VERIFIED)
+
+    class _WatchSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+        def __init__(self):
+            self.sentinel_dir.mkdir(exist_ok=True)
+
+        def verify_trace(self, name, check_assumptions=True):  # noqa: ARG002
+            return stale_verification
+
+    sentinel = _WatchSentinel()
+    index = {"/src/a.py": ["trace-1"]}
+    cache = {}
+
+    fix_return = (
+        0,
+        [],
+        [fixed_verification],
+        {
+            "trace-1": {
+                "anchors_fixed": [{"name": "A1", "old_line": 10, "new_line": 12}],
+                "new_status": "VERIFIED",
+            }
+        },
+    )
+
+    emitted_events = []
+    mod_name = module.__name__
+
+    def capture_event(event, json_lines):  # noqa: ARG001
+        emitted_events.append(event)
+
+    with (
+        patch(f"{mod_name}._fix_traces", return_value=fix_return),
+        patch(f"{mod_name}._emit_watch_event", side_effect=capture_event),
+        patch(f"{mod_name}._write_status_json"),
+    ):
+        module._handle_file_change(sentinel, ["/src/a.py"], index, True, True, cache)
+
+    fix_events = [e for e in emitted_events if e.event == "fix_applied"]
+    assert len(fix_events) == 1
+    assert fix_events[0].trace == "trace-1"
+    assert fix_events[0].anchors_updated == ["A1"]
+    assert fix_events[0].new_status == "VERIFIED"
+
+
+def test_handle_file_change_cache_contract(tmp_path):
+    module = _load_sentinel_module()
+    verified_1 = _make_verification(module, "trace-1", module.Status.VERIFIED)
+    stale_anchor = _make_anchor_result(module, "B1", status="DRIFT", content_hash_match=True)
+    stale_2 = _make_verification(
+        module, "trace-2", module.Status.STALE_COMMIT, anchors=[stale_anchor]
+    )
+    fixed_2 = _make_verification(module, "trace-2", module.Status.VERIFIED)
+
+    class _WatchSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+        def __init__(self):
+            self.sentinel_dir.mkdir(exist_ok=True)
+
+        def verify_trace(self, name, check_assumptions=True):  # noqa: ARG002
+            return stale_2
+
+    sentinel = _WatchSentinel()
+    index = {"/src/b.py": ["trace-2"]}
+    cache = {"trace-1": verified_1, "trace-2": stale_2}
+    original_trace1 = cache["trace-1"]
+
+    fix_return = (
+        0,
+        [],
+        [fixed_2],
+        {
+            "trace-2": {
+                "anchors_fixed": [{"name": "B1", "old_line": 10, "new_line": 12}],
+                "new_status": "VERIFIED",
+            }
+        },
+    )
+
+    mod_name = module.__name__
+    with (
+        patch(f"{mod_name}._fix_traces", return_value=fix_return),
+        patch(f"{mod_name}._emit_watch_event"),
+        patch(f"{mod_name}._write_status_json"),
+    ):
+        module._handle_file_change(sentinel, ["/src/b.py"], index, True, True, cache)
+
+    # trace-1 cache entry is the SAME object (not re-verified)
+    assert cache["trace-1"] is original_trace1
+    # trace-2 cache entry is updated to the fixed verification
+    assert cache["trace-2"].name == "trace-2"
+    assert cache["trace-2"] is fixed_2
+
+
+# --- Stale PID file handling (3 tests) ---
+
+
+def test_stale_pidfile_cleaned_on_dead_pid(tmp_path):
+    module = _load_sentinel_module()
+
+    class _PidSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+    sentinel = _PidSentinel()
+    sentinel.sentinel_dir.mkdir(exist_ok=True)
+    pid_path = sentinel.sentinel_dir / "watch.pid"
+    pid_path.write_text("99999999")
+
+    module._check_stale_pidfile(sentinel)
+    assert not pid_path.exists()
+
+
+def test_stale_pidfile_blocks_on_live_pid(tmp_path):
+    module = _load_sentinel_module()
+
+    class _PidSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+    sentinel = _PidSentinel()
+    sentinel.sentinel_dir.mkdir(exist_ok=True)
+    pid_path = sentinel.sentinel_dir / "watch.pid"
+    pid_path.write_text(str(os.getpid()))
+
+    with pytest.raises(SystemExit) as exc_info:
+        module._check_stale_pidfile(sentinel)
+    assert exc_info.value.code == 1
+
+
+def test_stale_pidfile_cleaned_on_corrupt_file(tmp_path):
+    module = _load_sentinel_module()
+
+    class _PidSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+    sentinel = _PidSentinel()
+    sentinel.sentinel_dir.mkdir(exist_ok=True)
+    pid_path = sentinel.sentinel_dir / "watch.pid"
+    pid_path.write_text("not_a_pid\n")
+
+    module._check_stale_pidfile(sentinel)
+    assert not pid_path.exists()
+
+
+# --- _emit_watch_event output discipline (1 test) ---
+
+
+def test_emit_watch_event_json_structure(capsys):
+    module = _load_sentinel_module()
+    event = module.WatchEvent(
+        event="fix_applied",
+        timestamp="2026-03-10T00:00:00Z",
+        trace="t1",
+        anchors_updated=["A1"],
+        new_status="VERIFIED",
+    )
+
+    # JSON Lines mode: stdout, no stderr
+    module._emit_watch_event(event, json_lines=True)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["event"] == "fix_applied"
+    assert data["trace"] == "t1"
+    assert data["anchors_updated"] == ["A1"]
+    assert data["new_status"] == "VERIFIED"
+    # None fields must be EXCLUDED (not present as null)
+    for key in ("file", "traces", "summary", "anchors_affected", "auto_fixable", "message"):
+        assert key not in data
+
+    # Human-readable mode: stderr, no stdout
+    module._emit_watch_event(event, json_lines=False)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "fixed: t1" in captured.err

@@ -67,6 +67,18 @@ adapters:
     block_start: "<!-- sentinel:codex:start -->"
     block_end: "<!-- sentinel:codex:end -->"
 
+# Watch mode configuration
+# CLI flags override these values.
+watch:
+  auto_fix: true               # auto-fix mechanical drift (default ON)
+  debounce_ms: 500             # debounce rapid filesystem events per-file
+  poll_interval_s: 2           # fallback polling interval when watchdog unavailable
+  daemon: false                # run as background daemon by default
+  status_file: .sentinel/status.json
+  ignored_patterns:
+    - "*.pyc"
+    - "__pycache__/*"
+
 # CI and strictness config
 ci:
   fail_on_verify: true
