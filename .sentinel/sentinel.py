@@ -149,6 +149,87 @@ class WatchEvent:
     message: str | None = None
 
 
+@dataclass
+class ScanPreset:
+    """Preset configuration for init --scan file discovery and function classification."""
+
+    name: str
+    description: str
+    language: str  # "python", "typescript", "rust" — controls which extractor runs
+    file_globs: list[str]
+    exclude_globs: list[str]
+    critical_patterns: list[str]
+    high_patterns: list[str]
+    min_functions: int = 2  # minimum critical+high functions to create a trace
+
+
+# Languages with a function extractor in Phase 2b
+_SUPPORTED_LANGUAGES = {"python"}
+
+BUILTIN_PRESETS: dict[str, ScanPreset] = {
+    "default": ScanPreset(
+        name="default",
+        description="Python source files with project-specific patterns",
+        language="python",
+        file_globs=["src/**/*.py"],
+        exclude_globs=[
+            "**/test_*.py",
+            "**/*_test.py",
+            "**/__init__.py",
+            "**/conftest.py",
+            "**/setup.py",
+        ],
+        critical_patterns=CRITICAL_PATTERNS,
+        high_patterns=HIGH_PATTERNS,
+        min_functions=2,
+    ),
+    "pytorch": ScanPreset(
+        name="pytorch",
+        description="PyTorch/Triton projects (kernels, autograd, forward/backward)",
+        language="python",
+        file_globs=["src/**/*.py"],
+        exclude_globs=[
+            "**/test_*.py",
+            "**/*_test.py",
+            "**/__init__.py",
+            "**/conftest.py",
+            "**/setup.py",
+        ],
+        critical_patterns=CRITICAL_PATTERNS
+        + [
+            r"@torch\.no_grad",
+            r"class\s+\w+\(Function\)",
+            r"ctx\.save_for_backward",
+        ],
+        high_patterns=HIGH_PATTERNS
+        + [
+            r"def training_step\(",
+            r"def validation_step\(",
+        ],
+        min_functions=2,
+    ),
+    "typescript": ScanPreset(
+        name="typescript",
+        description="TypeScript projects (route handlers, middleware, hooks)",
+        language="typescript",
+        file_globs=["src/**/*.ts", "src/**/*.tsx"],
+        exclude_globs=["**/*.test.ts", "**/*.spec.ts", "**/*.d.ts"],
+        critical_patterns=[
+            r"export (async )?function",
+            r"app\.(get|post|put|delete|patch)\(",
+            r"router\.(get|post|put|delete|patch)\(",
+        ],
+        high_patterns=[
+            r"export default",
+            r"middleware",
+            r"useEffect",
+            r"useState",
+        ],
+        min_functions=2,
+    ),
+}
+
+
 class CodeSentinel:
     def __init__(self, sentinel_dir: Path | None = None):
         self.sentinel_dir = sentinel_dir or self._find_sentinel_dir()
@@ -516,6 +597,296 @@ class CodeSentinel:
 
         return classes
 
+    # ── init --scan helpers ──────────────────────────────────────────────
+
+    def load_scan_preset(self, name: str) -> ScanPreset:
+        """Load a scan preset by name (built-in or custom from presets/).
+
+        For the 'default' preset, overrides file_globs with project.src_root
+        from config and critical/high patterns from init_patterns config.
+        """
+        if name in BUILTIN_PRESETS:
+            preset = BUILTIN_PRESETS[name]
+            # For default and pytorch presets, apply project config overrides
+            if name in ("default", "pytorch"):
+                src_root = self.config.get("project", {}).get("src_root", "src")
+                cfg_critical = self.config.get("init_patterns", {}).get(
+                    "critical", preset.critical_patterns
+                )
+                cfg_high = self.config.get("init_patterns", {}).get("high", preset.high_patterns)
+                # For pytorch, merge config patterns with pytorch-specific extras
+                if name == "pytorch":
+                    pytorch_extra_critical = [
+                        r"@torch\.no_grad",
+                        r"class\s+\w+\(Function\)",
+                        r"ctx\.save_for_backward",
+                    ]
+                    pytorch_extra_high = [
+                        r"def training_step\(",
+                        r"def validation_step\(",
+                    ]
+                    cfg_critical = list(cfg_critical) + [
+                        p for p in pytorch_extra_critical if p not in cfg_critical
+                    ]
+                    cfg_high = list(cfg_high) + [p for p in pytorch_extra_high if p not in cfg_high]
+                preset = ScanPreset(
+                    name=preset.name,
+                    description=preset.description,
+                    language=preset.language,
+                    file_globs=[f"{src_root}/**/*.py"],
+                    exclude_globs=preset.exclude_globs,
+                    critical_patterns=cfg_critical,
+                    high_patterns=cfg_high,
+                    min_functions=preset.min_functions,
+                )
+            return preset
+        # Try custom preset from presets/ directory
+        preset_path = self.sentinel_dir / "presets" / f"{name}.yaml"
+        if preset_path.exists():
+            data = yaml.safe_load(preset_path.read_text())
+            return ScanPreset(**data)
+        available = ", ".join(list(BUILTIN_PRESETS.keys()))
+        raise ValueError(f"Unknown preset: {name}. Available: {available}")
+
+    def discover_source_files(self, preset: ScanPreset) -> list[Path]:
+        """Walk repo tree respecting .gitignore, filtered by preset globs.
+
+        Only returns files whose language has a supported extractor.
+        """
+        import fnmatch
+
+        if preset.language not in _SUPPORTED_LANGUAGES:
+            print(
+                f"  Skipping preset '{preset.name}': "
+                f"no function extractor for {preset.language} (Phase 2b is Python-only)",
+                file=sys.stderr,
+            )
+            return []
+
+        cmd = ["git", "ls-files", "--cached", "--others", "--exclude-standard"]
+        for glob in preset.file_globs:
+            # Prefix with :(glob) so git interprets ** as recursive match
+            cmd.extend(["--", f":(glob){glob}"])
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.repo_root)
+        if result.returncode != 0:
+            return []
+
+        files = []
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            excluded = any(fnmatch.fnmatch(line, pat) for pat in preset.exclude_globs)
+            if not excluded:
+                files.append(self.repo_root / line)
+        return sorted(files)
+
+    def derive_trace_name(self, source_path: Path, existing_names: set[str]) -> str:
+        """Derive a trace name from a source file path, avoiding collisions.
+
+        Converts file stem to kebab-case. On collision, prefixes with parent
+        directory name. Last resort: numeric suffix. existing_names must include
+        both existing trace names from meta AND names derived earlier in the
+        current scan run.
+        """
+        stem = source_path.stem.replace("_", "-").replace(".", "-").strip("-")
+        if stem not in existing_names:
+            return stem
+        # Add parent directory for disambiguation
+        parent = source_path.parent.name.replace("_", "-").replace(".", "-").strip("-")
+        qualified = f"{parent}-{stem}"
+        if qualified not in existing_names:
+            return qualified
+        # Numeric suffix as last resort
+        i = 2
+        while f"{stem}-{i}" in existing_names:
+            i += 1
+        return f"{stem}-{i}"
+
+    def scaffold_trace(
+        self,
+        source_path: Path,
+        trace_name: str,
+        head_commit: str,
+        *,
+        status: str = "VERIFIED",
+        critical_patterns: list[str] | None = None,
+        high_patterns: list[str] | None = None,
+    ) -> tuple[str, dict, dict]:
+        """Scaffold trace markdown, anchor entries, and meta entry for one source file.
+
+        Args:
+            source_path: Absolute path to source file.
+            trace_name: Name for the trace.
+            head_commit: Git short hash for verified_commit ("TODO" for draft mode).
+            status: Trace status ("VERIFIED" for scan, "DRAFT" for single-file).
+            critical_patterns: Override critical patterns for function classification.
+            high_patterns: Override high patterns for function classification.
+
+        Returns:
+            (trace_markdown, anchor_dict, meta_entry)
+        """
+        # Temporarily override config patterns if provided
+        orig_config = None
+        if critical_patterns is not None or high_patterns is not None:
+            orig_config = self.config.get("init_patterns", {}).copy()
+            if critical_patterns is not None:
+                self.config.setdefault("init_patterns", {})["critical"] = critical_patterns
+            if high_patterns is not None:
+                self.config.setdefault("init_patterns", {})["high"] = high_patterns
+
+        try:
+            functions = self.extract_functions(source_path)
+            classes = self.extract_classes(source_path)
+        finally:
+            # Restore original config
+            if orig_config is not None:
+                self.config["init_patterns"] = orig_config
+
+        try:
+            rel_source = source_path.relative_to(self.repo_root)
+        except ValueError:
+            rel_source = source_path
+
+        critical = [f for f in functions if f.importance == "critical"]
+        high = [f for f in functions if f.importance == "high"]
+        selected = (critical + high)[:10]
+
+        # Read file lines for content hash computation
+        try:
+            source_lines = source_path.read_text().splitlines()
+        except OSError:
+            source_lines = []
+
+        # Count how many times each function name appears (for ambiguity detection)
+        name_counts: dict[str, int] = {}
+        for func in functions:
+            name_counts[func.name] = name_counts.get(func.name, 0) + 1
+
+        # Build anchor dict with content hashes
+        anchor_dict = {}
+        for func in selected:
+            anchor_name = func.name.upper()
+            # Handle duplicate anchor names (e.g., forward in multiple classes)
+            if anchor_name in anchor_dict:
+                # Find enclosing class for disambiguation
+                enclosing = None
+                for cls_name, cls_line in reversed(classes):
+                    if cls_line < func.line:
+                        enclosing = cls_name
+                        break
+                if enclosing:
+                    anchor_name = f"{enclosing.upper()}_{func.name.upper()}"
+                else:
+                    anchor_name = f"{func.name.upper()}_{func.line}"
+
+            pattern = f"def {func.name}("
+            content_hash = ""
+            if func.line <= len(source_lines):
+                content_hash = _compute_content_hash(source_lines[func.line - 1])
+
+            entry: dict[str, Any] = {
+                "file": str(rel_source),
+                "pattern": pattern,
+                "expected_line": func.line,
+                "drift_tolerance": 30,
+                "content_hash": content_hash,
+            }
+
+            # Add 'after' context for ambiguous patterns
+            if name_counts.get(func.name, 0) > 1:
+                enclosing = None
+                for cls_name, cls_line in reversed(classes):
+                    if cls_line < func.line:
+                        enclosing = cls_name
+                        break
+                if enclosing:
+                    entry["after"] = f"class {enclosing}"
+
+            anchor_dict[anchor_name] = entry
+
+        # Build trace markdown
+        commit_display = f"`{head_commit}`" if head_commit != "TODO" else "TODO"
+        trace_md = f"""# Sentinel: {trace_name}
+
+**Verified against:** `{rel_source}` @ commit {commit_display}
+
+**Status:** {status}
+
+**Linked tests:** TODO
+
+## Summary
+
+TODO: Describe the purpose and key functionality of this module.
+
+## Active Assumptions
+
+### Mechanically Verified
+
+| ID | Assumption | Verification |
+|----|------------|--------------|
+"""
+        assumption_id = 1
+        for func in critical[:5]:
+            trace_md += (
+                f"| A{assumption_id} | {func.name} exists at expected location "
+                f"| anchor: {func.name.upper()} |\n"
+            )
+            assumption_id += 1
+
+        trace_md += """
+### Agent-Verified (on trace load)
+
+| ID | Assumption | Verification Guidance |
+|----|------------|----------------------|
+| TODO | TODO | TODO |
+
+## Algorithm Flow
+
+TODO: Document the key algorithm steps with line references.
+
+"""
+        if critical or high:
+            trace_md += "## Key Functions\n\n"
+            trace_md += "| Function | Line | Importance |\n"
+            trace_md += "|----------|------|------------|\n"
+            for func in critical + high:
+                trace_md += f"| `{func.name}` | {func.line} | {func.importance} |\n"
+            trace_md += "\n"
+
+        trace_md += """## Critical Invariants
+
+- [ ] TODO: Document critical invariants
+
+## Known Issues
+
+| Issue | Severity | Resolution |
+|-------|----------|------------|
+| None documented | - | - |
+
+## Version History
+
+"""
+        if status == "VERIFIED":
+            trace_md += f"- **{head_commit}**: Initial trace (auto-scaffolded by `init --scan`)\n"
+        else:
+            trace_md += "- **TODO**: Initial trace (DRAFT)\n"
+
+        # Build meta entry
+        meta_entry = {
+            "verified_commit": head_commit,
+            "source_files": [str(rel_source)],
+            "assumptions_mechanical": [],
+            "assumptions_agent": [],
+            "anchors": list(anchor_dict.keys()),
+            "linked_tests": [],
+            "status": status,
+            "depends_on": [],
+        }
+
+        return trace_md, anchor_dict, meta_entry
+
+    # ── end init --scan helpers ──────────────────────────────────────────
+
     def get_files_changed_since(self, commit: str) -> set[str]:
         """Get set of files changed between commit and HEAD."""
         result = subprocess.run(
@@ -671,6 +1042,97 @@ class CodeSentinel:
         if not config_path.exists():
             return {}
         return yaml.safe_load(config_path.read_text()) or {}
+
+
+# Embedded verify-anchor.sh for bootstrap (fresh repos without .sentinel/)
+_VERIFY_ANCHOR_SH = """\
+#!/bin/bash
+# Usage: verify-anchor.sh <pattern> <expected_line> <file> [drift_tolerance] [after_pattern]
+# Returns: 0=verified, 1=missing, 2=drifted, 3=ambiguous
+
+pattern="$1"
+expected_line="$2"
+file="$3"
+drift_tolerance="${4:-20}"
+after_pattern="${5:-}"
+
+# If after_pattern provided, use two-stage matching
+if [[ -n "$after_pattern" ]]; then
+  # Find line number of after_pattern, then search for pattern after it
+  after_line=$(grep -nF "$after_pattern" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+  if [[ -z "$after_line" ]]; then
+    echo "ANCHOR_MISSING: Context pattern '$after_pattern' not found"
+    exit 1
+  fi
+  # Search only after the context line
+  actual_line=$(tail -n "+$after_line" "$file" | grep -nF "$pattern" | head -1 | cut -d: -f1)
+  if [[ -n "$actual_line" ]]; then
+    actual_line=$((after_line + actual_line - 1))
+  fi
+else
+  # Check for ambiguous patterns (multiple matches)
+  match_count=$(grep -cF "$pattern" "$file" 2>/dev/null)
+  if [[ $match_count -gt 1 ]]; then
+    echo "ANCHOR_AMBIGUOUS: Pattern matches $match_count lines"
+    exit 3
+  fi
+  actual_line=$(grep -nF "$pattern" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+fi
+
+if [[ -z "$actual_line" ]]; then
+  echo "ANCHOR_MISSING: Pattern not found"
+  exit 1
+fi
+
+drift=$((actual_line - expected_line))
+drift=${drift#-}  # absolute value
+
+if [[ $drift -gt $drift_tolerance ]]; then
+  echo "ANCHOR_DRIFT: Expected ~$expected_line, found $actual_line (drift $drift > $drift_tolerance)"
+  exit 2
+fi
+
+echo "ANCHOR_VERIFIED: Line $actual_line (drift $drift)"
+exit 0
+"""
+
+
+def bootstrap_sentinel_dir(repo_root: Path) -> Path:
+    """Create .sentinel/ directory structure if it doesn't exist.
+
+    Creates all required subdirectories, empty config/meta/anchor files,
+    and writes verify-anchor.sh with executable permissions. Safe to call
+    on an existing .sentinel/ — only creates missing pieces.
+    """
+    sentinel_dir = repo_root / ".sentinel"
+    for subdir in ["traces", "anchors", "adapters", "presets", "diffs", "hooks"]:
+        (sentinel_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Empty meta if missing
+    meta_path = sentinel_dir / ".sentinel-meta.yaml"
+    if not meta_path.exists():
+        meta_path.write_text('version: "2.0"\nsentinels: {}\n')
+
+    # Empty anchors if missing
+    anchors_path = sentinel_dir / "anchors" / "anchors.yaml"
+    if not anchors_path.exists():
+        anchors_path.write_text("{}\n")
+
+    # Minimal config if missing
+    config_path = sentinel_dir / "sentinel.yaml"
+    if not config_path.exists():
+        # Auto-detect project name from repo directory
+        project_name = repo_root.name
+        config_path.write_text(
+            f'version: "1.0"\n\nproject:\n  name: {project_name}\n  src_root: src\n'
+        )
+
+    # verify-anchor.sh — always write to ensure it's current
+    script_path = sentinel_dir / "anchors" / "verify-anchor.sh"
+    script_path.write_text(_VERIFY_ANCHOR_SH)
+    script_path.chmod(0o755)
+
+    return sentinel_dir
 
 
 def _compute_content_hash(line: str) -> str:
@@ -1041,8 +1503,218 @@ def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     return EXIT_SUCCESS
 
 
+def cmd_init_scan(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Scan repo and scaffold traces for all discovered source files."""
+    dry_run = getattr(args, "dry_run", False)
+    preset_name = getattr(args, "preset", "default") or "default"
+    force = getattr(args, "force", False)
+
+    # Load preset
+    try:
+        preset = sentinel.load_scan_preset(preset_name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return EXIT_GENERAL_ERROR
+
+    # Get HEAD commit
+    head_result = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=sentinel.repo_root,
+    )
+    if head_result.returncode != 0:
+        print("Error: could not determine HEAD commit", file=sys.stderr)
+        return EXIT_GENERAL_ERROR
+    head_commit = head_result.stdout.strip()
+
+    # Discover source files
+    source_files = sentinel.discover_source_files(preset)
+    if not source_files:
+        print(f"No source files found for preset '{preset_name}'")
+        return EXIT_SUCCESS
+
+    print(f"Discovered {len(source_files)} source files (preset: {preset_name})")
+
+    # Check for uncommitted changes across discovered files
+    dirty_result = subprocess.run(
+        ["git", "diff", "--name-only"],
+        capture_output=True,
+        text=True,
+        cwd=sentinel.repo_root,
+    )
+    staged_result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        cwd=sentinel.repo_root,
+    )
+    dirty_files = set()
+    for output in (dirty_result.stdout, staged_result.stdout):
+        for line in output.strip().split("\n"):
+            if line:
+                dirty_files.add(str((sentinel.repo_root / line).resolve()))
+    dirty_discovered = [f for f in source_files if str(f.resolve()) in dirty_files]
+    if dirty_discovered:
+        print(
+            f"\nNote: {len(dirty_discovered)} file(s) have uncommitted changes; "
+            "traces will show STALE_CONTENT until committed",
+            file=sys.stderr,
+        )
+
+    # Load existing state
+    meta = sentinel.load_meta()
+    anchors = sentinel.load_anchors()
+    if anchors is None:
+        anchors = {}
+
+    # Build set of already-covered source files (by resolved path)
+    existing_sentinels = meta.get("sentinels", {})
+    covered_files: set[str] = set()
+    for trace_meta in existing_sentinels.values():
+        for sf in trace_meta.get("source_files", []):
+            covered_files.add(str((sentinel.repo_root / sf).resolve()))
+
+    # Build set of existing trace names for collision detection
+    existing_names: set[str] = set(existing_sentinels.keys())
+
+    # Scaffold each file
+    new_traces: list[str] = []
+    skipped_covered = 0
+    skipped_threshold = 0
+    for source_path in source_files:
+        resolved = str(source_path.resolve())
+
+        # Skip already-covered files unless --force
+        if resolved in covered_files and not force:
+            skipped_covered += 1
+            continue
+
+        # Derive trace name (checks existing + scan-derived names)
+        trace_name = sentinel.derive_trace_name(source_path, existing_names)
+
+        # Check min_functions threshold
+        functions = sentinel.extract_functions(source_path)
+        trace_worthy = [f for f in functions if f.importance in ("critical", "high")]
+        if len(trace_worthy) < preset.min_functions:
+            skipped_threshold += 1
+            continue
+
+        if dry_run:
+            rel = source_path.relative_to(sentinel.repo_root)
+            print(
+                f"  [dry-run] Would create trace: {trace_name} "
+                f"({rel}, {len(trace_worthy)} anchors)"
+            )
+            existing_names.add(trace_name)
+            continue
+
+        # Get per-file commit (what verify uses to check staleness)
+        try:
+            rel = source_path.relative_to(sentinel.repo_root)
+        except ValueError:
+            rel = source_path
+        file_commit = sentinel.get_current_commit(str(rel)) or head_commit
+
+        # Scaffold the trace
+        trace_md, anchor_dict, meta_entry = sentinel.scaffold_trace(
+            source_path,
+            trace_name,
+            file_commit,
+            status="VERIFIED",
+            critical_patterns=preset.critical_patterns,
+            high_patterns=preset.high_patterns,
+        )
+
+        # Write trace markdown
+        trace_path = sentinel.traces_dir / f"{trace_name}.md"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(trace_md)
+
+        # Merge into anchors and meta
+        anchors[trace_name] = anchor_dict
+        meta.setdefault("sentinels", {})[trace_name] = meta_entry
+
+        existing_names.add(trace_name)
+        new_traces.append(trace_name)
+        print(f"  Created trace: {trace_name} ({len(anchor_dict)} anchors)")
+
+    if dry_run:
+        created = len(source_files) - skipped_covered - skipped_threshold
+        print(f"\n[dry-run] Would create {created} traces")
+        if skipped_covered:
+            print(f"  Skipped {skipped_covered} already-covered files")
+        if skipped_threshold:
+            print(
+                f"  Skipped {skipped_threshold} files below "
+                f"min_functions={preset.min_functions} threshold"
+            )
+        return EXIT_SUCCESS
+
+    if not new_traces:
+        print("No new traces created (all files already covered or below threshold)")
+        return EXIT_SUCCESS
+
+    # Save merged state
+    sentinel.save_anchors(anchors)
+    sentinel.save_meta(meta)
+
+    # Verify ALL traces (new + existing) for complete status.json
+    all_trace_names = list(meta.get("sentinels", {}).keys())
+    verifications = []
+    for tname in all_trace_names:
+        v = sentinel.verify_trace(tname)
+        verifications.append(v)
+
+    _write_status_json(sentinel, verifications)
+
+    # Install hooks if not already installed
+    hook_path = sentinel.repo_root / ".git" / "hooks" / "pre-commit"
+    if not hook_path.exists():
+        print("\nInstalling pre-commit hooks...")
+        hook_args = argparse.Namespace()
+        cmd_install_hooks(hook_args, sentinel)
+
+    # Install adapter if requested
+    adapter = getattr(args, "adapter", None)
+    if adapter:
+        print(f"\nInstalling {adapter} adapter...")
+        adapter_args = argparse.Namespace(adapter=adapter, list=False, force=False, dry_run=False)
+        cmd_install_adapter(adapter_args, sentinel)
+
+    # Summary with honest status reporting
+    verified_count = sum(1 for v in verifications if v.overall_status == Status.VERIFIED)
+    total = len(verifications)
+    stale_count = total - verified_count
+
+    summary = f"\nScan complete: {len(new_traces)} traces created"
+    summary += f", {verified_count}/{total} verified"
+    if stale_count:
+        summary += f", {stale_count} stale"
+        if dirty_discovered:
+            summary += " (uncommitted changes)"
+    print(summary)
+
+    if skipped_covered:
+        print(f"  Skipped {skipped_covered} already-covered files")
+    if skipped_threshold:
+        print(
+            f"  Skipped {skipped_threshold} files below "
+            f"min_functions={preset.min_functions} threshold"
+        )
+
+    return EXIT_SUCCESS
+
+
 def cmd_init(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
-    """Scaffold a new trace from a source file."""
+    """Scaffold a new trace from a source file, or scan repo with --scan."""
+    if getattr(args, "scan", False):
+        return cmd_init_scan(args, sentinel)
+
+    if not args.source:
+        print("Error: source file required (or use --scan for repo-wide scan)")
+        return EXIT_GENERAL_ERROR
+
     source_path = Path(args.source)
     if not source_path.is_absolute():
         source_path = sentinel.repo_root / source_path
@@ -1061,101 +1733,44 @@ def cmd_init(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         print("Use --force to overwrite")
         return EXIT_GENERAL_ERROR
 
-    # Extract functions and classes
     print(f"Analyzing {source_path}...")
     functions = sentinel.extract_functions(source_path)
     classes = sentinel.extract_classes(source_path)
-
-    # Categorize by importance
     critical = [f for f in functions if f.importance == "critical"]
     high = [f for f in functions if f.importance == "high"]
-
     print(f"  Found {len(functions)} functions, {len(classes)} classes")
     print(f"  Critical: {len(critical)}, High: {len(high)}")
 
-    # Compute relative path for the source file
+    # Scaffold via shared helper (single-file mode: DRAFT status, TODO commit)
+    trace_md, anchor_dict, meta_entry = sentinel.scaffold_trace(
+        source_path, trace_name, "TODO", status="DRAFT"
+    )
+
+    # Write trace file
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(trace_md)
+    print(f"\nCreated trace: {trace_path}")
+
+    # Format anchor suggestions for display
     try:
         rel_source = source_path.relative_to(sentinel.repo_root)
     except ValueError:
         rel_source = source_path
 
-    # Generate trace markdown
-    trace_content = f"""# Sentinel: {trace_name}
+    print("\n=== Suggested Anchors ===")
+    print("Add to anchors/anchors.yaml:")
+    print(f"\n# Anchors for {trace_name} (generated scaffold)\n{trace_name}:")
+    for aname, adef in anchor_dict.items():
+        print(f"  {aname}:")
+        print(f"    file: {adef['file']}")
+        print(f"    pattern: \"{adef['pattern']}\"")
+        print(f"    expected_line: {adef['expected_line']}")
+        print(f"    drift_tolerance: {adef['drift_tolerance']}")
 
-**Verified against:** `{rel_source}` @ commit `TODO`
-
-**Status:** DRAFT
-
-**Linked tests:** TODO
-
-## Summary
-
-TODO: Describe the purpose and key functionality of this module.
-
-## Active Assumptions
-
-### Mechanically Verified
-
-| ID | Assumption | Verification |
-|----|------------|--------------|
-"""
-
-    # Add suggested assumptions for critical/high functions
-    assumption_id = 1
-    for func in critical[:5]:  # Limit to 5 critical functions
-        trace_content += f"| A{assumption_id} | {func.name} exists at expected location | anchor: {func.name.upper()} |\n"
-        assumption_id += 1
-
-    trace_content += """
-### Agent-Verified (on trace load)
-
-| ID | Assumption | Verification Guidance |
-|----|------------|----------------------|
-| TODO | TODO | TODO |
-
-## Algorithm Flow
-
-TODO: Document the key algorithm steps with line references.
-
-"""
-
-    # Add key functions section
-    if critical or high:
-        trace_content += "## Key Functions\n\n"
-        trace_content += "| Function | Line | Importance |\n"
-        trace_content += "|----------|------|------------|\n"
-        for func in critical + high:
-            trace_content += f"| `{func.name}` | {func.line} | {func.importance} |\n"
-        trace_content += "\n"
-
-    trace_content += """## Critical Invariants
-
-- [ ] TODO: Document critical invariants
-
-## Known Issues
-
-| Issue | Severity | Resolution |
-|-------|----------|------------|
-| None documented | - | - |
-
-## Version History
-
-- **TODO**: Initial trace (DRAFT)
-"""
-
-    # Generate anchor suggestions
-    anchors_content = f"\n# Anchors for {trace_name} (generated scaffold)\n{trace_name}:\n"
-    for func in (critical + high)[:10]:  # Limit to 10 anchors
-        anchor_name = func.name.upper()
-        anchors_content += f"""  {anchor_name}:
-    file: {rel_source}
-    pattern: "def {func.name}("
-    expected_line: {func.line}
-    drift_tolerance: 30
-"""
-
-    # Generate meta entry suggestion
-    meta_entry = f"""
+    # Format meta entry suggestion for display
+    anchor_list = ", ".join(anchor_dict.keys())
+    print("\n=== Suggested Meta Entry ===")
+    print(f"""
 # Add to .sentinel-meta.yaml under sentinels:
   {trace_name}:
     verified_commit: TODO
@@ -1163,27 +1778,13 @@ TODO: Document the key algorithm steps with line references.
       - {rel_source}
     assumptions_mechanical: []
     assumptions_agent: []
-    anchors: [{', '.join(f.name.upper() for f in (critical + high)[:10])}]
+    anchors: [{anchor_list}]
     linked_tests: []
     status: DRAFT
     depends_on: []
-"""
+""")
 
-    # Write trace file
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
-    trace_path.write_text(trace_content)
-    print(f"\nCreated trace: {trace_path}")
-
-    # Show anchor suggestions
-    print("\n=== Suggested Anchors ===")
-    print("Add to anchors/anchors.yaml:")
-    print(anchors_content)
-
-    # Show meta entry suggestion
-    print("\n=== Suggested Meta Entry ===")
-    print(meta_entry)
-
-    print("\n" + "=" * 60)
+    print("=" * 60)
     print("Next steps:")
     print("  1. Edit the trace file to complete TODO sections")
     print("  2. Add anchors to anchors/anchors.yaml")
@@ -3408,10 +4009,38 @@ Examples:
     )
 
     # init
-    init_parser = subparsers.add_parser("init", help="Scaffold a new trace from source file")
-    init_parser.add_argument("source", help="Source file to analyze")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Scaffold traces from source file(s)",
+        epilog=(
+            "Examples:\n"
+            "  %(prog)s src/module.py              # Scaffold one trace (interactive)\n"
+            "  %(prog)s --scan                     # Scan repo, scaffold all traces\n"
+            "  %(prog)s --scan --preset pytorch    # Use PyTorch-specific patterns\n"
+            "  %(prog)s --scan --dry-run           # Preview without writing\n"
+            "  %(prog)s --scan --adapter claude    # Also install Claude Code adapter\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    init_parser.add_argument("source", nargs="?", help="Source file to analyze (single-file mode)")
     init_parser.add_argument("--name", help="Trace name (default: source filename stem)")
-    init_parser.add_argument("--force", action="store_true", help="Overwrite existing trace")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite existing traces")
+    init_parser.add_argument(
+        "--scan", action="store_true", help="Scan repo and scaffold all trace-worthy files"
+    )
+    init_parser.add_argument(
+        "--preset",
+        default="default",
+        help="Scan preset: default, pytorch, typescript, or custom name (default: default)",
+    )
+    init_parser.add_argument(
+        "--adapter",
+        choices=["claude", "codex"],
+        help="Install agent adapter after scan",
+    )
+    init_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be created without writing"
+    )
 
     # verify
     verify_parser = subparsers.add_parser("verify", help="Verify traces")
@@ -3595,6 +4224,20 @@ Examples:
     if not args.command:
         parser.print_help()
         return EXIT_SUCCESS
+
+    # Bootstrap .sentinel/ for init --scan on fresh repos
+    if args.command == "init" and getattr(args, "scan", False):
+        repo_root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if repo_root_result.returncode == 0:
+            repo_root = Path(repo_root_result.stdout.strip())
+            sentinel_dir = args.sentinel_dir or (repo_root / ".sentinel")
+            if not sentinel_dir.exists() or not (sentinel_dir / ".sentinel-meta.yaml").exists():
+                print(f"Bootstrapping {sentinel_dir}/ ...")
+                bootstrap_sentinel_dir(repo_root)
 
     try:
         sentinel = CodeSentinel(args.sentinel_dir)

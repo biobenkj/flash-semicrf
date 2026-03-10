@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -1313,3 +1314,652 @@ def test_emit_watch_event_json_structure(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "fixed: t1" in captured.err
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 2b: init --scan tests
+# ══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a minimal git repo with Python source files for scan testing.
+
+    Files:
+      src/pkg/core.py     - 2 critical functions (forward + backward) -> above threshold
+      src/pkg/multi.py    - 2 classes each with forward() -> tests disambiguation
+      src/pkg/utils.py    - 1 function (helper) matching no critical/high patterns
+                            (intentionally below min_functions=2 threshold)
+      src/pkg/__init__.py - excluded by preset exclude_globs
+    """
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "core.py").write_text(
+        "def forward(x):\n    return x\n\ndef backward(x):\n    return x\n"
+    )
+    (src / "multi.py").write_text(
+        "class A:\n    def forward(self, x):\n        return x\n\n"
+        "class B:\n    def forward(self, x):\n        return x\n"
+    )
+    # utils.py has only helper() — matches no critical/high patterns.
+    # Intentionally below min_functions=2 threshold.
+    (src / "utils.py").write_text("def helper():\n    pass\n")
+    (src / "__init__.py").write_text("")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+    return tmp_path
+
+
+def _make_real_sentinel(module, repo_root, src_root="src/pkg"):
+    """Bootstrap .sentinel/ and return a real CodeSentinel instance."""
+    sentinel_dir = module.bootstrap_sentinel_dir(repo_root)
+    (sentinel_dir / "sentinel.yaml").write_text(
+        f'version: "1.0"\nproject:\n  name: test\n  src_root: {src_root}\n'
+    )
+    return module.CodeSentinel(sentinel_dir)
+
+
+# ── 1. ScanPreset + built-in presets ─────────────────────────────────
+
+
+def test_builtin_presets_are_well_formed():
+    module = _load_sentinel_module()
+    assert set(module.BUILTIN_PRESETS.keys()) == {"default", "pytorch", "typescript"}
+    for name, preset in module.BUILTIN_PRESETS.items():
+        assert len(preset.file_globs) > 0, f"{name} has no file_globs"
+        assert preset.language, f"{name} has empty language"
+        assert preset.min_functions >= 1, f"{name} has min_functions < 1"
+    assert module.BUILTIN_PRESETS["default"].language == "python"
+    assert module.BUILTIN_PRESETS["pytorch"].language == "python"
+    assert module.BUILTIN_PRESETS["typescript"].language == "typescript"
+
+
+def test_default_preset_min_functions_is_two():
+    module = _load_sentinel_module()
+    assert module.BUILTIN_PRESETS["default"].min_functions == 2
+
+
+# ── 2. derive_trace_name ─────────────────────────────────────────────
+
+
+def test_derive_trace_name_basic_stem(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    p1 = Path(tmp_path / "src" / "genmul.py")
+    p1.parent.mkdir(parents=True, exist_ok=True)
+    assert sentinel.derive_trace_name(p1, set()) == "genmul"
+    p2 = Path(tmp_path / "src" / "triton_forward.py")
+    assert sentinel.derive_trace_name(p2, set()) == "triton-forward"
+
+
+def test_derive_trace_name_strips_leading_hyphens(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    # _genbmm dir -> parent becomes "genbmm" not "-genbmm"
+    p = Path(tmp_path / "src" / "_genbmm" / "genmul.py")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # No collision: stem "genmul" used directly
+    assert sentinel.derive_trace_name(p, set()) == "genmul"
+    # Force collision on stem -> parent prefix should not have leading hyphen
+    assert sentinel.derive_trace_name(p, {"genmul"}) == "genbmm-genmul"
+
+
+def test_derive_trace_name_collision_uses_parent(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    p1 = Path(tmp_path / "streaming" / "forward.py")
+    p2 = Path(tmp_path / "batch" / "forward.py")
+    existing = set()
+    name1 = sentinel.derive_trace_name(p1, existing)
+    assert name1 == "forward"
+    existing.add(name1)
+    name2 = sentinel.derive_trace_name(p2, existing)
+    assert name2 == "batch-forward"
+
+
+def test_derive_trace_name_collision_with_existing_trace(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    p = Path(tmp_path / "src" / "triton_forward.py")
+    # "triton-forward" already taken by a manually-created trace
+    name = sentinel.derive_trace_name(p, {"triton-forward"})
+    assert name != "triton-forward"
+    assert len(name) > 0
+
+
+def test_derive_trace_name_numeric_suffix_last_resort(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    p = Path(tmp_path / "streaming" / "forward.py")
+    # Both stem and parent-qualified are taken
+    name = sentinel.derive_trace_name(p, {"forward", "streaming-forward"})
+    assert name == "forward-2"
+
+
+def test_derive_trace_name_unicode_does_not_crash(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    p = Path(tmp_path / "src" / "señal_procesador.py")
+    name = sentinel.derive_trace_name(p, set())
+    assert isinstance(name, str)
+    assert len(name) > 0
+
+
+# ── 3. scaffold_trace ────────────────────────────────────────────────
+
+
+def test_scaffold_trace_returns_verified_status(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "mod.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("def forward(x):\n    return x\n\ndef backward(x):\n    return x\n")
+
+    trace_md, anchor_dict, meta_entry = sentinel.scaffold_trace(
+        src, "mod", "abc1234", status="VERIFIED"
+    )
+    assert "**Status:** VERIFIED" in trace_md
+    assert "abc1234" in trace_md
+    assert meta_entry["status"] == "VERIFIED"
+    assert meta_entry["verified_commit"] == "abc1234"
+
+
+def test_scaffold_trace_draft_mode_backward_compat(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "mod.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("def forward(x):\n    return x\n")
+
+    trace_md, _, meta_entry = sentinel.scaffold_trace(src, "mod", "TODO", status="DRAFT")
+    assert "**Status:** DRAFT" in trace_md
+    assert "TODO" in trace_md
+    assert meta_entry["status"] == "DRAFT"
+
+
+def test_scaffold_trace_computes_content_hashes(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "mod.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    content = "def forward(x):\n    return x\n\ndef backward(x):\n    return x\n"
+    src.write_text(content)
+    lines = content.splitlines()
+
+    _, anchor_dict, _ = sentinel.scaffold_trace(src, "mod", "abc", status="VERIFIED")
+    assert len(anchor_dict) > 0
+    for aname, adef in anchor_dict.items():
+        assert adef["content_hash"], f"anchor {aname} has empty content_hash"
+        expected_hash = module._compute_content_hash(lines[adef["expected_line"] - 1])
+        assert adef["content_hash"] == expected_hash, f"hash mismatch for {aname}"
+
+
+def test_scaffold_trace_disambiguates_duplicate_function_names(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "multi.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(
+        "class A:\n    def forward(self, x):\n        return x\n\n"
+        "class B:\n    def forward(self, x):\n        return x\n"
+    )
+
+    _, anchor_dict, _ = sentinel.scaffold_trace(src, "multi", "abc", status="VERIFIED")
+    keys = list(anchor_dict.keys())
+    # First occurrence keeps unqualified name, second gets class-prefixed (first-wins)
+    assert "FORWARD" in keys, f"expected FORWARD in {keys}"
+    assert any(
+        k != "FORWARD" and "FORWARD" in k for k in keys
+    ), f"expected a disambiguated FORWARD variant in {keys}"
+    # Both should have 'after' field (both are ambiguous)
+    for aname, adef in anchor_dict.items():
+        if "FORWARD" in aname:
+            assert "after" in adef, f"anchor {aname} missing 'after' for disambiguation"
+
+
+def test_scaffold_trace_no_anchors_for_medium_only_functions(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "boring.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("def helper():\n    pass\n\ndef another():\n    pass\n")
+
+    _, anchor_dict, meta_entry = sentinel.scaffold_trace(src, "boring", "abc", status="VERIFIED")
+    assert len(anchor_dict) == 0
+    assert meta_entry["anchors"] == []
+
+
+def test_scaffold_trace_limits_to_ten_anchors(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "many.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    # 15 functions matching the critical pattern "def forward"
+    lines = []
+    for i in range(15):
+        lines.append(f"def forward_{i}(x):\n    return x\n")
+    src.write_text("\n".join(lines))
+    # Override critical patterns to match all forward_N
+    _, anchor_dict, _ = sentinel.scaffold_trace(
+        src,
+        "many",
+        "abc",
+        status="VERIFIED",
+        critical_patterns=[r"def forward_\d+\("],
+    )
+    assert len(anchor_dict) <= 10
+
+
+def test_scaffold_trace_empty_file(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "empty.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("")
+
+    trace_md, anchor_dict, meta_entry = sentinel.scaffold_trace(
+        src, "empty", "abc", status="VERIFIED"
+    )
+    assert len(anchor_dict) == 0
+    assert "# Sentinel: empty" in trace_md
+    assert meta_entry["anchors"] == []
+
+
+def test_scaffold_trace_binary_content(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    src = tmp_path / "src" / "pkg" / "binary.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"\x00\x01\x02\xff\xfe")
+
+    # Should not crash — extract_functions handles non-text gracefully
+    try:
+        _, anchor_dict, _ = sentinel.scaffold_trace(src, "binary", "abc", status="VERIFIED")
+        assert len(anchor_dict) == 0
+    except UnicodeDecodeError:
+        # Acceptable — binary files may raise on read_text()
+        pass
+
+
+# ── 4. load_scan_preset ──────────────────────────────────────────────
+
+
+def test_load_scan_preset_default_uses_config_src_root(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    (sentinel_dir / "sentinel.yaml").write_text(
+        'version: "1.0"\nproject:\n  name: test\n  src_root: lib/mypackage\n'
+    )
+    sentinel = module.CodeSentinel(sentinel_dir)
+    preset = sentinel.load_scan_preset("default")
+    assert preset.file_globs == ["lib/mypackage/**/*.py"]
+
+
+def test_load_scan_preset_default_uses_config_init_patterns(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    (sentinel_dir / "sentinel.yaml").write_text(
+        'version: "1.0"\nproject:\n  name: test\n  src_root: src\n'
+        "init_patterns:\n  critical:\n    - 'def custom_critical\\('\n"
+    )
+    sentinel = module.CodeSentinel(sentinel_dir)
+    preset = sentinel.load_scan_preset("default")
+    assert "def custom_critical\\(" in preset.critical_patterns
+
+
+def test_load_scan_preset_pytorch_merges_extra_patterns(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    (sentinel_dir / "sentinel.yaml").write_text(
+        'version: "1.0"\nproject:\n  name: test\n  src_root: src\n'
+    )
+    sentinel = module.CodeSentinel(sentinel_dir)
+    preset = sentinel.load_scan_preset("pytorch")
+    # Should have pytorch-specific extras
+    assert any("torch" in p for p in preset.critical_patterns)
+    assert any("training_step" in p for p in preset.high_patterns)
+
+
+def test_load_scan_preset_unknown_raises_valueerror(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    with pytest.raises(ValueError, match="Unknown preset"):
+        sentinel.load_scan_preset("nonexistent")
+
+
+def test_load_scan_preset_custom_from_presets_dir(tmp_path):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    presets_dir = sentinel.sentinel_dir / "presets"
+    presets_dir.mkdir(exist_ok=True)
+    (presets_dir / "custom.yaml").write_text(
+        "name: custom\n"
+        "description: test preset\n"
+        "language: python\n"
+        "file_globs: ['src/**/*.py']\n"
+        "exclude_globs: []\n"
+        "critical_patterns: ['def main\\(']\n"
+        "high_patterns: []\n"
+        "min_functions: 1\n"
+    )
+    preset = sentinel.load_scan_preset("custom")
+    assert preset.name == "custom"
+    assert preset.language == "python"
+    assert preset.min_functions == 1
+
+
+# ── 5. discover_source_files ─────────────────────────────────────────
+
+
+def test_discover_source_files_skips_unsupported_language(tmp_path, capsys):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, tmp_path)
+    ts_preset = module.BUILTIN_PRESETS["typescript"]
+    result = sentinel.discover_source_files(ts_preset)
+    assert result == []
+    assert "no function extractor" in capsys.readouterr().err
+
+
+def test_discover_source_files_fails_gracefully_without_git(tmp_path):
+    module = _load_sentinel_module()
+    # tmp_path is NOT a git repo — no git init
+    sentinel = _make_real_sentinel(module, tmp_path)
+    preset = module.BUILTIN_PRESETS["default"]
+    # Override to use "python" language but run in non-git dir
+    result = sentinel.discover_source_files(preset)
+    assert result == []  # Should return empty, not crash
+
+
+# ── 6. bootstrap_sentinel_dir ────────────────────────────────────────
+
+
+def test_bootstrap_creates_directory_structure(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    for subdir in ["traces", "anchors", "adapters", "presets", "diffs", "hooks"]:
+        assert (sentinel_dir / subdir).is_dir(), f"missing {subdir}/"
+
+
+def test_bootstrap_creates_config_files(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    import yaml
+
+    meta = yaml.safe_load((sentinel_dir / ".sentinel-meta.yaml").read_text())
+    assert "sentinels" in meta
+    anchors = yaml.safe_load((sentinel_dir / "anchors" / "anchors.yaml").read_text())
+    assert anchors is not None or anchors == {}
+    config = yaml.safe_load((sentinel_dir / "sentinel.yaml").read_text())
+    assert "project" in config
+
+
+def test_bootstrap_writes_verify_anchor_sh(tmp_path):
+    module = _load_sentinel_module()
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    script = sentinel_dir / "anchors" / "verify-anchor.sh"
+    assert script.exists()
+    assert script.stat().st_mode & 0o111, "verify-anchor.sh not executable"
+    assert script.read_text().startswith("#!/bin/bash")
+
+
+def test_bootstrap_idempotent_preserves_existing_meta(tmp_path):
+    module = _load_sentinel_module()
+    # First bootstrap
+    sentinel_dir = module.bootstrap_sentinel_dir(tmp_path)
+    # Write custom meta
+    meta_path = sentinel_dir / ".sentinel-meta.yaml"
+    meta_path.write_text("version: '2.0'\nsentinels:\n  custom-trace:\n    status: VERIFIED\n")
+    original_meta = meta_path.read_text()
+    # Second bootstrap
+    module.bootstrap_sentinel_dir(tmp_path)
+    # Meta should NOT be overwritten
+    assert meta_path.read_text() == original_meta
+    # But verify-anchor.sh IS always overwritten (stays current)
+    assert (sentinel_dir / "anchors" / "verify-anchor.sh").exists()
+
+
+# ── 7. cmd_init_scan (integration with git_repo + real CodeSentinel) ─
+
+
+def test_init_scan_dry_run_writes_nothing(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=True, force=False)
+    exit_code = module.cmd_init_scan(args, sentinel)
+    assert exit_code == module.EXIT_SUCCESS
+    # No trace files should be written
+    traces = list(sentinel.traces_dir.glob("*.md"))
+    assert len(traces) == 0
+    # Meta should still be empty (only bootstrapped defaults)
+    meta = sentinel.load_meta()
+    assert len(meta.get("sentinels", {})) == 0
+
+
+def test_init_scan_creates_traces_and_verifies(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    exit_code = module.cmd_init_scan(args, sentinel)
+    assert exit_code == module.EXIT_SUCCESS
+
+    # Should have created traces
+    meta = sentinel.load_meta()
+    sentinels = meta.get("sentinels", {})
+    assert len(sentinels) > 0
+
+    # Traces should exist as files
+    for name in sentinels:
+        trace_path = sentinel.traces_dir / f"{name}.md"
+        assert trace_path.exists(), f"trace file missing: {trace_path}"
+
+    # status.json should exist and reflect reality
+    import json
+
+    status_path = sentinel.sentinel_dir / "status.json"
+    assert status_path.exists()
+    status = json.loads(status_path.read_text())
+    assert "traces" in status
+    assert "summary" in status
+
+
+def test_init_scan_skips_already_covered_files(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    # Pre-populate meta with core.py covered
+    meta = sentinel.load_meta()
+    meta.setdefault("sentinels", {})["existing-core"] = {
+        "verified_commit": "aaa1111",
+        "source_files": ["src/pkg/core.py"],
+        "anchors": [],
+        "status": "VERIFIED",
+    }
+    sentinel.save_meta(meta)
+
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+
+    meta = sentinel.load_meta()
+    # core.py should NOT have a second sentinel entry
+    core_sentinels = [
+        name
+        for name, s in meta["sentinels"].items()
+        if "src/pkg/core.py" in s.get("source_files", [])
+    ]
+    assert len(core_sentinels) == 1
+    assert core_sentinels[0] == "existing-core"
+
+
+def test_init_scan_idempotent_second_run(git_repo, capsys):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+    first_meta = sentinel.load_meta()
+    first_count = len(first_meta.get("sentinels", {}))
+
+    # Second run
+    capsys.readouterr()  # clear
+    module.cmd_init_scan(args, sentinel)
+    captured = capsys.readouterr()
+
+    second_meta = sentinel.load_meta()
+    assert len(second_meta.get("sentinels", {})) == first_count
+    assert "No new traces created" in captured.out
+
+
+def test_init_scan_merges_with_existing_anchors_and_meta(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+
+    # Pre-populate with an existing trace
+    anchors = {
+        "existing-trace": {
+            "MY_ANCHOR": {
+                "file": "other.py",
+                "pattern": "x",
+                "expected_line": 1,
+                "drift_tolerance": 20,
+            }
+        }
+    }
+    sentinel.save_anchors(anchors)
+    meta = sentinel.load_meta()
+    meta.setdefault("sentinels", {})["existing-trace"] = {
+        "verified_commit": "old123",
+        "source_files": ["other.py"],
+        "anchors": ["MY_ANCHOR"],
+        "status": "VERIFIED",
+    }
+    sentinel.save_meta(meta)
+
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+
+    # Existing entry must be preserved
+    final_meta = sentinel.load_meta()
+    assert "existing-trace" in final_meta["sentinels"]
+    assert final_meta["sentinels"]["existing-trace"]["verified_commit"] == "old123"
+
+    final_anchors = sentinel.load_anchors()
+    assert "existing-trace" in final_anchors
+    assert "MY_ANCHOR" in final_anchors["existing-trace"]
+
+
+def test_init_scan_force_regenerates_covered_files(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    # First run
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+    first_meta = sentinel.load_meta()
+    first_count = len(first_meta.get("sentinels", {}))
+
+    # Force re-run
+    args_force = argparse.Namespace(
+        scan=True, preset="default", adapter=None, dry_run=False, force=True
+    )
+    module.cmd_init_scan(args_force, sentinel)
+    force_meta = sentinel.load_meta()
+    # Should have same or more entries (force regenerates, doesn't remove)
+    assert len(force_meta.get("sentinels", {})) >= first_count
+
+
+def test_init_scan_respects_min_functions_threshold(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+
+    meta = sentinel.load_meta()
+    # utils.py has only helper() (no critical/high matches) -> should NOT have a trace
+    for name, entry in meta.get("sentinels", {}).items():
+        source_files = entry.get("source_files", [])
+        assert not any(
+            "utils.py" in sf for sf in source_files
+        ), f"utils.py should have been skipped (below threshold) but found in {name}"
+
+
+def test_init_scan_status_json_reflects_reality(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    module.cmd_init_scan(args, sentinel)
+
+    import json
+
+    status = json.loads((sentinel.sentinel_dir / "status.json").read_text())
+    meta = sentinel.load_meta()
+    # status.json should have an entry for every sentinel in meta
+    for name in meta.get("sentinels", {}):
+        assert name in status["traces"], f"trace {name} missing from status.json"
+
+
+def test_init_scan_no_discoverable_files(git_repo, capsys):
+    module = _load_sentinel_module()
+    # Point src_root to an empty directory
+    empty_src = git_repo / "empty_src"
+    empty_src.mkdir()
+    sentinel = _make_real_sentinel(module, git_repo, src_root="empty_src")
+    args = argparse.Namespace(scan=True, preset="default", adapter=None, dry_run=False, force=False)
+    exit_code = module.cmd_init_scan(args, sentinel)
+    assert exit_code == module.EXIT_SUCCESS
+    assert "No source files found" in capsys.readouterr().out
+
+
+def test_init_scan_with_adapter_installs_skill(git_repo):
+    module = _load_sentinel_module()
+    sentinel = _make_real_sentinel(module, git_repo)
+    # Set up adapter config
+    import yaml
+
+    config = yaml.safe_load((sentinel.sentinel_dir / "sentinel.yaml").read_text())
+    config["adapters"] = {
+        "claude": {
+            "template": "adapters/claude.skill.md",
+            "target": ".claude/skills/code-sentinel/SKILL.md",
+            "description": "Claude adapter",
+        }
+    }
+    (sentinel.sentinel_dir / "sentinel.yaml").write_text(
+        yaml.dump(config, default_flow_style=False)
+    )
+    sentinel.config = sentinel.load_config()
+    # Create template
+    adapters_dir = sentinel.sentinel_dir / "adapters"
+    adapters_dir.mkdir(exist_ok=True)
+    (adapters_dir / "claude.skill.md").write_text("# Sentinel Skill\n")
+
+    args = argparse.Namespace(
+        scan=True, preset="default", adapter="claude", dry_run=False, force=False
+    )
+    module.cmd_init_scan(args, sentinel)
+
+    # Adapter target should exist
+    target = git_repo / ".claude" / "skills" / "code-sentinel" / "SKILL.md"
+    assert target.exists(), "adapter skill file was not installed"
+
+
+# ── 8. cmd_init dispatch ─────────────────────────────────────────────
+
+
+def test_init_no_source_no_scan_prints_error(capsys):
+    module = _load_sentinel_module()
+    sentinel = _FakeSentinel(
+        _make_trace_result(module, commit_status=module.Status.VERIFIED),
+    )
+    args = argparse.Namespace(
+        source=None,
+        scan=False,
+        name=None,
+        force=False,
+        preset="default",
+        adapter=None,
+        dry_run=False,
+    )
+    exit_code = module.cmd_init(args, sentinel)
+    assert exit_code == module.EXIT_GENERAL_ERROR
+    captured = capsys.readouterr()
+    assert "source file required" in captured.out

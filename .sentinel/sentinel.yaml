@@ -79,6 +79,11 @@ watch:
     - "*.pyc"
     - "__pycache__/*"
 
+# Init/scan configuration
+init:
+  default_preset: auto          # auto-detect from repo contents, or specify: default, pytorch, typescript
+  presets_dir: .sentinel/presets/
+
 # CI and strictness config
 ci:
   fail_on_verify: true
