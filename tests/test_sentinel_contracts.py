@@ -93,7 +93,7 @@ def test_verify_json_error_when_trace_selector_missing(capsys):
     assert exit_code == module.EXIT_GENERAL_ERROR
     assert payload["command"] == "verify"
     assert payload["exit_code"] == module.EXIT_GENERAL_ERROR
-    assert payload["error"] == "Specify --trace NAME or --all"
+    assert payload["error"] == "Specify --trace NAME, --all, or --affected-by FILE"
 
 
 def test_verify_missing_trace_is_nonzero_and_missing_state(capsys):
@@ -553,3 +553,324 @@ def test_install_adapter_managed_block_create_target_no_update_note(capsys, tmp_
     assert "created managed block target" in out
     assert "only sentinel-managed block content was updated" not in out
     assert "<!-- sentinel:codex:start -->" in contents
+
+
+# ── v2 Phase 1 tests ──────────────────────────────────────────────────────
+
+
+def test_compute_content_hash_deterministic():
+    module = _load_sentinel_module()
+    h1 = module._compute_content_hash("def foo():")
+    h2 = module._compute_content_hash("def foo():")
+    assert h1 == h2
+    assert len(h1) == 64  # SHA-256 hex digest
+
+
+def test_compute_content_hash_strips_whitespace():
+    module = _load_sentinel_module()
+    assert module._compute_content_hash("  foo  ") == module._compute_content_hash("foo")
+    assert module._compute_content_hash("\tfoo\n") == module._compute_content_hash("foo")
+
+
+class _FixSentinel:
+    """Fake sentinel for testing cmd_fix."""
+
+    def __init__(
+        self,
+        tmp_path,
+        module,
+        *,
+        trace_status,
+        anchor_impacts=None,
+        source_files=None,
+    ):
+        self.sentinel_dir = tmp_path / ".sentinel"
+        self.sentinel_dir.mkdir(exist_ok=True)
+        self.repo_root = tmp_path
+        self.anchors_path = self.sentinel_dir / "anchors" / "anchors.yaml"
+        self.anchors_path.parent.mkdir(parents=True, exist_ok=True)
+        self.meta_path = self.sentinel_dir / ".sentinel-meta.yaml"
+        self.traces_dir = self.sentinel_dir / "traces"
+        self.traces_dir.mkdir(exist_ok=True)
+        self.config = {}
+        self._module = module
+        self._trace_status = trace_status
+        self._anchor_impacts = anchor_impacts or []
+        self._source_files = source_files or ["src/test.py"]
+        self._saves = {"anchors": 0, "meta": 0}
+        self._anchors_data = {}
+        self._meta_data = {
+            "sentinels": {
+                "test-trace": {
+                    "verified_commit": "aaa1111",
+                    "source_files": self._source_files,
+                    "status": "STALE_COMMIT",
+                }
+            }
+        }
+
+    def load_meta(self):
+        return self._meta_data
+
+    def load_anchors(self):
+        return self._anchors_data
+
+    def save_anchors(self, anchors):
+        self._anchors_data = anchors
+        self._saves["anchors"] += 1
+
+    def save_meta(self, meta):
+        self._meta_data = meta
+        self._saves["meta"] += 1
+
+    def verify_trace(self, trace_name, check_assumptions=True):  # noqa: ARG002
+        return self._trace_status
+
+    def analyze_anchor_impacts(self, trace_name):  # noqa: ARG002
+        return self._anchor_impacts
+
+    def verify_anchor(self, **kwargs):  # noqa: ARG002
+        return self._module.AnchorResult(
+            name="", status="VERIFIED", expected_line=1,
+            actual_line=1, drift=0, message="VERIFIED"
+        )
+
+    def check_consistency(self):
+        return []
+
+    def get_current_commit(self, file_path):  # noqa: ARG002
+        return "bbb2222"
+
+    def get_modified_files(self):
+        return []
+
+    def get_suggested_tests(self, modified_files):  # noqa: ARG002
+        return []
+
+
+def test_fix_dry_run_no_mutations(tmp_path):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.STALE_COMMIT)
+    sentinel = _FixSentinel(
+        tmp_path,
+        module,
+        trace_status=trace_result,
+        anchor_impacts=[
+            module.AnchorImpact(
+                anchor_name="A1", status="shifted", old_line=10, new_line=15,
+                suggestion="Update", content_hash_match=None,
+            )
+        ],
+    )
+    args = argparse.Namespace(trace="test-trace", all=False, dry_run=True, format="text")
+    exit_code = module.cmd_fix(args, sentinel)
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert sentinel._saves["anchors"] == 0
+    assert sentinel._saves["meta"] == 0
+
+
+def test_fix_blocks_on_deleted_anchor(tmp_path):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.STALE_COMMIT)
+    sentinel = _FixSentinel(
+        tmp_path,
+        module,
+        trace_status=trace_result,
+        anchor_impacts=[
+            module.AnchorImpact(
+                anchor_name="A1", status="deleted", old_line=10, new_line=None,
+                suggestion="Pattern not found",
+            )
+        ],
+    )
+    args = argparse.Namespace(trace="test-trace", all=False, dry_run=False, format="text")
+    exit_code = module.cmd_fix(args, sentinel)
+
+    assert exit_code == module.EXIT_ANCHOR_DRIFT
+
+
+def test_fix_blocks_on_content_hash_mismatch(tmp_path):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.STALE_COMMIT)
+    sentinel = _FixSentinel(
+        tmp_path,
+        module,
+        trace_status=trace_result,
+        anchor_impacts=[
+            module.AnchorImpact(
+                anchor_name="A1", status="shifted", old_line=10, new_line=15,
+                suggestion="Update", content_hash_match=False,
+            )
+        ],
+    )
+    args = argparse.Namespace(trace="test-trace", all=False, dry_run=False, format="text")
+    exit_code = module.cmd_fix(args, sentinel)
+
+    assert exit_code == module.EXIT_ANCHOR_DRIFT
+
+
+def test_fix_json_output(tmp_path, capsys):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
+    sentinel = _FixSentinel(tmp_path, module, trace_status=trace_result)
+    args = argparse.Namespace(trace="test-trace", all=False, dry_run=False, format="json")
+    exit_code = module.cmd_fix(args, sentinel)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert payload["command"] == "fix"
+    assert "fixes" in payload
+    assert "summary" in payload
+
+
+def test_gate_no_fix_skips_fix(tmp_path, capsys):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
+    sentinel = _FixSentinel(tmp_path, module, trace_status=trace_result)
+    args = argparse.Namespace(
+        no_fix=True, files=[], ci=False, strict=False, no_strict=False, format="text",
+    )
+    exit_code = module.cmd_gate(args, sentinel)
+    out = capsys.readouterr().out
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert "skipped: --no-fix" in out
+
+
+def test_pipeline_emits_deprecation_warning(tmp_path, capsys):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
+    sentinel = _FixSentinel(tmp_path, module, trace_status=trace_result)
+    args = argparse.Namespace(files=[], ci=False, strict=False, no_strict=False)
+    module.cmd_pipeline(args, sentinel)
+    err = capsys.readouterr().err
+
+    assert "deprecated" in err
+    assert "gate" in err
+
+
+def test_verify_affected_by_filters_traces(capsys):
+    module = _load_sentinel_module()
+    verified_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
+
+    class _AffectedSentinel:
+        repo_root = Path("/repo")
+        sentinel_dir = Path("/repo/.sentinel")
+        config = {"ci": {"strict_mode": False}}
+        _call_count = 0
+
+        def load_meta(self):
+            return {
+                "sentinels": {
+                    "trace-a": {"source_files": ["src/alpha.py"]},
+                    "trace-b": {"source_files": ["src/beta.py"]},
+                }
+            }
+
+        def verify_trace(self, trace_name, check_assumptions=True):  # noqa: ARG002
+            self._call_count += 1
+            return module.TraceVerification(
+                name=trace_name,
+                commit_status=module.Status.VERIFIED,
+                verified_commit="abc",
+                current_commit="abc",
+                uncommitted_changes=False,
+            )
+
+    sentinel = _AffectedSentinel()
+    args = argparse.Namespace(
+        all=False, trace=None, affected_by=["src/alpha.py"],
+        check_consistency=False, format="text", strict=False, no_strict=False,
+    )
+    exit_code = module.cmd_verify(args, sentinel)
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert sentinel._call_count == 1  # Only trace-a verified
+
+
+def test_verify_affected_by_no_match(capsys):
+    module = _load_sentinel_module()
+
+    class _NoMatchSentinel:
+        repo_root = Path("/repo")
+        sentinel_dir = Path("/repo/.sentinel")
+        config = {"ci": {"strict_mode": False}}
+
+        @staticmethod
+        def load_meta():
+            return {"sentinels": {"trace-a": {"source_files": ["src/alpha.py"]}}}
+
+    args = argparse.Namespace(
+        all=False, trace=None, affected_by=["src/unknown.py"],
+        check_consistency=False, format="text", strict=False, no_strict=False,
+    )
+    exit_code = module.cmd_verify(args, _NoMatchSentinel())
+    out = capsys.readouterr().out
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert "No traces bound to" in out
+
+
+def test_status_watch_summary_from_meta(capsys, tmp_path):
+    module = _load_sentinel_module()
+
+    class _WatchSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+        def __init__(self):
+            self.sentinel_dir.mkdir(exist_ok=True)
+
+        @staticmethod
+        def load_meta():
+            return {
+                "sentinels": {
+                    "trace-a": {"status": "VERIFIED"},
+                    "trace-b": {"status": "STALE_COMMIT"},
+                    "trace-c": {"status": "VERIFIED"},
+                }
+            }
+
+    sentinel = _WatchSentinel()
+    args = argparse.Namespace(watch_summary=True, format="text", verify=False)
+    exit_code = module.cmd_status(args, sentinel)
+    out = capsys.readouterr().out.strip()
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert out == "sentinel: 2/3 verified, 1 stale"
+
+
+def test_status_watch_summary_from_status_json(capsys, tmp_path):
+    module = _load_sentinel_module()
+
+    class _WatchJsonSentinel:
+        sentinel_dir = tmp_path / ".sentinel"
+
+        def __init__(self):
+            self.sentinel_dir.mkdir(exist_ok=True)
+            (self.sentinel_dir / "status.json").write_text(
+                json.dumps({"summary": "5/5 verified"})
+            )
+
+    sentinel = _WatchJsonSentinel()
+    args = argparse.Namespace(watch_summary=True, format="text", verify=False)
+    exit_code = module.cmd_status(args, sentinel)
+    out = capsys.readouterr().out.strip()
+
+    assert exit_code == module.EXIT_SUCCESS
+    assert out == "sentinel: 5/5 verified"
+
+
+def test_status_json_written_by_fix(tmp_path):
+    module = _load_sentinel_module()
+    trace_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
+    sentinel = _FixSentinel(tmp_path, module, trace_status=trace_result)
+    args = argparse.Namespace(trace="test-trace", all=False, dry_run=False, format="text")
+    module.cmd_fix(args, sentinel)
+
+    status_path = sentinel.sentinel_dir / "status.json"
+    assert status_path.exists()
+    data = json.loads(status_path.read_text())
+    assert "traces" in data
+    assert "summary" in data
+    assert "timestamp" in data

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -76,6 +77,7 @@ class AnchorResult:
     actual_line: int | None
     drift: int | None
     message: str
+    content_hash_match: bool | None = None  # None = no hash stored/not checked
 
 
 @dataclass
@@ -116,6 +118,7 @@ class AnchorImpact:
     old_line: int
     new_line: int | None = None
     suggestion: str = ""
+    content_hash_match: bool | None = None  # None = no hash stored/not checked
 
 
 @dataclass
@@ -216,6 +219,7 @@ class CodeSentinel:
         file_path: str,
         tolerance: int = 20,
         after: str | None = None,
+        content_hash: str | None = None,
     ) -> AnchorResult:
         """Verify a single anchor using verify-anchor.sh."""
         script = self.sentinel_dir / "anchors" / "verify-anchor.sh"
@@ -239,13 +243,23 @@ class CodeSentinel:
                 drift = int(match.group(1))
 
         status_map = {0: "VERIFIED", 1: "MISSING", 2: "DRIFT", 3: "AMBIGUOUS"}
+        anchor_status = status_map.get(result.returncode, "UNKNOWN")
+
+        # Content hash check: read the actual line from the file and compare
+        hash_match = None
+        if content_hash and actual_line and anchor_status in ("VERIFIED", "DRIFT"):
+            line_content = _read_line_from_file(file_path, actual_line)
+            if line_content is not None:
+                hash_match = _compute_content_hash(line_content) == content_hash
+
         return AnchorResult(
             name="",  # Will be set by caller
-            status=status_map.get(result.returncode, "UNKNOWN"),
+            status=anchor_status,
             expected_line=expected_line,
             actual_line=actual_line,
             drift=drift,
             message=output,
+            content_hash_match=hash_match,
         )
 
     def verify_trace(self, trace_name: str, check_assumptions: bool = True) -> TraceVerification:
@@ -293,6 +307,7 @@ class CodeSentinel:
                 file_path=str(self.repo_root / spec["file"]),
                 tolerance=spec.get("drift_tolerance", 20),
                 after=spec.get("after"),
+                content_hash=spec.get("content_hash"),
             )
             result.name = anchor_name
             anchor_results.append(result)
@@ -555,6 +570,7 @@ class CodeSentinel:
                 file_path=str(self.repo_root / anchor_file),
                 tolerance=spec.get("drift_tolerance", 20),
                 after=spec.get("after"),
+                content_hash=spec.get("content_hash"),
             )
 
             if result.status == "MISSING":
@@ -574,11 +590,10 @@ class CodeSentinel:
                         status="unchanged",
                         old_line=old_line,
                         new_line=result.actual_line,
+                        content_hash_match=result.content_hash_match,
                     )
                 )
             elif result.status == "DRIFT":
-                # Check if this is just a line shift or semantic change
-                # For now, treat all drifts as shifts (safe to auto-update)
                 impacts.append(
                     AnchorImpact(
                         anchor_name=anchor_name,
@@ -586,6 +601,7 @@ class CodeSentinel:
                         old_line=old_line,
                         new_line=result.actual_line,
                         suggestion=f"Update expected_line: {old_line} -> {result.actual_line}",
+                        content_hash_match=result.content_hash_match,
                     )
                 )
             elif result.status == "AMBIGUOUS":
@@ -606,12 +622,70 @@ class CodeSentinel:
         with open(self.anchors_path, "w") as f:
             yaml.dump(anchors, f, default_flow_style=False, sort_keys=False)
 
+    def save_meta(self, meta: dict) -> None:
+        """Save .sentinel-meta.yaml."""
+        with open(self.meta_path, "w") as f:
+            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
     def load_config(self) -> dict:
         """Load sentinel.yaml project config."""
         config_path = self.sentinel_dir / "sentinel.yaml"
         if not config_path.exists():
             return {}
         return yaml.safe_load(config_path.read_text()) or {}
+
+
+def _compute_content_hash(line: str) -> str:
+    """SHA-256 hex digest of a stripped source line."""
+    return hashlib.sha256(line.strip().encode("utf-8")).hexdigest()
+
+
+def _read_line_from_file(file_path: str, line_number: int) -> str | None:
+    """Read a specific line from a file by line number (1-based)."""
+    try:
+        with open(file_path) as f:
+            for i, line in enumerate(f, 1):
+                if i == line_number:
+                    return line
+    except OSError:
+        pass
+    return None
+
+
+def _write_status_json(sentinel: CodeSentinel, verifications: list[TraceVerification]) -> None:
+    """Write .sentinel/status.json atomically from verification results."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    traces = {}
+    for v in verifications:
+        verified_count = sum(1 for a in v.anchors if a.status == "VERIFIED")
+        total_count = len(v.anchors)
+        entry: dict[str, Any] = {
+            "status": v.overall_status.value,
+            "verified_commit": v.verified_commit,
+            "anchors": {"verified": verified_count, "total": total_count},
+            "last_checked": now,
+        }
+        issues = []
+        for a in v.anchors:
+            if a.status != "VERIFIED":
+                issues.append({"anchor": a.name, "status": a.status, "message": a.message})
+        if issues:
+            entry["issues"] = issues
+        traces[v.name] = entry
+
+    verified_total = sum(1 for v in verifications if v.overall_status == Status.VERIFIED)
+    total = len(verifications)
+    stale = total - verified_total
+    summary = f"{verified_total}/{total} verified"
+    if stale:
+        summary += f", {stale} stale"
+
+    status = {"timestamp": now, "traces": traces, "summary": summary}
+
+    status_path = sentinel.sentinel_dir / "status.json"
+    tmp_path = sentinel.sentinel_dir / "status.json.tmp"
+    tmp_path.write_text(json.dumps(status, indent=2) + "\n")
+    os.replace(tmp_path, status_path)
 
 
 def _json_envelope(command: str, exit_code: int, strict_mode: bool = False, **payload) -> str:
@@ -650,6 +724,29 @@ def _resolve_strict(args: argparse.Namespace, sentinel: CodeSentinel) -> tuple[b
 
 def cmd_status(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     """Show overall sentinel health."""
+    # --watch-summary: single-line output for status bars
+    if getattr(args, "watch_summary", False):
+        # Prefer status.json if it exists (more accurate)
+        status_path = sentinel.sentinel_dir / "status.json"
+        if status_path.exists():
+            try:
+                data = json.loads(status_path.read_text())
+                print(f"sentinel: {data.get('summary', 'unknown')}")
+                return EXIT_SUCCESS
+            except (json.JSONDecodeError, KeyError):
+                pass  # Fall through to meta-based summary
+        # Fallback: compute from meta
+        meta = sentinel.load_meta()
+        sentinels = meta.get("sentinels", {})
+        total = len(sentinels)
+        verified = sum(1 for t in sentinels.values() if t.get("status") == "VERIFIED")
+        stale = total - verified
+        summary = f"{verified}/{total} verified"
+        if stale:
+            summary += f", {stale} stale"
+        print(f"sentinel: {summary}")
+        return EXIT_SUCCESS
+
     meta = sentinel.load_meta()
     use_json = getattr(args, "format", None) == "json"
     live = getattr(args, "verify", False)
@@ -873,8 +970,39 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
         traces_to_verify = list(meta.get("sentinels", {}).keys())
     elif args.trace:
         traces_to_verify = [args.trace]
+    elif getattr(args, "affected_by", None):
+        # Normalize input paths to repo-relative form
+        normalized_files = set()
+        for fp in args.affected_by:
+            p = Path(fp).resolve()
+            try:
+                rel = str(p.relative_to(sentinel.repo_root))
+            except ValueError:
+                rel = fp  # Already relative or outside repo
+            normalized_files.add(rel)
+        # Find traces whose source_files match
+        for trace_name, trace_meta in meta.get("sentinels", {}).items():
+            for sf in trace_meta.get("source_files", []):
+                if sf in normalized_files:
+                    traces_to_verify.append(trace_name)
+                    break
+        if not traces_to_verify:
+            if use_json:
+                print(
+                    _json_envelope(
+                        "verify",
+                        exit_code=EXIT_SUCCESS,
+                        strict_mode=strict,
+                        traces={},
+                        consistency_errors=[],
+                        message=f"No traces bound to {', '.join(args.affected_by)}",
+                    )
+                )
+            else:
+                print(f"No traces bound to {', '.join(args.affected_by)}")
+            return EXIT_SUCCESS
     else:
-        msg = "Specify --trace NAME or --all"
+        msg = "Specify --trace NAME, --all, or --affected-by FILE"
         if use_json:
             print(
                 _json_envelope(
@@ -908,8 +1036,10 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
     # Verify each trace
     json_traces = {}
+    all_verifications: list[TraceVerification] = []
     for trace_name in traces_to_verify:
         result = sentinel.verify_trace(trace_name)
+        all_verifications.append(result)
 
         if use_json:
             json_traces[trace_name] = {
@@ -970,6 +1100,10 @@ def cmd_verify(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             )
         )
 
+    # Write status.json when verifying all traces
+    if args.all and all_verifications:
+        _write_status_json(sentinel, all_verifications)
+
     return exit_code
 
 
@@ -1015,7 +1149,8 @@ def _print_verification_result(result: TraceVerification) -> None:
 
 
 def cmd_pipeline(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
-    """Run full pre-commit pipeline."""
+    """Run full pre-commit pipeline (deprecated: use 'gate' instead)."""
+    print("Warning: 'pipeline' is deprecated, use 'gate' instead", file=sys.stderr)
     strict, strict_err = _resolve_strict(args, sentinel)
     if strict_err:
         print(f"Error: {strict_err}", file=sys.stderr)
@@ -1189,7 +1324,13 @@ def cmd_retrace(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
             for impact in shifted:
                 if impact.anchor_name in trace_anchors and impact.new_line:
-                    trace_anchors[impact.anchor_name]["expected_line"] = impact.new_line
+                    anchor_spec = trace_anchors[impact.anchor_name]
+                    anchor_spec["expected_line"] = impact.new_line
+                    # Opportunistically compute content_hash for the new line
+                    anchor_file = str(sentinel.repo_root / anchor_spec["file"])
+                    line_content = _read_line_from_file(anchor_file, impact.new_line)
+                    if line_content:
+                        anchor_spec["content_hash"] = _compute_content_hash(line_content)
                     print(f"  Updated {impact.anchor_name}: {impact.old_line} -> {impact.new_line}")
                     updated += 1
 
@@ -1274,6 +1415,407 @@ def cmd_retrace(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     print("  --anchors-only Force update all anchor line numbers")
 
     return EXIT_SUCCESS
+
+
+def _update_trace_header(sentinel: CodeSentinel, trace_name: str, new_commit: str) -> Path | None:
+    """Update the 'Verified against' commit hash in a trace markdown header.
+
+    Returns the trace path if modified, None otherwise.
+    """
+    trace_path = sentinel.traces_dir / f"{trace_name}.md"
+    if not trace_path.exists():
+        return None
+    content = trace_path.read_text()
+    updated = re.sub(
+        r"(@ commit `)([a-f0-9]+)(`)",
+        rf"\g<1>{new_commit}\g<3>",
+        content,
+    )
+    if updated != content:
+        trace_path.write_text(updated)
+        return trace_path
+    return None
+
+
+def _get_latest_commit(sentinel: CodeSentinel, source_files: list[str]) -> str | None:
+    """Get the most recent commit hash across a list of source files."""
+    # Use git log with all files at once to get the single latest commit
+    if not source_files:
+        return None
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%h", "--"] + source_files,
+        capture_output=True,
+        text=True,
+        cwd=sentinel.repo_root,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
+def _fix_traces(
+    sentinel: CodeSentinel,
+    trace_names: list[str],
+    dry_run: bool = False,
+) -> tuple[int, list[Path], list[TraceVerification], dict]:
+    """Core fix logic shared by cmd_fix and cmd_gate.
+
+    Returns (exit_code, modified_files, final_verifications, fix_results).
+    """
+    meta = sentinel.load_meta()
+    anchors = sentinel.load_anchors()
+    modified_files: list[Path] = []
+    fix_results: dict[str, dict] = {}
+    exit_code = EXIT_SUCCESS
+    anchors_dirty = False
+    meta_dirty = False
+
+    for trace_name in trace_names:
+        verification = sentinel.verify_trace(trace_name)
+
+        if verification.overall_status == Status.VERIFIED:
+            fix_results[trace_name] = {
+                "previous_status": "VERIFIED",
+                "new_status": "VERIFIED",
+                "anchors_fixed": [],
+                "anchors_failed": [],
+                "commit_updated": False,
+            }
+            continue
+
+        if verification.overall_status == Status.MISSING:
+            fix_results[trace_name] = {
+                "previous_status": "MISSING",
+                "new_status": "MISSING",
+                "anchors_fixed": [],
+                "anchors_failed": [],
+                "commit_updated": False,
+            }
+            exit_code = max(exit_code, EXIT_GENERAL_ERROR)
+            continue
+
+        # Analyze impacts to classify anchors
+        impacts = sentinel.analyze_anchor_impacts(trace_name)
+
+        anchors_fixed = []
+        anchors_failed = []
+        trace_anchors = anchors.get(trace_name, {})
+
+        for impact in impacts:
+            if impact.status == "shifted":
+                # Safe if content_hash_match is True or None (no hash stored)
+                if impact.content_hash_match is False:
+                    anchors_failed.append({
+                        "name": impact.anchor_name,
+                        "reason": "content_hash mismatch (semantic change)",
+                    })
+                elif not dry_run and impact.new_line and impact.anchor_name in trace_anchors:
+                    anchor_spec = trace_anchors[impact.anchor_name]
+                    anchor_spec["expected_line"] = impact.new_line
+                    # Compute new content_hash
+                    anchor_file = str(sentinel.repo_root / anchor_spec["file"])
+                    line_content = _read_line_from_file(anchor_file, impact.new_line)
+                    if line_content:
+                        anchor_spec["content_hash"] = _compute_content_hash(line_content)
+                    anchors_dirty = True
+                    anchors_fixed.append({
+                        "name": impact.anchor_name,
+                        "old_line": impact.old_line,
+                        "new_line": impact.new_line,
+                    })
+                elif dry_run:
+                    anchors_fixed.append({
+                        "name": impact.anchor_name,
+                        "old_line": impact.old_line,
+                        "new_line": impact.new_line,
+                    })
+            elif impact.status in ("deleted", "modified"):
+                anchors_failed.append({
+                    "name": impact.anchor_name,
+                    "reason": impact.suggestion,
+                })
+
+        previous_status = verification.overall_status.value
+
+        if anchors_failed:
+            exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
+
+        # Bump commit and update header if all anchors are now safe
+        commit_updated = False
+        if not anchors_failed and not dry_run:
+            trace_meta = meta.get("sentinels", {}).get(trace_name, {})
+            source_files = trace_meta.get("source_files", [])
+            new_commit = _get_latest_commit(sentinel, source_files)
+            if new_commit:
+                meta.setdefault("sentinels", {}).setdefault(trace_name, {})
+                meta["sentinels"][trace_name]["verified_commit"] = new_commit
+                meta["sentinels"][trace_name]["status"] = "VERIFIED"
+                meta_dirty = True
+                commit_updated = True
+
+                trace_path = _update_trace_header(sentinel, trace_name, new_commit)
+                if trace_path:
+                    modified_files.append(trace_path)
+
+        new_status = "VERIFIED" if (not anchors_failed and not dry_run) else "DEGRADED"
+        if anchors_failed:
+            new_status = "DEGRADED"
+
+        fix_results[trace_name] = {
+            "previous_status": previous_status,
+            "new_status": new_status,
+            "anchors_fixed": anchors_fixed,
+            "anchors_failed": anchors_failed,
+            "commit_updated": commit_updated,
+            "new_verified_commit": (
+                meta.get("sentinels", {}).get(trace_name, {}).get("verified_commit")
+                if commit_updated
+                else None
+            ),
+        }
+
+    # Opportunistic hash population: fill in missing content_hash for verified anchors
+    if not dry_run:
+        for trace_name in trace_names:
+            trace_anchors = anchors.get(trace_name, {})
+            for anchor_name, spec in trace_anchors.items():
+                if "content_hash" not in spec:
+                    anchor_file = str(sentinel.repo_root / spec["file"])
+                    # Verify the anchor to find its actual line
+                    result = sentinel.verify_anchor(
+                        pattern=spec["pattern"],
+                        expected_line=spec["expected_line"],
+                        file_path=anchor_file,
+                        tolerance=spec.get("drift_tolerance", 20),
+                        after=spec.get("after"),
+                    )
+                    if result.status == "VERIFIED" and result.actual_line:
+                        line_content = _read_line_from_file(anchor_file, result.actual_line)
+                        if line_content:
+                            spec["content_hash"] = _compute_content_hash(line_content)
+                            anchors_dirty = True
+
+    # Save modified state
+    if anchors_dirty and not dry_run:
+        sentinel.save_anchors(anchors)
+        modified_files.append(sentinel.anchors_path)
+
+    if meta_dirty and not dry_run:
+        meta["last_global_verification"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        sentinel.save_meta(meta)
+        modified_files.append(sentinel.meta_path)
+
+    # Re-verify all traces for final state
+    final_verifications = []
+    for trace_name in trace_names:
+        final_verifications.append(sentinel.verify_trace(trace_name))
+
+    return exit_code, modified_files, final_verifications, fix_results
+
+
+def cmd_fix(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Auto-fix shifted anchors and bump verification state."""
+    # Resolve targets
+    meta = sentinel.load_meta()
+    if args.trace:
+        trace_names = [args.trace]
+    elif getattr(args, "all", False):
+        trace_names = list(meta.get("sentinels", {}).keys())
+    else:
+        if getattr(args, "format", "text") == "json":
+            print(_json_envelope("fix", EXIT_GENERAL_ERROR, error="Specify --trace NAME or --all"))
+        else:
+            print("Error: Specify --trace NAME or --all")
+        return EXIT_GENERAL_ERROR
+
+    if not trace_names:
+        if getattr(args, "format", "text") == "json":
+            print(_json_envelope("fix", EXIT_SUCCESS, fixes={}, summary={"fixed": 0, "still_broken": 0, "already_verified": 0}))
+        else:
+            print("No traces found")
+        return EXIT_SUCCESS
+
+    dry_run = getattr(args, "dry_run", False)
+    fmt = getattr(args, "format", "text")
+
+    exit_code, modified_files, final_verifications, fix_results = _fix_traces(
+        sentinel, trace_names, dry_run=dry_run
+    )
+
+    # Write status.json (not in dry-run)
+    if not dry_run:
+        _write_status_json(sentinel, final_verifications)
+
+    # Output
+    if fmt == "json":
+        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
+        already_count = sum(1 for r in fix_results.values() if r["previous_status"] == "VERIFIED")
+        print(_json_envelope(
+            "fix",
+            exit_code,
+            fixes=fix_results,
+            summary={"fixed": fixed_count, "still_broken": broken_count, "already_verified": already_count},
+        ))
+    else:
+        prefix = "Would fix" if dry_run else "Fixing"
+        print(f"{prefix} {len(trace_names)} trace(s)...\n")
+        for trace_name, result in fix_results.items():
+            print(f"  {trace_name}:")
+            for af in result["anchors_fixed"]:
+                symbol = "~" if dry_run else "\u2713"
+                print(f"    {symbol} {af['name']}: {af['old_line']}\u2192{af['new_line']} ({'would fix' if dry_run else 'fixed'})")
+            for af in result["anchors_failed"]:
+                print(f"    \u2717 {af['name']}: {af['reason']}")
+            if result.get("commit_updated"):
+                print(f"    \u2713 verified_commit updated: {result.get('new_verified_commit')}")
+            print(f"    \u2192 {result['new_status']}")
+            print()
+
+        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
+        already_count = sum(1 for r in fix_results.values() if r["previous_status"] == "VERIFIED")
+        print(f"Summary: {fixed_count} fixed, {broken_count} need{'s' if broken_count == 1 else ''} attention, {already_count} already verified")
+
+    return exit_code
+
+
+def cmd_gate(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
+    """Pre-commit gate: auto-fix + verify + test advisory."""
+    strict, strict_err = _resolve_strict(args, sentinel)
+    if strict_err:
+        print(f"Error: {strict_err}", file=sys.stderr)
+        return EXIT_GENERAL_ERROR
+
+    print("=" * 60)
+    print(f"Code Sentinel Gate{' (strict)' if strict else ''}")
+    print("=" * 60)
+    print()
+
+    exit_code = EXIT_SUCCESS
+    meta = sentinel.load_meta()
+    trace_names = list(meta.get("sentinels", {}).keys())
+    modified_files: list[Path] = []
+
+    # Step 1: Auto-fix (unless --no-fix)
+    if not getattr(args, "no_fix", False):
+        print("=== Step 1: Auto-Fix ===\n")
+        fix_exit, fix_modified, _, fix_results = _fix_traces(
+            sentinel, trace_names, dry_run=False
+        )
+        modified_files.extend(fix_modified)
+        if fix_exit != EXIT_SUCCESS:
+            exit_code = max(exit_code, fix_exit)
+
+        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
+        if fixed_count or broken_count:
+            print(f"  Auto-fix: {fixed_count} fixed, {broken_count} need attention")
+        else:
+            print("  No fixes needed")
+        print()
+    else:
+        print("=== Step 1: Auto-Fix (skipped: --no-fix) ===\n")
+
+    # Step 2: Consistency check
+    print("=== Step 2: Consistency Check ===\n")
+    errors = sentinel.check_consistency()
+    if errors:
+        for err in errors:
+            print(f"  [FAIL] {err}")
+        exit_code = max(exit_code, EXIT_CONSISTENCY_FAILED)
+    else:
+        print("  [PASS] All metadata consistent")
+    print()
+
+    # Step 3: Verify all traces
+    print("=== Step 3: Trace Verification ===\n")
+    verifications = []
+    for trace_name in trace_names:
+        result = sentinel.verify_trace(trace_name)
+        verifications.append(result)
+
+        status_symbol = "[PASS]" if result.overall_status == Status.VERIFIED else "[FAIL]"
+        anchor_status = (
+            f"{sum(1 for a in result.anchors if a.status == 'VERIFIED')}/{len(result.anchors)}"
+        )
+        assumption_status = (
+            f"{sum(1 for a in result.assumptions if a.passed)}/{len(result.assumptions)}"
+            if result.assumptions
+            else "n/a"
+        )
+
+        print(f"  {status_symbol} {trace_name}")
+        print(f"      Commit: {result.commit_status.value}")
+        print(f"      Anchors: {anchor_status}")
+        print(f"      Assumptions: {assumption_status}")
+
+        if result.overall_status != Status.VERIFIED:
+            if result.commit_status == Status.MISSING:
+                exit_code = max(exit_code, EXIT_GENERAL_ERROR)
+            if result.commit_status in (Status.STALE_COMMIT, Status.STALE_CONTENT) and strict:
+                exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
+            if any(a.status != "VERIFIED" for a in result.anchors):
+                exit_code = max(exit_code, EXIT_ANCHOR_DRIFT)
+            if any(not a.passed for a in result.assumptions):
+                exit_code = max(exit_code, EXIT_ASSUMPTION_FAILED)
+    print()
+
+    # Step 4: Test advisory
+    print("=== Step 4: Test Advisory ===\n")
+    if args.files:
+        modified_source_files = args.files
+    else:
+        modified_source_files = sentinel.get_modified_files()
+
+    if modified_source_files:
+        suggested_tests = sentinel.get_suggested_tests(modified_source_files)
+        if suggested_tests:
+            print("  Suggested tests for modified files:")
+            print(f"    pytest {' '.join(suggested_tests)}")
+            print()
+            if os.environ.get("SENTINEL_RUN_TESTS") == "1":
+                print("  Running tests...")
+                test_result = subprocess.run(
+                    ["pytest"] + suggested_tests, cwd=sentinel.repo_root
+                )
+                if test_result.returncode != 0:
+                    exit_code = max(exit_code, EXIT_GENERAL_ERROR)
+            else:
+                print("  Run with: SENTINEL_RUN_TESTS=1 sentinel gate")
+        else:
+            print("  No sentinel-bound tests for modified files")
+    else:
+        print("  No staged files to check")
+    print()
+
+    # Step 5: Handle dirty sentinel files from fix
+    if modified_files:
+        if getattr(args, "ci", False):
+            # Auto-stage exactly the files that fix modified
+            subprocess.run(
+                ["git", "add"] + [str(f) for f in modified_files],
+                cwd=sentinel.repo_root,
+            )
+            print(f"  Auto-staged {len(modified_files)} sentinel file(s)")
+        else:
+            print(f"  Sentinel auto-fixed files. Run 'git add .sentinel/' to include updates in your next commit.")
+        print()
+
+    # Write status.json
+    _write_status_json(sentinel, verifications)
+
+    # Summary
+    print("=" * 60)
+    if exit_code == EXIT_SUCCESS:
+        print("Gate: PASSED [PASS]")
+    else:
+        print(f"Gate: FAILED (exit code {exit_code})")
+    print("=" * 60)
+
+    return exit_code
 
 
 def cmd_install_hooks(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
@@ -2231,19 +2773,17 @@ def main() -> int:
         epilog="""
 Examples:
   ./sentinel.py status                          Show sentinel health
-  ./sentinel.py status --format json            JSON status output
-  ./sentinel.py status --verify                 Live verification status
-  ./sentinel.py init src/module.py              Scaffold a new trace
+  ./sentinel.py status --watch-summary          Single-line summary for status bars
   ./sentinel.py verify --trace triton-forward-k3plus
   ./sentinel.py verify --all --format json      JSON verification output
+  ./sentinel.py verify --affected-by src/file.py  Verify traces covering a file
+  ./sentinel.py fix --all                       Auto-fix shifted anchors
+  ./sentinel.py fix --all --dry-run             Preview fixes without writing
+  ./sentinel.py gate                            Pre-commit: fix + verify + test advisory
+  ./sentinel.py gate --no-fix                   Pre-commit: verify only (no auto-fix)
   ./sentinel.py route "NaN in loss"             Route symptom to trace
-  ./sentinel.py update --trace NAME             Auto-update a sentinel
-  ./sentinel.py pipeline                        Full pre-commit pipeline
   ./sentinel.py retrace NAME --auto --apply     Analyze and apply safe updates
-  ./sentinel.py install-adapter --list          List available adapters
-  ./sentinel.py install-adapter claude          Install Claude Code adapter
-  ./sentinel.py install-adapter codex --dry-run Preview AGENTS managed-block update
-  ./sentinel.py report --format json
+  ./sentinel.py pipeline                        (deprecated: use 'gate')
         """,
     )
     parser.add_argument("--sentinel-dir", type=Path, help="Path to code-sentinel directory")
@@ -2257,6 +2797,9 @@ Examples:
     )
     status_parser.add_argument(
         "--verify", action="store_true", help="Run live verification (read-only, no state mutation)"
+    )
+    status_parser.add_argument(
+        "--watch-summary", action="store_true", help="Single-line summary for status bars"
     )
 
     # init
@@ -2281,9 +2824,44 @@ Examples:
     verify_parser.add_argument(
         "--no-strict", action="store_true", help="Stale traces are warning-only (overrides env)"
     )
+    verify_parser.add_argument(
+        "--affected-by", nargs="+", help="Filter to traces covering FILE(s)"
+    )
 
-    # pipeline
-    pipeline_parser = subparsers.add_parser("pipeline", help="Run full pre-commit pipeline")
+    # fix
+    fix_parser = subparsers.add_parser(
+        "fix", help="Auto-fix shifted anchors and bump verification state"
+    )
+    fix_parser.add_argument("--trace", help="Specific trace to fix")
+    fix_parser.add_argument("--all", action="store_true", help="Fix all traces")
+    fix_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be fixed without writing"
+    )
+    fix_parser.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # gate
+    gate_parser = subparsers.add_parser(
+        "gate", help="Pre-commit gate: auto-fix + verify + test advisory"
+    )
+    gate_parser.add_argument("--no-fix", action="store_true", help="Skip auto-fix step")
+    gate_parser.add_argument(
+        "--files", nargs="*", help="Specific files to check (default: staged files)"
+    )
+    gate_parser.add_argument("--ci", action="store_true", help="CI mode (non-interactive)")
+    gate_parser.add_argument(
+        "--strict", action="store_true", help="Stale traces cause non-zero exit"
+    )
+    gate_parser.add_argument(
+        "--no-strict", action="store_true", help="Stale traces are warning-only (overrides env)"
+    )
+    gate_parser.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+
+    # pipeline (deprecated — use 'gate')
+    pipeline_parser = subparsers.add_parser("pipeline", help="(deprecated: use 'gate')")
     pipeline_parser.add_argument(
         "--files", nargs="*", help="Specific files to check (default: staged files)"
     )
@@ -2397,6 +2975,8 @@ Examples:
         "status": cmd_status,
         "init": cmd_init,
         "verify": cmd_verify,
+        "fix": cmd_fix,
+        "gate": cmd_gate,
         "pipeline": cmd_pipeline,
         "retrace": cmd_retrace,
         "update": cmd_update,

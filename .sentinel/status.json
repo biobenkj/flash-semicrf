@@ -1,0 +1,96 @@
+{
+  "timestamp": "2026-03-10T14:16:46.994635Z",
+  "traces": {
+    "triton-forward-k3plus": {
+      "status": "VERIFIED",
+      "verified_commit": "ddfed0a",
+      "anchors": {
+        "verified": 7,
+        "total": 7
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "dispatch-overview": {
+      "status": "VERIFIED",
+      "verified_commit": "559cebd",
+      "anchors": {
+        "verified": 5,
+        "total": 5
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "autograd-kernel-interface": {
+      "status": "VERIFIED",
+      "verified_commit": "559cebd",
+      "anchors": {
+        "verified": 2,
+        "total": 2
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "triton-backward-k3plus": {
+      "status": "VERIFIED",
+      "verified_commit": "ddfed0a",
+      "anchors": {
+        "verified": 6,
+        "total": 6
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "pytorch-forward-k3plus": {
+      "status": "VERIFIED",
+      "verified_commit": "7cd65e7",
+      "anchors": {
+        "verified": 4,
+        "total": 4
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "pytorch-backward-k3plus": {
+      "status": "VERIFIED",
+      "verified_commit": "7cd65e7",
+      "anchors": {
+        "verified": 3,
+        "total": 3
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "k1-linear-crf": {
+      "status": "VERIFIED",
+      "verified_commit": "7cd65e7",
+      "anchors": {
+        "verified": 3,
+        "total": 3
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "k2-fast-path": {
+      "status": "VERIFIED",
+      "verified_commit": "7cd65e7",
+      "anchors": {
+        "verified": 3,
+        "total": 3
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "non-streaming-backends": {
+      "status": "VERIFIED",
+      "verified_commit": "ebdfcba",
+      "anchors": {
+        "verified": 5,
+        "total": 5
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    },
+    "crf-heads": {
+      "status": "VERIFIED",
+      "verified_commit": "e45c7f1",
+      "anchors": {
+        "verified": 16,
+        "total": 16
+      },
+      "last_checked": "2026-03-10T14:16:46.994635Z"
+    }
+  },
+  "summary": "10/10 verified"
+}

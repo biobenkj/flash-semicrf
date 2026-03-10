@@ -4,303 +4,357 @@ triton-forward-k3plus:
     pattern: def semi_crf_streaming_scan_kernel(
     expected_line: 84
     drift_tolerance: 20
+    content_hash: fd2430553fcb13a02a5f1daf4250a8aaa6159e6a19338f276a855d2bf6af66bf
   MAIN_LOOP_START:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: 'for t in tl.range(1, T + 1):'
     after: def semi_crf_streaming_scan_kernel(
     expected_line: 220
     drift_tolerance: 30
+    content_hash: 2d37d278e6366d39b5d48da41267adb3ef5ab2928f67546162fbb16789de2b6d
   RING_BUFFER_READ:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: ring_k_idx = start_pos % K
     after: def semi_crf_streaming_scan_kernel(
     expected_line: 235
     drift_tolerance: 20
+    content_hash: 417479fff99a58a2d122655d589307e8729a563a1f746b022b61cbeb65227646
   NEGINF_GUARD:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: is_all_neginf = max_scores < (NEG_INF + 1.0)
     expected_line: 321
     drift_tolerance: 15
+    content_hash: f8d64e1f1d23ebbf262678fe1350dec6538b0935dd1a3182a04f7c346e271534
   RING_BUFFER_WRITE:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: ring_t_idx = t % K
     after: def semi_crf_streaming_scan_kernel(
     expected_line: 344
     drift_tolerance: 20
+    content_hash: 462feb1a2ae47654efe1677a067325aeabe88212759d7e59bd5e5c1d12559dfb
   CHECKPOINT_SAVE:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
     after: def semi_crf_streaming_scan_kernel(
     expected_line: 353
     drift_tolerance: 25
+    content_hash: 44cf5702b7f151aef0701ea08fb16b614180d738c9ce99bc3779bdf583bd1121
   KERNEL_LAUNCH:
     file: src/flash_semicrf/streaming/triton_forward.py
     pattern: def launch_streaming_triton_kernel(
     expected_line: 931
     drift_tolerance: 50
+    content_hash: 623448719b38eb1db49550a1602c893f084a30f44b8b4ad4df4bc10a908456bb
 dispatch-overview:
   CAN_USE_TRITON:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: can_use_triton = HAS_TRITON and use_triton
     expected_line: 673
     drift_tolerance: 30
+    content_hash: c4f63e07e9a09f428f71992296f4614207bd5a58c7f4adde40c6bbb6499b7ebb
   STREAMING_ENTRY:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: def semi_crf_streaming_forward(
     expected_line: 498
     drift_tolerance: 50
+    content_hash: 75e4354e36ddfef552108899adf142d20f455993bf60626aa2c1750c7e33c3be
   K1_DISPATCH:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: return LinearCRFStreaming.apply(
     expected_line: 627
     drift_tolerance: 30
+    content_hash: dfc69f7b90c6374cdd8a31806bf85a68ea9785b988b68e2f6329075ca0578e7c
   K2_DISPATCH:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: return SemiCRFK2Streaming.apply(
     expected_line: 653
     drift_tolerance: 30
+    content_hash: 0a3d59687aad06af78ec107ed005bd55cfd54d84f621946dfeceeb89cdd10245
   TRITON_DISPATCH:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: return SemiCRFStreamingTriton.apply(
     expected_line: 679
     drift_tolerance: 30
+    content_hash: f27ba88b083bd4027f32b6356e866e5c6fbaae8c775f3c834f263c4e943eaf12
 autograd-kernel-interface:
   TRITON_FORWARD_CLASS:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: class SemiCRFStreamingTriton(
     expected_line: 176
     drift_tolerance: 40
+    content_hash: d335ecc089e0e044c5b3ec16914ff86f309c7493c5181f764def49f5b76e01c8
   PARTITION_VALIDATION:
     file: src/flash_semicrf/streaming/autograd.py
     pattern: 'if not torch.isfinite(partition).all():'
     after: class SemiCRFStreamingTriton(
     expected_line: 234
     drift_tolerance: 30
+    content_hash: b6310f8e0c451187cddd942219128fc905d2f704df582c5064658c5c1d00d671
 triton-backward-k3plus:
   BACKWARD_KERNEL_ENTRY:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "def semi_crf_streaming_backward_kernel("
+    pattern: def semi_crf_streaming_backward_kernel(
     expected_line: 62
     drift_tolerance: 20
+    content_hash: 0649a9cf9c7f8eba3feffef240fc16f346e53af0a6adc7c032951c096307cb3b
   BACKWARD_LAUNCHER:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "def launch_streaming_triton_backward("
+    pattern: def launch_streaming_triton_backward(
     expected_line: 1127
     drift_tolerance: 50
+    content_hash: bbfd23b9a4154095ff01231df0b41114296e3b216f7340ed70b36e9d4b548e43
   MARGINALS_LAUNCHER:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "def launch_streaming_triton_marginals("
+    pattern: def launch_streaming_triton_marginals(
     expected_line: 1549
     drift_tolerance: 50
+    content_hash: 0434f9092f22741a1ea649235278f75c0625c45f1d6e8ccd42e0be1f054d1d60
   BARRIER_CHECKPOINT_LOAD:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "tl.debug_barrier()"
-    after: "def semi_crf_streaming_backward_kernel("
+    pattern: tl.debug_barrier()
+    after: def semi_crf_streaming_backward_kernel(
     expected_line: 372
     drift_tolerance: 30
+    content_hash: 3300348058f6e334ad8bea83845fba8e1172960362ade529e1b0798b4bf7c258
   VALIDATE_SHAPES:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "validate_streaming_shapes("
-    after: "def launch_streaming_triton_backward("
+    pattern: validate_streaming_shapes(
+    after: def launch_streaming_triton_backward(
     expected_line: 1224
     drift_tolerance: 30
+    content_hash: 1eaf0d516d82e6ed05628def9078e23b9ee4f5b8e7e0dd60ecef400cced75ed8
   GRAD_WORKSPACE_ALLOC:
     file: src/flash_semicrf/streaming/triton_backward.py
-    pattern: "grad_tr_workspace = torch.zeros("
-    after: "def launch_streaming_triton_backward("
+    pattern: grad_tr_workspace = torch.zeros(
+    after: def launch_streaming_triton_backward(
     expected_line: 1355
     drift_tolerance: 30
+    content_hash: 40b602fe70ab44b314a3bc8709fa912705bb7cd01e6195e32428d1247ce9d007
 pytorch-forward-k3plus:
   FORWARD_ENTRY:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_streaming_forward_pytorch("
+    pattern: def semi_crf_streaming_forward_pytorch(
     expected_line: 609
     drift_tolerance: 50
+    content_hash: 0513b781369c3f5f16249c2b782f37848ccbc48b4e5be44d70acc7f8d8cb85da
   EDGE_BLOCK_COMPUTE:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def compute_edge_block_streaming("
+    pattern: def compute_edge_block_streaming(
     expected_line: 570
     drift_tolerance: 30
+    content_hash: fa1cb7acc1ef9516313bdfa5840559c6263aebb6723fa55e682efac5274ac32e
   RING_CHECKPOINT_ALLOC:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "ring_checkpoints = torch.full("
-    after: "def semi_crf_streaming_forward_pytorch("
+    pattern: ring_checkpoints = torch.full(
+    after: def semi_crf_streaming_forward_pytorch(
     expected_line: 657
     drift_tolerance: 30
+    content_hash: 9abd5103527a90d875ab54422d4fc49fc53ce12c9b729c99fbaa7b69bc1da511
   FORWARD_LOGSUMEXP:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "scores_over_src = torch.logsumexp("
-    after: "def semi_crf_streaming_forward_pytorch("
+    pattern: scores_over_src = torch.logsumexp(
+    after: def semi_crf_streaming_forward_pytorch(
     expected_line: 708
     drift_tolerance: 30
+    content_hash: f1305f6daf156f242a1cb0880f526232c39c0f248b17783a502579d5ef5ee98b
 pytorch-backward-k3plus:
   BACKWARD_ENTRY:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_streaming_backward_pytorch("
+    pattern: def semi_crf_streaming_backward_pytorch(
     expected_line: 917
     drift_tolerance: 50
+    content_hash: 5b91d9f2b7e4e57f2bfc97415c4edca67307ca289ab143f18ef316cc1a5da622
   MARGINALS_ENTRY:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_streaming_marginals_pytorch("
+    pattern: def semi_crf_streaming_marginals_pytorch(
     expected_line: 1192
     drift_tolerance: 50
+    content_hash: 551af7bad97116e07b2136cc7bf885f7c8c8881a675a8bc5da1250479946d93a
   VITERBI_ENTRY:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_streaming_viterbi_with_backpointers("
+    pattern: def semi_crf_streaming_viterbi_with_backpointers(
     expected_line: 797
     drift_tolerance: 50
+    content_hash: cec30f9c311a9d0b1388fb9a1dc5dcfde0d5c4181312b35efcb1b2656c852956
 k1-linear-crf:
   K1_FORWARD:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def linear_crf_forward_pytorch("
+    pattern: def linear_crf_forward_pytorch(
     expected_line: 34
     drift_tolerance: 20
+    content_hash: 7e062a3c8350d27c0358712b24522efbed9f9e31f6567961bc70bec8b396a166
   K1_BACKWARD:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def linear_crf_backward_pytorch("
+    pattern: def linear_crf_backward_pytorch(
     expected_line: 94
     drift_tolerance: 30
+    content_hash: efe9ecd6ada2c2f12e57cc92de18988adf29f2028735d7b0ec55683d7941904c
   K1_VITERBI:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def linear_crf_viterbi_pytorch("
+    pattern: def linear_crf_viterbi_pytorch(
     expected_line: 203
     drift_tolerance: 30
+    content_hash: ae350b60736332220e1616d03540992548e0f1b95855ea06c0181152543b4882
 k2-fast-path:
   K2_FORWARD:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_k2_forward_pytorch("
+    pattern: def semi_crf_k2_forward_pytorch(
     expected_line: 283
     drift_tolerance: 30
+    content_hash: f2ad49ec1633df886fa4de16b8db61c5a84c01ff52ccb65cb2f31c7dd1913933
   K2_BACKWARD:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_k2_backward_pytorch("
+    pattern: def semi_crf_k2_backward_pytorch(
     expected_line: 346
     drift_tolerance: 30
+    content_hash: a8cdd6d42bb4eaf91511811dec27602dec9a120d74bd43f1a8899587fb55504c
   K2_VITERBI:
     file: src/flash_semicrf/streaming/pytorch_reference.py
-    pattern: "def semi_crf_k2_viterbi_pytorch("
+    pattern: def semi_crf_k2_viterbi_pytorch(
     expected_line: 476
     drift_tolerance: 30
+    content_hash: cca9322e6e89e802eba8c3938826f67b1a3b6999e7615442f1694271da39786e
 non-streaming-backends:
   SEMIMARKOV_CLASS:
     file: src/flash_semicrf/semimarkov.py
-    pattern: "class SemiMarkov("
+    pattern: class SemiMarkov(
     expected_line: 7
     drift_tolerance: 10
+    content_hash: 4c6e279c04e184633e15dd285714ba0a279cc0c976840b75767c57de62bc641a
   LOGPARTITION_ENTRY:
     file: src/flash_semicrf/semimarkov.py
-    pattern: "def logpartition("
-    after: "class SemiMarkov("
+    pattern: def logpartition(
+    after: class SemiMarkov(
     expected_line: 35
     drift_tolerance: 30
+    content_hash: 95ca58ed2a5a7d99d99ba8dcc5b09a1a2b2ed330b075a00b7fe81b0cccb86451
   DP_STANDARD:
     file: src/flash_semicrf/semimarkov.py
-    pattern: "def _dp_standard("
-    after: "class SemiMarkov("
+    pattern: def _dp_standard(
+    after: class SemiMarkov(
     expected_line: 228
     drift_tolerance: 30
+    content_hash: 2b71bbfc507bd0d23c0f5c4982e3422e923df2bd8ead6b2441a91bbc2700d50e
   DP_SCAN_STREAMING:
     file: src/flash_semicrf/semimarkov.py
-    pattern: "def _dp_scan_streaming("
-    after: "class SemiMarkov("
+    pattern: def _dp_scan_streaming(
+    after: class SemiMarkov(
     expected_line: 148
     drift_tolerance: 30
+    content_hash: 80967335667d8ddced9bc8618d386eb39717888421dd27ce05821950cd010908
   DP_BINARY_TREE:
     file: src/flash_semicrf/semimarkov.py
-    pattern: "def _dp_binary_tree("
-    after: "class SemiMarkov("
+    pattern: def _dp_binary_tree(
+    after: class SemiMarkov(
     expected_line: 85
     drift_tolerance: 30
+    content_hash: 4520f6fb82c02ce6e06db82d95585e6873724ed160263e17c2ff027bc6fe5dcd
 crf-heads:
   CLASS_DEFINITION:
     file: src/flash_semicrf/nn.py
     pattern: 'class SemiMarkovCRFHead(nn.Module):'
     expected_line: 39
     drift_tolerance: 20
+    content_hash: 392e2867cd48332c6951ffb8ec2015e1c523586fd777e6af2a00676d4b1d53c8
   INIT_METHOD:
     file: src/flash_semicrf/nn.py
     pattern: def __init__(
     after: class SemiMarkovCRFHead
     expected_line: 121
     drift_tolerance: 30
+    content_hash: 29b36ada7e7459c95d5151f8e7955df3677eee6245d3a87014e5c4447748f5e7
   BUILD_EDGE_TENSOR:
     file: src/flash_semicrf/nn.py
     pattern: def _build_edge_tensor(
     after: class SemiMarkovCRFHead
     expected_line: 189
     drift_tolerance: 20
+    content_hash: 701def6ec68a886c82b093115be29bcef110d1b55eb533eebae6faa7e474e7df
   BUILD_DIFFERENTIABLE_EDGE:
     file: src/flash_semicrf/nn.py
     pattern: def _build_differentiable_edge(
     after: class SemiMarkovCRFHead
     expected_line: 226
     drift_tolerance: 20
+    content_hash: a424905566e9821e003e39eaac3835191fc4f0e295e71800ea6f605cd9c26b34
   NEGINF_SAFE_SENTINEL:
     file: src/flash_semicrf/nn.py
     pattern: _NEGINF_SAFE = -1e18
     after: def _build_differentiable_edge(
     expected_line: 259
     drift_tolerance: 15
+    content_hash: 0422c17d6d31bee95861dbe9bdd3a13bc07aea896dc640e02f5a5aa6acc01428
   FORWARD_EXACT:
     file: src/flash_semicrf/nn.py
     pattern: def _forward_exact(
     after: class SemiMarkovCRFHead
     expected_line: 277
     drift_tolerance: 30
+    content_hash: d87fbf1b722729ed3a27ba56abaf6ea99de3668da2fd2d1e580f44b9398d6e19
   FORWARD_METHOD:
     file: src/flash_semicrf/nn.py
     pattern: def forward(
     after: class SemiMarkovCRFHead
     expected_line: 334
     drift_tolerance: 30
+    content_hash: 7f344b4b34f30beb6eccc2a3c6371a5713684c67cf366f3333479fd0b6f45eac
   ZERO_CENTER:
     file: src/flash_semicrf/nn.py
     pattern: scores_float = scores_float - scores_float.mean(dim=1, keepdim=True)
     after: def forward(
     expected_line: 406
     drift_tolerance: 20
+    content_hash: d6aaa379827a1d2db14a278aaadad47545f201148ddaf30e8479b622905afa6f
   FLOAT64_CONVERT:
     file: src/flash_semicrf/nn.py
     pattern: scores_float = scores.double()
     after: def forward(
     expected_line: 404
     drift_tolerance: 20
+    content_hash: 89010d2bc3f12649e2bfc6eb1f6a02764baf1eb2b86bf047215ac91cf87fca6f
   NAN_CHECK_PROJECTION:
     file: src/flash_semicrf/nn.py
     pattern: 'if scores.requires_grad and torch.isnan(scores).any():'
     expected_line: 376
     drift_tolerance: 25
+    content_hash: e771314640aa81f4fb2b4596fbfc0946b82900b42a3e2db90d6825694f25c6e3
   NAN_CHECK_CUMSUM:
     file: src/flash_semicrf/nn.py
     pattern: 'if cum_scores.requires_grad and torch.isnan(cum_scores).any():'
     expected_line: 413
     drift_tolerance: 25
+    content_hash: c77a413493aa69a9361592cf8923360aa6e21a55c30947edadc5fbff73b07988
   BACKEND_SELECT:
     file: src/flash_semicrf/nn.py
     pattern: def _select_backend(
     expected_line: 170
     drift_tolerance: 30
+    content_hash: 5a6ed38621bd76dbd13a80af82931e18f805a96bac38399ee25adf9521d165c4
   COMPUTE_LOSS:
     file: src/flash_semicrf/nn.py
     pattern: def compute_loss(
     after: class SemiMarkovCRFHead
     expected_line: 443
     drift_tolerance: 30
+    content_hash: d7094ca3401398ccad16e37d277683adcbc8ca2b1f72ccfb0a8f24b167db60e7
   DECODE_METHOD:
     file: src/flash_semicrf/nn.py
     pattern: def decode(
     after: class SemiMarkovCRFHead
     expected_line: 529
     drift_tolerance: 30
+    content_hash: 2fb1ad1e7b1efeccc1c90ef6b595091773428df1292dc9a0b49f0623291a5464
   DECODE_TRACEBACK:
     file: src/flash_semicrf/nn.py
     pattern: def decode_with_traceback(
     after: class SemiMarkovCRFHead
     expected_line: 608
     drift_tolerance: 30
+    content_hash: 0eb82c298151ea2820068cab1fb0b7c11f8317905db9b64e8941fe90b08a4c84
   STREAMING_FORWARD_CALL:
     file: src/flash_semicrf/nn.py
     pattern: partition = semi_crf_streaming_forward(
     after: def forward(
     expected_line: 421
     drift_tolerance: 30
+    content_hash: 0723a686d5876e25b55c3880c439380e4e5528bfba24e906a7948c5db45682c6
