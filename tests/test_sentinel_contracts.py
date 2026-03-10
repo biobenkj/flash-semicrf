@@ -631,8 +631,7 @@ class _FixSentinel:
 
     def verify_anchor(self, **kwargs):  # noqa: ARG002
         return self._module.AnchorResult(
-            name="", status="VERIFIED", expected_line=1,
-            actual_line=1, drift=0, message="VERIFIED"
+            name="", status="VERIFIED", expected_line=1, actual_line=1, drift=0, message="VERIFIED"
         )
 
     def check_consistency(self):
@@ -657,8 +656,12 @@ def test_fix_dry_run_no_mutations(tmp_path):
         trace_status=trace_result,
         anchor_impacts=[
             module.AnchorImpact(
-                anchor_name="A1", status="shifted", old_line=10, new_line=15,
-                suggestion="Update", content_hash_match=None,
+                anchor_name="A1",
+                status="shifted",
+                old_line=10,
+                new_line=15,
+                suggestion="Update",
+                content_hash_match=None,
             )
         ],
     )
@@ -679,7 +682,10 @@ def test_fix_blocks_on_deleted_anchor(tmp_path):
         trace_status=trace_result,
         anchor_impacts=[
             module.AnchorImpact(
-                anchor_name="A1", status="deleted", old_line=10, new_line=None,
+                anchor_name="A1",
+                status="deleted",
+                old_line=10,
+                new_line=None,
                 suggestion="Pattern not found",
             )
         ],
@@ -699,8 +705,12 @@ def test_fix_blocks_on_content_hash_mismatch(tmp_path):
         trace_status=trace_result,
         anchor_impacts=[
             module.AnchorImpact(
-                anchor_name="A1", status="shifted", old_line=10, new_line=15,
-                suggestion="Update", content_hash_match=False,
+                anchor_name="A1",
+                status="shifted",
+                old_line=10,
+                new_line=15,
+                suggestion="Update",
+                content_hash_match=False,
             )
         ],
     )
@@ -729,7 +739,12 @@ def test_gate_no_fix_skips_fix(tmp_path, capsys):
     trace_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
     sentinel = _FixSentinel(tmp_path, module, trace_status=trace_result)
     args = argparse.Namespace(
-        no_fix=True, files=[], ci=False, strict=False, no_strict=False, format="text",
+        no_fix=True,
+        files=[],
+        ci=False,
+        strict=False,
+        no_strict=False,
+        format="text",
     )
     exit_code = module.cmd_gate(args, sentinel)
     out = capsys.readouterr().out
@@ -752,7 +767,6 @@ def test_pipeline_emits_deprecation_warning(tmp_path, capsys):
 
 def test_verify_affected_by_filters_traces(capsys):
     module = _load_sentinel_module()
-    verified_result = _make_trace_result(module, commit_status=module.Status.VERIFIED)
 
     class _AffectedSentinel:
         repo_root = Path("/repo")
@@ -780,8 +794,13 @@ def test_verify_affected_by_filters_traces(capsys):
 
     sentinel = _AffectedSentinel()
     args = argparse.Namespace(
-        all=False, trace=None, affected_by=["src/alpha.py"],
-        check_consistency=False, format="text", strict=False, no_strict=False,
+        all=False,
+        trace=None,
+        affected_by=["src/alpha.py"],
+        check_consistency=False,
+        format="text",
+        strict=False,
+        no_strict=False,
     )
     exit_code = module.cmd_verify(args, sentinel)
 
@@ -802,8 +821,13 @@ def test_verify_affected_by_no_match(capsys):
             return {"sentinels": {"trace-a": {"source_files": ["src/alpha.py"]}}}
 
     args = argparse.Namespace(
-        all=False, trace=None, affected_by=["src/unknown.py"],
-        check_consistency=False, format="text", strict=False, no_strict=False,
+        all=False,
+        trace=None,
+        affected_by=["src/unknown.py"],
+        check_consistency=False,
+        format="text",
+        strict=False,
+        no_strict=False,
     )
     exit_code = module.cmd_verify(args, _NoMatchSentinel())
     out = capsys.readouterr().out
@@ -848,9 +872,7 @@ def test_status_watch_summary_from_status_json(capsys, tmp_path):
 
         def __init__(self):
             self.sentinel_dir.mkdir(exist_ok=True)
-            (self.sentinel_dir / "status.json").write_text(
-                json.dumps({"summary": "5/5 verified"})
-            )
+            (self.sentinel_dir / "status.json").write_text(json.dumps({"summary": "5/5 verified"}))
 
     sentinel = _WatchJsonSentinel()
     args = argparse.Namespace(watch_summary=True, format="text", verify=False)

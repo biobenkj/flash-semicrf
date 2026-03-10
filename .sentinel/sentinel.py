@@ -1505,10 +1505,12 @@ def _fix_traces(
             if impact.status == "shifted":
                 # Safe if content_hash_match is True or None (no hash stored)
                 if impact.content_hash_match is False:
-                    anchors_failed.append({
-                        "name": impact.anchor_name,
-                        "reason": "content_hash mismatch (semantic change)",
-                    })
+                    anchors_failed.append(
+                        {
+                            "name": impact.anchor_name,
+                            "reason": "content_hash mismatch (semantic change)",
+                        }
+                    )
                 elif not dry_run and impact.new_line and impact.anchor_name in trace_anchors:
                     anchor_spec = trace_anchors[impact.anchor_name]
                     anchor_spec["expected_line"] = impact.new_line
@@ -1518,22 +1520,28 @@ def _fix_traces(
                     if line_content:
                         anchor_spec["content_hash"] = _compute_content_hash(line_content)
                     anchors_dirty = True
-                    anchors_fixed.append({
-                        "name": impact.anchor_name,
-                        "old_line": impact.old_line,
-                        "new_line": impact.new_line,
-                    })
+                    anchors_fixed.append(
+                        {
+                            "name": impact.anchor_name,
+                            "old_line": impact.old_line,
+                            "new_line": impact.new_line,
+                        }
+                    )
                 elif dry_run:
-                    anchors_fixed.append({
-                        "name": impact.anchor_name,
-                        "old_line": impact.old_line,
-                        "new_line": impact.new_line,
-                    })
+                    anchors_fixed.append(
+                        {
+                            "name": impact.anchor_name,
+                            "old_line": impact.old_line,
+                            "new_line": impact.new_line,
+                        }
+                    )
             elif impact.status in ("deleted", "modified"):
-                anchors_failed.append({
-                    "name": impact.anchor_name,
-                    "reason": impact.suggestion,
-                })
+                anchors_failed.append(
+                    {
+                        "name": impact.anchor_name,
+                        "reason": impact.suggestion,
+                    }
+                )
 
         previous_status = verification.overall_status.value
 
@@ -1578,7 +1586,7 @@ def _fix_traces(
     if not dry_run:
         for trace_name in trace_names:
             trace_anchors = anchors.get(trace_name, {})
-            for anchor_name, spec in trace_anchors.items():
+            for _anchor_name, spec in trace_anchors.items():
                 if "content_hash" not in spec:
                     anchor_file = str(sentinel.repo_root / spec["file"])
                     # Verify the anchor to find its actual line
@@ -1632,7 +1640,14 @@ def cmd_fix(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
     if not trace_names:
         if getattr(args, "format", "text") == "json":
-            print(_json_envelope("fix", EXIT_SUCCESS, fixes={}, summary={"fixed": 0, "still_broken": 0, "already_verified": 0}))
+            print(
+                _json_envelope(
+                    "fix",
+                    EXIT_SUCCESS,
+                    fixes={},
+                    summary={"fixed": 0, "still_broken": 0, "already_verified": 0},
+                )
+            )
         else:
             print("No traces found")
         return EXIT_SUCCESS
@@ -1650,15 +1665,25 @@ def cmd_fix(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
 
     # Output
     if fmt == "json":
-        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        fixed_count = sum(
+            1
+            for r in fix_results.values()
+            if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED"
+        )
         broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
         already_count = sum(1 for r in fix_results.values() if r["previous_status"] == "VERIFIED")
-        print(_json_envelope(
-            "fix",
-            exit_code,
-            fixes=fix_results,
-            summary={"fixed": fixed_count, "still_broken": broken_count, "already_verified": already_count},
-        ))
+        print(
+            _json_envelope(
+                "fix",
+                exit_code,
+                fixes=fix_results,
+                summary={
+                    "fixed": fixed_count,
+                    "still_broken": broken_count,
+                    "already_verified": already_count,
+                },
+            )
+        )
     else:
         prefix = "Would fix" if dry_run else "Fixing"
         print(f"{prefix} {len(trace_names)} trace(s)...\n")
@@ -1666,7 +1691,9 @@ def cmd_fix(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             print(f"  {trace_name}:")
             for af in result["anchors_fixed"]:
                 symbol = "~" if dry_run else "\u2713"
-                print(f"    {symbol} {af['name']}: {af['old_line']}\u2192{af['new_line']} ({'would fix' if dry_run else 'fixed'})")
+                print(
+                    f"    {symbol} {af['name']}: {af['old_line']}\u2192{af['new_line']} ({'would fix' if dry_run else 'fixed'})"
+                )
             for af in result["anchors_failed"]:
                 print(f"    \u2717 {af['name']}: {af['reason']}")
             if result.get("commit_updated"):
@@ -1674,10 +1701,16 @@ def cmd_fix(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             print(f"    \u2192 {result['new_status']}")
             print()
 
-        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        fixed_count = sum(
+            1
+            for r in fix_results.values()
+            if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED"
+        )
         broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
         already_count = sum(1 for r in fix_results.values() if r["previous_status"] == "VERIFIED")
-        print(f"Summary: {fixed_count} fixed, {broken_count} need{'s' if broken_count == 1 else ''} attention, {already_count} already verified")
+        print(
+            f"Summary: {fixed_count} fixed, {broken_count} need{'s' if broken_count == 1 else ''} attention, {already_count} already verified"
+        )
 
     return exit_code
 
@@ -1702,14 +1735,16 @@ def cmd_gate(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
     # Step 1: Auto-fix (unless --no-fix)
     if not getattr(args, "no_fix", False):
         print("=== Step 1: Auto-Fix ===\n")
-        fix_exit, fix_modified, _, fix_results = _fix_traces(
-            sentinel, trace_names, dry_run=False
-        )
+        fix_exit, fix_modified, _, fix_results = _fix_traces(sentinel, trace_names, dry_run=False)
         modified_files.extend(fix_modified)
         if fix_exit != EXIT_SUCCESS:
             exit_code = max(exit_code, fix_exit)
 
-        fixed_count = sum(1 for r in fix_results.values() if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED")
+        fixed_count = sum(
+            1
+            for r in fix_results.values()
+            if r["new_status"] == "VERIFIED" and r["previous_status"] != "VERIFIED"
+        )
         broken_count = sum(1 for r in fix_results.values() if r["anchors_failed"])
         if fixed_count or broken_count:
             print(f"  Auto-fix: {fixed_count} fixed, {broken_count} need attention")
@@ -1778,9 +1813,7 @@ def cmd_gate(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             print()
             if os.environ.get("SENTINEL_RUN_TESTS") == "1":
                 print("  Running tests...")
-                test_result = subprocess.run(
-                    ["pytest"] + suggested_tests, cwd=sentinel.repo_root
-                )
+                test_result = subprocess.run(["pytest"] + suggested_tests, cwd=sentinel.repo_root)
                 if test_result.returncode != 0:
                     exit_code = max(exit_code, EXIT_GENERAL_ERROR)
             else:
@@ -1801,7 +1834,9 @@ def cmd_gate(args: argparse.Namespace, sentinel: CodeSentinel) -> int:
             )
             print(f"  Auto-staged {len(modified_files)} sentinel file(s)")
         else:
-            print(f"  Sentinel auto-fixed files. Run 'git add .sentinel/' to include updates in your next commit.")
+            print(
+                "  Sentinel auto-fixed files. Run 'git add .sentinel/' to include updates in your next commit."
+            )
         print()
 
     # Write status.json
@@ -2824,9 +2859,7 @@ Examples:
     verify_parser.add_argument(
         "--no-strict", action="store_true", help="Stale traces are warning-only (overrides env)"
     )
-    verify_parser.add_argument(
-        "--affected-by", nargs="+", help="Filter to traces covering FILE(s)"
-    )
+    verify_parser.add_argument("--affected-by", nargs="+", help="Filter to traces covering FILE(s)")
 
     # fix
     fix_parser = subparsers.add_parser(
