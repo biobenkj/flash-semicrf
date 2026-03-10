@@ -21,6 +21,20 @@ pytestmark = [
 ]
 
 
+def _load_sentinel_submodule(name: str):
+    """Get a .sentinel submodule that was already loaded via the facade's import chain.
+
+    The facade does `sys.path.insert(0, _pkg_dir)` then `from watch import ...`,
+    so the submodule lands in sys.modules under its bare name. We must patch
+    *that* module instance — not a fresh load — so patches affect the references
+    that _handle_file_change etc. actually use.
+    """
+    if name not in sys.modules:
+        # Force-load the facade first to populate sys.modules
+        _load_sentinel_module()
+    return sys.modules[name]
+
+
 def _load_sentinel_module():
     path = _SENTINEL_PATH
     unique_name = f"sentinel_cli_{uuid.uuid4().hex}"
@@ -909,9 +923,10 @@ def test_status_json_written_by_fix(tmp_path):
 
 def test_debouncer_fires_after_delay():
     module = _load_sentinel_module()
+    watch_mod = _load_sentinel_submodule("watch")
     debouncer = module._FileDebouncer(delay_ms=500)
 
-    with patch.object(module.time, "monotonic") as mock_mono:
+    with patch.object(watch_mod.time, "monotonic") as mock_mono:
         mock_mono.return_value = 0.0
         debouncer.record("/tmp/a.py")
 
@@ -924,9 +939,10 @@ def test_debouncer_fires_after_delay():
 
 def test_debouncer_resets_on_re_record():
     module = _load_sentinel_module()
+    watch_mod = _load_sentinel_submodule("watch")
     debouncer = module._FileDebouncer(delay_ms=500)
 
-    with patch.object(module.time, "monotonic") as mock_mono:
+    with patch.object(watch_mod.time, "monotonic") as mock_mono:
         mock_mono.return_value = 0.0
         debouncer.record("/tmp/a.py")
 
@@ -942,11 +958,12 @@ def test_debouncer_resets_on_re_record():
 
 def test_debouncer_has_pending():
     module = _load_sentinel_module()
+    watch_mod = _load_sentinel_submodule("watch")
     debouncer = module._FileDebouncer(delay_ms=500)
 
     assert debouncer.has_pending() is False
 
-    with patch.object(module.time, "monotonic") as mock_mono:
+    with patch.object(watch_mod.time, "monotonic") as mock_mono:
         mock_mono.return_value = 0.0
         debouncer.record("/tmp/a.py")
         assert debouncer.has_pending() is True
@@ -958,9 +975,10 @@ def test_debouncer_has_pending():
 
 def test_debouncer_multiple_files_independent():
     module = _load_sentinel_module()
+    watch_mod = _load_sentinel_submodule("watch")
     debouncer = module._FileDebouncer(delay_ms=500)
 
-    with patch.object(module.time, "monotonic") as mock_mono:
+    with patch.object(watch_mod.time, "monotonic") as mock_mono:
         mock_mono.return_value = 0.0
         debouncer.record("/tmp/a.py")
 
@@ -1118,10 +1136,10 @@ def test_handle_file_change_verifies_only_affected_traces(tmp_path):
     index = {"/src/a.py": ["trace-1"], "/src/b.py": ["trace-2"]}
     cache = {"trace-1": verified, "trace-2": verified2}
 
-    mod_name = module.__name__
+    watch_mod = _load_sentinel_submodule("watch")
     with (
-        patch(f"{mod_name}._emit_watch_event"),
-        patch(f"{mod_name}._write_status_json") as mock_write,
+        patch.object(watch_mod, "_emit_watch_event"),
+        patch.object(watch_mod, "_write_status_json") as mock_write,
     ):
         module._handle_file_change(sentinel, ["/src/a.py"], index, False, True, cache)
 
@@ -1166,15 +1184,15 @@ def test_handle_file_change_emits_fix_applied_on_auto_fix(tmp_path):
     )
 
     emitted_events = []
-    mod_name = module.__name__
+    watch_mod = _load_sentinel_submodule("watch")
 
     def capture_event(event, json_lines):  # noqa: ARG001
         emitted_events.append(event)
 
     with (
-        patch(f"{mod_name}._fix_traces", return_value=fix_return),
-        patch(f"{mod_name}._emit_watch_event", side_effect=capture_event),
-        patch(f"{mod_name}._write_status_json"),
+        patch.object(watch_mod, "_fix_traces", return_value=fix_return),
+        patch.object(watch_mod, "_emit_watch_event", side_effect=capture_event),
+        patch.object(watch_mod, "_write_status_json"),
     ):
         module._handle_file_change(sentinel, ["/src/a.py"], index, True, True, cache)
 
@@ -1220,11 +1238,11 @@ def test_handle_file_change_cache_contract(tmp_path):
         },
     )
 
-    mod_name = module.__name__
+    watch_mod = _load_sentinel_submodule("watch")
     with (
-        patch(f"{mod_name}._fix_traces", return_value=fix_return),
-        patch(f"{mod_name}._emit_watch_event"),
-        patch(f"{mod_name}._write_status_json"),
+        patch.object(watch_mod, "_fix_traces", return_value=fix_return),
+        patch.object(watch_mod, "_emit_watch_event"),
+        patch.object(watch_mod, "_write_status_json"),
     ):
         module._handle_file_change(sentinel, ["/src/b.py"], index, True, True, cache)
 
@@ -1963,3 +1981,97 @@ def test_init_no_source_no_scan_prints_error(capsys):
     assert exit_code == module.EXIT_GENERAL_ERROR
     captured = capsys.readouterr()
     assert "source file required" in captured.out
+
+
+# ── Facade export parity test ─────────────────────────────────────────
+
+
+REQUIRED_EXPORTS = {
+    # constants
+    "EXIT_SUCCESS",
+    "EXIT_ANCHOR_MISSING",
+    "EXIT_ANCHOR_DRIFT",
+    "EXIT_ANCHOR_AMBIGUOUS",
+    "EXIT_CONSISTENCY_FAILED",
+    "EXIT_ASSUMPTION_FAILED",
+    "EXIT_GENERAL_ERROR",
+    "CRITICAL_PATTERNS",
+    "HIGH_PATTERNS",
+    "_SUPPORTED_LANGUAGES",
+    "_VERIFY_ANCHOR_SH",
+    # models
+    "Status",
+    "AnchorResult",
+    "AssumptionResult",
+    "TraceVerification",
+    "AnchorImpact",
+    "FunctionInfo",
+    "WatchEvent",
+    "ScanPreset",
+    "BUILTIN_PRESETS",
+    # core
+    "CodeSentinel",
+    "bootstrap_sentinel_dir",
+    "_compute_content_hash",
+    "_read_line_from_file",
+    # output
+    "_json_envelope",
+    "_resolve_strict",
+    "_write_status_json",
+    "_print_verification_result",
+    "_now_iso",
+    "_progress_bar",
+    "run_consistency_check",
+    "status_badge",
+    # fix
+    "_fix_traces",
+    "_update_trace_header",
+    "_get_latest_commit",
+    # adapters
+    "_normalize_text_for_compare",
+    "_resolve_path_within",
+    "_managed_block_markers",
+    "_extract_managed_block_content",
+    "_render_managed_block",
+    "_prepare_adapter_install",
+    "_adapter_install_status",
+    # watch
+    "_FileDebouncer",
+    "_emit_watch_event",
+    "_handle_file_change",
+    "_handle_git_event",
+    "_is_relevant_git_event",
+    "_git_watch_paths",
+    "_watch_with_watchdog",
+    "_watch_with_polling",
+    "_check_stale_pidfile",
+    "_cleanup_pidfile",
+    "_daemonize",
+    # commands
+    "cmd_status",
+    "cmd_init",
+    "cmd_init_scan",
+    "cmd_verify",
+    "cmd_fix",
+    "cmd_gate",
+    "cmd_pipeline",
+    "cmd_retrace",
+    "cmd_update",
+    "cmd_watch",
+    "cmd_install_hooks",
+    "cmd_install_adapter",
+    "cmd_report",
+    "cmd_graph",
+    "cmd_coverage",
+    "cmd_context",
+    "cmd_sync_docs",
+    "cmd_route",
+    "main",
+}
+
+
+def test_facade_exports_all_public_names():
+    mod = _load_sentinel_module()
+    exported = set(dir(mod))
+    missing = REQUIRED_EXPORTS - exported
+    assert not missing, f"Facade missing re-exports: {missing}"

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-10T15:10:45.838391Z",
+  "timestamp": "2026-03-10T18:47:21.646511Z",
   "traces": {
     "triton-forward-k3plus": {
       "status": "VERIFIED",
@@ -8,23 +8,16 @@
         "verified": 7,
         "total": 7
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "dispatch-overview": {
-      "status": "DEGRADED",
+      "status": "VERIFIED",
       "verified_commit": "559cebd",
       "anchors": {
-        "verified": 4,
+        "verified": 5,
         "total": 5
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z",
-      "issues": [
-        {
-          "anchor": "K1_DISPATCH",
-          "status": "UNKNOWN",
-          "message": ""
-        }
-      ]
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "autograd-kernel-interface": {
       "status": "VERIFIED",
@@ -33,7 +26,7 @@
         "verified": 2,
         "total": 2
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "triton-backward-k3plus": {
       "status": "VERIFIED",
@@ -42,7 +35,7 @@
         "verified": 6,
         "total": 6
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "pytorch-forward-k3plus": {
       "status": "VERIFIED",
@@ -51,7 +44,7 @@
         "verified": 4,
         "total": 4
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "pytorch-backward-k3plus": {
       "status": "VERIFIED",
@@ -60,7 +53,7 @@
         "verified": 3,
         "total": 3
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "k1-linear-crf": {
       "status": "VERIFIED",
@@ -69,7 +62,7 @@
         "verified": 3,
         "total": 3
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "k2-fast-path": {
       "status": "VERIFIED",
@@ -78,7 +71,7 @@
         "verified": 3,
         "total": 3
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "non-streaming-backends": {
       "status": "VERIFIED",
@@ -87,7 +80,7 @@
         "verified": 5,
         "total": 5
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     },
     "crf-heads": {
       "status": "VERIFIED",
@@ -96,8 +89,8 @@
         "verified": 16,
         "total": 16
       },
-      "last_checked": "2026-03-10T15:10:45.838391Z"
+      "last_checked": "2026-03-10T18:47:21.646511Z"
     }
   },
-  "summary": "9/10 verified, 1 stale"
+  "summary": "10/10 verified"
 }
