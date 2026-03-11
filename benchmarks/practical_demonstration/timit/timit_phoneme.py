@@ -1659,15 +1659,21 @@ def train_epoch(
     backend: str = "streaming",
     use_triton: bool = True,
     crf_reg: float = 0.0,
-) -> tuple[float, float, int, int]:
+    profile: bool = False,
+) -> tuple[float, float, int, int, dict[str, float] | None]:
     """Train for one epoch.
 
     Args:
         crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only).
             Helps prevent gradient explosion from unbounded transition/duration_bias.
+        profile: If True, insert torch.cuda.synchronize() barriers to measure
+            per-phase wall-clock time. This prevents async overlap and will slow
+            training, but provides accurate timing breakdown.
 
     Returns:
-        Tuple of (average_loss, elapsed_time_seconds, num_utterances, num_frames).
+        Tuple of (average_loss, elapsed_time_seconds, num_utterances, num_frames, phase_times).
+        phase_times is None when profile=False, otherwise a dict mapping phase names
+        to cumulative seconds across all batches.
     """
     model.train()
     total_loss = 0
@@ -1675,9 +1681,17 @@ def train_epoch(
     total_utterances = 0
     total_frames = 0
 
+    phase_times = None
+    if profile:
+        phase_times = defaultdict(float)
+
     start_time = time.perf_counter()
 
     for batch in dataloader:
+        if profile:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
         features = batch["features"].to(device)
         labels = batch["labels"].to(device)
         lengths = batch["lengths"].to(device)
@@ -1686,23 +1700,82 @@ def train_epoch(
         total_utterances += features.shape[0]
         total_frames += lengths.sum().item()
 
+        if profile:
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            phase_times["data_transfer"] += t1 - t0
+
         optimizer.zero_grad()
-        loss = model.compute_loss(features, lengths, labels, backend=backend, use_triton=use_triton)
 
-        # Add CRF parameter regularization for Semi-Markov models
-        if crf_reg > 0 and isinstance(model, TIMITModel):
-            loss = loss + crf_reg * model.crf.parameter_penalty()
+        if profile and isinstance(model, TIMITModel):
+            # Profile each phase of compute_loss separately
+            hidden = model.encoder(features)
+            torch.cuda.synchronize()
+            t2 = time.perf_counter()
+            phase_times["encoder"] += t2 - t1
 
-        loss.backward()
+            result = model.crf(hidden, lengths, use_triton=use_triton, backend=backend)
+            partition = result["partition"]
+            cum_scores = result["cum_scores"]
+            torch.cuda.synchronize()
+            t3 = time.perf_counter()
+            phase_times["crf_forward"] += t3 - t2
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        optimizer.step()
+            gold_score = model.crf._score_gold(
+                cum_scores,
+                labels,
+                lengths,
+                result.get("proj_start"),
+                result.get("proj_end"),
+            )
+            torch.cuda.synchronize()
+            t4 = time.perf_counter()
+            phase_times["gold_scoring"] += t4 - t3
+
+            loss = (partition - gold_score).mean()
+            if crf_reg > 0:
+                loss = loss + crf_reg * model.crf.parameter_penalty()
+
+            loss.backward()
+            torch.cuda.synchronize()
+            t5 = time.perf_counter()
+            phase_times["backward"] += t5 - t4
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+            torch.cuda.synchronize()
+            t6 = time.perf_counter()
+            phase_times["optimizer"] += t6 - t5
+        else:
+            # Normal (non-profiled) path
+            loss = model.compute_loss(
+                features, lengths, labels, backend=backend, use_triton=use_triton
+            )
+
+            if crf_reg > 0 and isinstance(model, TIMITModel):
+                loss = loss + crf_reg * model.crf.parameter_penalty()
+
+            loss.backward()
+
+            if profile:
+                # For pytorch-crf models, lump everything into one phase
+                torch.cuda.synchronize()
+                t2 = time.perf_counter()
+                phase_times["forward_backward"] += t2 - t1
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            if profile:
+                torch.cuda.synchronize()
+                t3 = time.perf_counter()
+                phase_times["optimizer"] += t3 - t2
 
         total_loss += loss.item()
         num_batches += 1
 
     elapsed = time.perf_counter() - start_time
-    return total_loss / num_batches, elapsed, total_utterances, total_frames
+    return total_loss / num_batches, elapsed, total_utterances, total_frames, phase_times
 
 
 @torch.no_grad()
@@ -1812,12 +1885,14 @@ def train_model(
     log_every: int = 1,
     crf_reg: float = 0.0,
     fixed_length: int | None = None,
+    profile: bool = False,
 ) -> tuple[TIMITModel | TIMITModelPytorchCRF, TIMITMetrics]:
     """Train a model and return it with metrics.
 
     Args:
         crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only).
         fixed_length: If provided, force all sequences to this length (for debugging).
+        profile: If True, log per-phase GPU timing breakdown each epoch.
     """
     device = torch.device(device)
 
@@ -1897,8 +1972,12 @@ def train_model(
     epoch_utt_rates = []  # utterances/sec per epoch
     epoch_frame_rates = []  # frames/sec per epoch
 
+    # Accumulate per-phase timing across non-warmup epochs (skip epoch 0 for torch.compile)
+    agg_phase_times: dict[str, float] = defaultdict(float)
+    agg_phase_epochs = 0
+
     for epoch in range(epochs):
-        train_loss, epoch_time, num_utterances, num_frames = train_epoch(
+        train_loss, epoch_time, num_utterances, num_frames, phase_times = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -1906,6 +1985,7 @@ def train_model(
             backend=backend,
             use_triton=use_triton,
             crf_reg=crf_reg,
+            profile=profile,
         )
         total_train_time += epoch_time
         epoch_times.append(epoch_time)
@@ -1915,6 +1995,27 @@ def train_model(
         epoch_utt_rates.append(num_utterances / epoch_time if epoch_time > 0 else 0)
         epoch_frame_rates.append(num_frames / epoch_time if epoch_time > 0 else 0)
         scheduler.step()
+
+        # Log per-phase timing breakdown when profiling
+        if profile and phase_times:
+            num_batches = len(train_loader)
+            total_phase = sum(phase_times.values())
+
+            # Skip epoch 0 in aggregate (torch.compile + Triton JIT warmup)
+            if epoch > 0:
+                agg_phase_epochs += 1
+                for phase, secs in phase_times.items():
+                    agg_phase_times[phase] += secs
+
+            logger.info(
+                f"Epoch {epoch+1} phase breakdown ({num_batches} batches, {total_phase:.1f}s total):"
+            )
+            for phase, secs in phase_times.items():
+                pct = 100.0 * secs / total_phase if total_phase > 0 else 0
+                per_batch_ms = 1000.0 * secs / num_batches
+                logger.info(
+                    f"  {phase:<20s} {secs:>7.1f}s ({pct:>5.1f}%)  {per_batch_ms:>7.1f}ms/batch"
+                )
 
         # Log CRF parameter magnitudes for debugging gradient explosion
         if isinstance(model, TIMITModel):
@@ -1964,6 +2065,20 @@ def train_model(
                 test_metrics.num_train_utterances = len(train_dataset)
                 test_metrics.batch_size = batch_size
                 best_metrics = test_metrics
+
+    # Print aggregate phase breakdown (excluding warmup epoch 0)
+    if profile and agg_phase_epochs > 0:
+        total_agg = sum(agg_phase_times.values())
+        num_batches = len(train_loader)
+        logger.info("")
+        logger.info(f"AGGREGATE PHASE BREAKDOWN (epochs 2-{epochs}, {agg_phase_epochs} epochs):")
+        for phase, secs in agg_phase_times.items():
+            avg = secs / agg_phase_epochs
+            pct = 100.0 * secs / total_agg if total_agg > 0 else 0
+            per_batch_ms = 1000.0 * avg / num_batches
+            logger.info(
+                f"  {phase:<20s} {avg:>7.1f}s/ep ({pct:>5.1f}%)  {per_batch_ms:>7.1f}ms/batch"
+            )
 
     return model, best_metrics
 
@@ -2421,6 +2536,14 @@ def main():
         help="Force all sequences to this fixed length (for debugging boundary handling). "
         "Sequences shorter are padded, longer are truncated.",
     )
+    train_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable per-phase GPU timing breakdown. Inserts cuda.synchronize() barriers "
+        "between phases (data transfer, encoder, CRF forward, gold scoring, backward, "
+        "optimizer) to measure wall-clock time accurately. This prevents async overlap "
+        "and will slow training — use for diagnostics only.",
+    )
 
     # Compare
     compare_parser = subparsers.add_parser(
@@ -2480,6 +2603,7 @@ def main():
             log_every=args.log_every,
             crf_reg=args.crf_reg,
             fixed_length=args.fixed_length,
+            profile=args.profile,
         )
         # Print training summary with throughput
         k = 1 if args.model in ("pytorch-crf", "linear") else args.max_duration

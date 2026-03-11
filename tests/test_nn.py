@@ -638,8 +638,9 @@ class TestBoundaryProjections:
         """compute_loss with use_boundary_projections=True produces finite loss
         and both boundary layers receive non-zero gradients."""
         torch.manual_seed(42)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_boundary_projections=True
+        )
         hidden_states = torch.randn(2, 20, 16)
         lengths = torch.full((2,), 20)
         labels = torch.randint(0, 4, (2, 20))
@@ -656,15 +657,15 @@ class TestBoundaryProjections:
     def test_boundary_projections_hidden_dim_none_raises(self):
         """use_boundary_projections=True with hidden_dim=None raises ValueError."""
         with pytest.raises(ValueError, match="hidden_dim"):
-            SemiMarkovCRFHead(num_classes=4, max_duration=8,
-                              use_boundary_projections=True)
+            SemiMarkovCRFHead(num_classes=4, max_duration=8, use_boundary_projections=True)
 
     def test_boundary_projections_zero_weights_equals_no_boundary(self):
         """Boundary model with zeroed weights matches no-boundary model loss."""
         torch.manual_seed(7)
         crf_base = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
-        crf_boundary = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                         use_boundary_projections=True)
+        crf_boundary = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_boundary_projections=True
+        )
 
         # Copy all shared parameters from base to boundary model
         with torch.no_grad():
@@ -688,11 +689,11 @@ class TestBoundaryProjections:
     def test_boundary_projections_non_streaming_backend_raises(self):
         """Boundary guard raises ValueError for non-streaming backends."""
         torch.manual_seed(0)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_boundary_projections=True
+        )
         hidden_states = torch.randn(2, 10, 16)
         lengths = torch.full((2,), 10)
-        labels = torch.randint(0, 4, (2, 10))
 
         # forward() also accepts dp_standard
         for bad_backend in ("exact", "binary_tree_sharded", "dp_standard"):
@@ -704,14 +705,16 @@ class TestBoundaryProjections:
             with pytest.raises(ValueError, match="[Bb]oundary"):
                 crf.decode(hidden_states, lengths, backend=bad_backend, use_triton=False)
             with pytest.raises(ValueError, match="[Bb]oundary"):
-                crf.decode_with_traceback(hidden_states, lengths, backend=bad_backend,
-                                          use_triton=False)
+                crf.decode_with_traceback(
+                    hidden_states, lengths, backend=bad_backend, use_triton=False
+                )
 
     def test_boundary_projections_decode_with_traceback(self):
         """Sum of segment scores matches Viterbi score from decode_with_traceback."""
         torch.manual_seed(99)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_boundary_projections=True
+        )
         hidden_states = torch.randn(2, 20, 16)
         lengths = torch.full((2,), 20)
 
@@ -722,18 +725,23 @@ class TestBoundaryProjections:
             assert len(segments) > 0
             seg_score_sum = sum(seg.score for seg in segments)
             viterbi_score = result.scores[b].item()
-            assert abs(seg_score_sum - viterbi_score) < 1e-4, (
-                f"Batch {b}: seg_score_sum={seg_score_sum:.6f} != viterbi_score={viterbi_score:.6f}"
-            )
+            assert (
+                abs(seg_score_sum - viterbi_score) < 1e-4
+            ), f"Batch {b}: seg_score_sum={seg_score_sum:.6f} != viterbi_score={viterbi_score:.6f}"
 
     def test_boundary_grad_with_frozen_geometric_duration(self):
         """With frozen geometric duration, boundary layers still get non-zero gradients."""
         from flash_semicrf.duration import GeometricDuration
+
         torch.manual_seed(5)
         dur = GeometricDuration(max_duration=8, num_classes=4, learn_rate=False)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                duration_distribution=dur,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            duration_distribution=dur,
+            use_boundary_projections=True,
+        )
         hidden_states = torch.randn(2, 20, 16)
         lengths = torch.full((2,), 20)
         labels = torch.randint(0, 4, (2, 20))
@@ -751,8 +759,9 @@ class TestBoundaryProjections:
     def test_boundary_grad_finite_difference(self):
         """Finite-difference gradient check on proj_start_layer.weight."""
         torch.manual_seed(13)
-        crf = SemiMarkovCRFHead(num_classes=3, max_duration=4, hidden_dim=8,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=3, max_duration=4, hidden_dim=8, use_boundary_projections=True
+        )
         # Use double precision for FD check
         crf = crf.double()
         hidden_states = torch.randn(1, 6, 8, dtype=torch.float64, requires_grad=True)
@@ -766,8 +775,9 @@ class TestBoundaryProjections:
 
     def test_extra_repr_includes_boundary(self):
         """extra_repr includes 'use_boundary_projections=True' when enabled."""
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_boundary_projections=True
+        )
         assert "use_boundary_projections=True" in crf.extra_repr()
 
         crf_no_boundary = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
@@ -780,6 +790,7 @@ class TestScoreGoldBoundary:
     def test_score_gold_T1_boundary(self):
         """Verify T=1 branch in score_gold_vectorized with boundary projections."""
         from flash_semicrf.helpers import score_gold_vectorized
+
         torch.manual_seed(0)
         batch, C = 2, 4
         cum_scores = torch.randn(batch, 2, C, dtype=torch.float64)
@@ -794,8 +805,14 @@ class TestScoreGoldBoundary:
             cum_scores, labels, lengths, transition, duration_bias, max_duration=4
         )
         score_with_boundary = score_gold_vectorized(
-            cum_scores, labels, lengths, transition, duration_bias, max_duration=4,
-            proj_start=proj_start, proj_end=proj_end
+            cum_scores,
+            labels,
+            lengths,
+            transition,
+            duration_bias,
+            max_duration=4,
+            proj_start=proj_start,
+            proj_end=proj_end,
         )
 
         # Expected delta: proj_start[b, 0, label[b]] + proj_end[b, 0, label[b]]
@@ -808,6 +825,7 @@ class TestScoreGoldBoundary:
     def test_score_gold_K1_boundary(self):
         """Verify K=1 branch in score_gold_vectorized with boundary projections."""
         from flash_semicrf.helpers import score_gold_vectorized
+
         torch.manual_seed(1)
         batch, T, C = 2, 6, 4
         cum_scores = torch.randn(batch, T + 1, C, dtype=torch.float64)
@@ -822,8 +840,14 @@ class TestScoreGoldBoundary:
             cum_scores, labels, lengths, transition, duration_bias, max_duration=1
         )
         score_with_boundary = score_gold_vectorized(
-            cum_scores, labels, lengths, transition, duration_bias, max_duration=1,
-            proj_start=proj_start, proj_end=proj_end
+            cum_scores,
+            labels,
+            lengths,
+            transition,
+            duration_bias,
+            max_duration=1,
+            proj_start=proj_start,
+            proj_end=proj_end,
         )
 
         # For K=1, each position t is its own segment: delta = sum_t proj_start[b,t,lbl] + proj_end[b,t,lbl]
@@ -842,6 +866,7 @@ class TestParameterPenaltyDurationGating:
     def test_parameter_penalty_excludes_frozen_duration(self):
         """parameter_penalty excludes duration bias when duration is frozen."""
         from flash_semicrf.duration import GeometricDuration
+
         dur_frozen = GeometricDuration(max_duration=8, num_classes=4, learn_rate=False)
         crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, duration_distribution=dur_frozen)
 
@@ -861,9 +886,9 @@ class TestParameterPenaltyDurationGating:
     def test_parameter_penalty_includes_learnable_geometric_rate(self):
         """parameter_penalty includes duration bias when geometric has learn_rate=True."""
         from flash_semicrf.duration import GeometricDuration
+
         dur_learnable = GeometricDuration(max_duration=8, num_classes=4, learn_rate=True)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8,
-                                duration_distribution=dur_learnable)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, duration_distribution=dur_learnable)
 
         penalty = crf.parameter_penalty()
         expected = crf.transition.norm(p=2).pow(2) + crf.duration_bias.norm(p=2).pow(2)
@@ -872,11 +897,16 @@ class TestParameterPenaltyDurationGating:
     def test_parameter_penalty_includes_boundary_projections(self):
         """parameter_penalty always includes boundary projections when enabled."""
         from flash_semicrf.duration import GeometricDuration
+
         # With both frozen duration and boundary projections
         dur_frozen = GeometricDuration(max_duration=8, num_classes=4, learn_rate=False)
-        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16,
-                                duration_distribution=dur_frozen,
-                                use_boundary_projections=True)
+        crf = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            duration_distribution=dur_frozen,
+            use_boundary_projections=True,
+        )
 
         penalty = crf.parameter_penalty()
         expected = (

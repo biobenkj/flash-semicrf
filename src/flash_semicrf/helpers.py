@@ -419,7 +419,7 @@ def score_gold_vectorized(
         total_per_segment = total_per_segment + start_scores
 
     if proj_end is not None:
-        end_scores = proj_end[b_idx, safe_ends, seg_labels]        # (batch, max_seg)
+        end_scores = proj_end[b_idx, safe_ends, seg_labels]  # (batch, max_seg)
         total_per_segment = total_per_segment + end_scores
 
     # Step 5: Sum with masking

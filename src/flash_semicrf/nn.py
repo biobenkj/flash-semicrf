@@ -160,9 +160,7 @@ class SemiMarkovCRFHead(nn.Module):
         # Requires hidden_dim so we have encoder representations to project from.
         if use_boundary_projections:
             if hidden_dim is None:
-                raise ValueError(
-                    "use_boundary_projections=True requires hidden_dim to be provided"
-                )
+                raise ValueError("use_boundary_projections=True requires hidden_dim to be provided")
             self.proj_start_layer = nn.Linear(hidden_dim, num_classes, bias=False)
             self.proj_end_layer = nn.Linear(hidden_dim, num_classes, bias=False)
             nn.init.normal_(self.proj_start_layer.weight, std=init_scale)
@@ -240,7 +238,7 @@ class SemiMarkovCRFHead(nn.Module):
             return None, None
         return (
             self.proj_start_layer(hidden_states).double(),  # (batch, T, C)
-            self.proj_end_layer(hidden_states).double(),    # (batch, T, C)
+            self.proj_end_layer(hidden_states).double(),  # (batch, T, C)
         )
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
@@ -501,7 +499,12 @@ class SemiMarkovCRFHead(nn.Module):
             # Use exact backend via semimarkov.py (_dp_scan_streaming)
             partition = self._forward_exact(scores, lengths, "log")
 
-        return {"partition": partition, "cum_scores": cum_scores, "proj_start": proj_start, "proj_end": proj_end}
+        return {
+            "partition": partition,
+            "cum_scores": cum_scores,
+            "proj_start": proj_start,
+            "proj_end": proj_end,
+        }
 
     def compute_loss(
         self,
@@ -774,8 +777,8 @@ class SemiMarkovCRFHead(nn.Module):
 
             for b in range(batch):
                 seq_len = int(lengths[b].item())
-                proj_start_b = proj_start[b:b+1] if proj_start is not None else None
-                proj_end_b = proj_end[b:b+1] if proj_end is not None else None
+                proj_start_b = proj_start[b : b + 1] if proj_start is not None else None
+                proj_end_b = proj_end[b : b + 1] if proj_end is not None else None
                 if seq_len > max_traceback_length:
                     # Skip traceback for long sequences
                     all_segments.append([])
@@ -795,7 +798,7 @@ class SemiMarkovCRFHead(nn.Module):
                 else:
                     # Use _traceback_single for per-sequence Viterbi with backpointers
                     segments = self._traceback_single(
-                        cum_scores[b:b+1], seq_len, proj_start_b, proj_end_b
+                        cum_scores[b : b + 1], seq_len, proj_start_b, proj_end_b
                     )
                     all_segments.append(segments)
                     # Compute max score from segments
@@ -883,7 +886,7 @@ class SemiMarkovCRFHead(nn.Module):
         cum_scores: Tensor,  # (1, T+1, C)
         seq_len: int,
         proj_start_b: Optional[Tensor] = None,  # (1, T, C)
-        proj_end_b: Optional[Tensor] = None,    # (1, T, C)
+        proj_end_b: Optional[Tensor] = None,  # (1, T, C)
     ) -> list[Segment]:
         """Viterbi traceback for single sequence. O(TC) memory."""
         device = cum_scores.device
@@ -954,7 +957,11 @@ class SemiMarkovCRFHead(nn.Module):
             # computes: max_{c_src} [alpha[0, c_src] + segment_score + transition[c_src, c_dest]]
             # where alpha[0, c_src] = 0, so transition from c_prev is part of the score
             seg_score = self._compute_segment_score(
-                cum_scores[0], start, end, c, c_prev,
+                cum_scores[0],
+                start,
+                end,
+                c,
+                c_prev,
                 proj_start_b=proj_start_b[0] if proj_start_b is not None else None,
                 proj_end_b=proj_end_b[0] if proj_end_b is not None else None,
             )
@@ -1010,7 +1017,11 @@ class SemiMarkovCRFHead(nn.Module):
                 # computes: max_{c_src} [alpha[0, c_src] + segment_score + transition[c_src, c_dest]]
                 # where alpha[0, c_src] = 0, so transition from c_prev is part of the score
                 seg_score = self._compute_segment_score(
-                    cum_scores[b], start, end, c, c_prev,
+                    cum_scores[b],
+                    start,
+                    end,
+                    c,
+                    c_prev,
                     proj_start_b=proj_start[b] if proj_start is not None else None,
                     proj_end_b=proj_end[b] if proj_end is not None else None,
                 )
@@ -1034,7 +1045,7 @@ class SemiMarkovCRFHead(nn.Module):
         label: int,
         prev_label: Optional[int],
         proj_start_b: Optional[Tensor] = None,  # (T, C)
-        proj_end_b: Optional[Tensor] = None,    # (T, C)
+        proj_end_b: Optional[Tensor] = None,  # (T, C)
     ) -> float:
         """Compute content + duration_bias + transition + boundary for a segment."""
         # Content score
