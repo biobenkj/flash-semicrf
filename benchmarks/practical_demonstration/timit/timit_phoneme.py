@@ -1051,6 +1051,177 @@ class TIMITModelPytorchCRF(nn.Module):
 
 
 # =============================================================================
+# Lightning Integration (optional)
+# =============================================================================
+
+try:
+    import lightning.pytorch as L
+
+    HAS_LIGHTNING = True
+except ImportError:
+    try:
+        import pytorch_lightning as L  # type: ignore[no-redef]
+
+        HAS_LIGHTNING = True
+    except ImportError:
+        HAS_LIGHTNING = False
+
+
+def timit_collate_for_lightning(batch: list[dict]) -> dict:
+    """Collate a TIMIT batch for :class:`SemiCRFLightningModule`.
+
+    Wraps :func:`collate_timit` and renames ``"features"`` → ``"inputs"`` so the
+    batch is compatible with :class:`~flash_semicrf.SemiCRFLightningModule`, which
+    reads ``batch["inputs"]`` in every step method.
+
+    The ``"lengths"`` key (plural) is already produced by :func:`collate_timit`.
+    ``"utterance_ids"`` is kept as a list and passed through unchanged.
+    """
+    out = collate_timit(batch)
+    out["inputs"] = out.pop("features")
+    return out
+
+
+if HAS_LIGHTNING:
+    from flash_semicrf import SemiCRFLightningModule
+
+    class TIMITDataModule(L.LightningDataModule):
+        """LightningDataModule for TIMIT phoneme segmentation.
+
+        Computes normalization statistics from the training set and applies them to
+        the test set, ensuring consistent z-score normalization across splits.
+        Lightning automatically wraps the DataLoader with :class:`DistributedSampler`
+        in DDP — do NOT construct it manually.
+        """
+
+        def __init__(
+            self,
+            data_dir: Path,
+            batch_size: int = 32,
+            num_workers: int = 0,
+            max_length: int | None = None,
+        ):
+            super().__init__()
+            self.data_dir = data_dir
+            self.batch_size = batch_size
+            self.num_workers = num_workers
+            self.max_length = max_length
+
+            self.train_dataset: TIMITDataset | None = None
+            self.val_dataset: TIMITDataset | None = None
+
+        @property
+        def input_dim(self) -> int:
+            """Feature dimension — available after :meth:`setup` is called."""
+            if self.train_dataset is None:
+                raise RuntimeError("Call setup() before accessing input_dim.")
+            return int(self.train_dataset[0]["features"].shape[-1])
+
+        def setup(self, stage=None):
+            # Train dataset computes normalization stats from its own data
+            self.train_dataset = TIMITDataset(
+                self.data_dir / "train.jsonl",
+                max_length=self.max_length,
+                normalize=True,
+            )
+            # Test dataset inherits train stats for consistent normalization
+            self.val_dataset = TIMITDataset(
+                self.data_dir / "test.jsonl",
+                max_length=self.max_length,
+                normalize=True,
+                mean=self.train_dataset.mean,
+                std=self.train_dataset.std,
+            )
+
+        def train_dataloader(self) -> DataLoader:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                collate_fn=timit_collate_for_lightning,
+            )
+
+        def val_dataloader(self) -> DataLoader:
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=timit_collate_for_lightning,
+            )
+
+        def predict_dataloader(self) -> DataLoader:
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=timit_collate_for_lightning,
+            )
+
+    class TIMITLightningModule(SemiCRFLightningModule):
+        """SemiCRFLightningModule subclass with TIMIT-specific validation metrics.
+
+        Extends the base Lightning module with per-epoch Phone Error Rate (PER)
+        and boundary F1 computation during validation.  Viterbi decode runs
+        under :func:`torch.no_grad` (already guaranteed by Lightning's val loop)
+        and reuses the hidden states computed for the NLL loss.
+
+        Additional logged metrics:
+            - ``val/per`` — Phone Error Rate (Levenshtein / reference phones)
+            - ``val/boundary_f1`` — Boundary F1 at exact match (tolerance = 0)
+            - ``val/boundary_f1_tol2`` — Boundary F1 at ±2 frame tolerance
+
+        DDP note: ``val/per`` is per-rank (each rank computes PER from its own
+        shard).  For exact cross-rank PER, gather predictions before computing.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._val_predictions: list[list[int]] = []
+            self._val_references: list[list[int]] = []
+
+        def validation_step(self, batch: dict, batch_idx: int) -> Tensor:
+            """NLL loss + Viterbi decode for PER/F1 accumulation."""
+            # Log NLL loss via the base implementation (handles uncertainty stats too)
+            loss = super().validation_step(batch, batch_idx)
+
+            # Second encoder pass for Viterbi — acceptable in a benchmark context.
+            # The Lightning val loop already runs under torch.no_grad().
+            hidden = self._encode(batch["inputs"])
+            result = self.crf.decode_with_traceback(hidden, batch["lengths"])
+
+            for i, seg_list in enumerate(result.segments):
+                seq_len = int(batch["lengths"][i].item())
+                pred_labels = [0] * seq_len
+                for seg in seg_list:
+                    # flash_semicrf.Segment uses inclusive end; convert to exclusive range
+                    for j in range(seg.start, min(seg.end + 1, seq_len)):
+                        pred_labels[j] = seg.label
+                self._val_predictions.append(pred_labels)
+                self._val_references.append(batch["labels"][i, :seq_len].cpu().tolist())
+
+            return loss
+
+        def on_validation_epoch_end(self) -> None:
+            """Compute and log PER + boundary F1 over the full validation epoch."""
+            if not self._val_predictions:
+                return
+            per = compute_phone_error_rate(self._val_predictions, self._val_references)
+            boundary = compute_boundary_metrics(self._val_predictions, self._val_references)
+            self.log("val/per", per, prog_bar=True, sync_dist=True)
+            self.log("val/boundary_f1", boundary["boundary_f1_tol0"], sync_dist=True)
+            self.log(
+                "val/boundary_f1_tol2",
+                boundary.get("boundary_f1_tol2", 0.0),
+                sync_dist=True,
+            )
+            self._val_predictions.clear()
+            self._val_references.clear()
+
+
+# =============================================================================
 # Evaluation Metrics
 # =============================================================================
 
@@ -2578,6 +2749,67 @@ def main():
         help="Directory for duration distribution plots (requires matplotlib)",
     )
 
+    # Train with Lightning (optional — requires flash-semicrf[lightning])
+    if HAS_LIGHTNING:
+        lightning_parser = subparsers.add_parser(
+            "train-lightning",
+            help="Train with PyTorch Lightning (supports multi-GPU DDP). "
+            "Requires: pip install flash-semicrf[lightning]",
+        )
+        lightning_parser.add_argument("--data-dir", type=Path, required=True)
+        lightning_parser.add_argument(
+            "--model",
+            choices=["linear", "semicrf"],
+            default="semicrf",
+            help="Model type: linear (K=1 semi-CRF), semicrf (K>1 semi-CRF)",
+        )
+        lightning_parser.add_argument("--max-duration", type=int, default=30)
+        lightning_parser.add_argument("--hidden-dim", type=int, default=256)
+        lightning_parser.add_argument("--num-layers", type=int, default=3)
+        lightning_parser.add_argument("--epochs", type=int, default=50)
+        lightning_parser.add_argument("--batch-size", type=int, default=32)
+        lightning_parser.add_argument("--lr", type=float, default=1e-3)
+        lightning_parser.add_argument(
+            "--crf-lr-scale",
+            type=float,
+            default=0.1,
+            help="LR multiplier for CRF structural params (transition, duration). "
+            "Projection layers use the full --lr.",
+        )
+        lightning_parser.add_argument(
+            "--crf-reg",
+            type=float,
+            default=0.0,
+            help="L2 regularization weight for CRF structural params (penalty_weight). "
+            "Typical values: 0.001–0.1.",
+        )
+        lightning_parser.add_argument(
+            "--devices",
+            default="-1",
+            help="GPUs to use: -1 for all visible (default), count (e.g. 2), "
+            "or specific indices (e.g. 2,3). "
+            "Set CUDA_VISIBLE_DEVICES=2,3 to restrict which GPUs are visible.",
+        )
+        lightning_parser.add_argument(
+            "--accelerator", type=str, default="auto", help="gpu, cpu, or auto"
+        )
+        lightning_parser.add_argument(
+            "--strategy",
+            type=str,
+            default="auto",
+            help="Training strategy: ddp, auto. "
+            "Use ddp with gradient_checkpointing=True and find_unused_parameters=False.",
+        )
+        lightning_parser.add_argument(
+            "--num-workers", type=int, default=0, help="DataLoader worker processes"
+        )
+        lightning_parser.add_argument(
+            "--max-length",
+            type=int,
+            default=None,
+            help="Truncate sequences longer than this many frames.",
+        )
+
     args = parser.parse_args()
 
     if args.command == "preprocess":
@@ -2677,6 +2909,92 @@ def main():
             corpus_stats = load_corpus_duration_stats(args.data_dir)
             args.plot_dir.mkdir(parents=True, exist_ok=True)
             plot_duration_distributions(results, corpus_stats, args.plot_dir)
+
+    elif args.command == "train-lightning":
+        if not HAS_LIGHTNING:
+            print(
+                "PyTorch Lightning is required for this command. "
+                "Install with: pip install flash-semicrf[lightning]"
+            )
+            return
+
+        from flash_semicrf import UncertaintySemiMarkovCRFHead
+
+        # Parse --devices: "1" → 1 (int), "2,3" → [2, 3] (list), "-1" → -1 (all)
+        raw_devices = str(args.devices)
+        if "," in raw_devices:
+            devices = [int(d) for d in raw_devices.split(",")]
+        else:
+            devices = int(raw_devices)
+
+        # Build DataModule — setup() computes train normalization stats and
+        # passes them to the test dataset for consistent z-score normalization.
+        datamodule = TIMITDataModule(
+            data_dir=args.data_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            max_length=args.max_length,
+        )
+        datamodule.setup()
+        input_dim = datamodule.input_dim
+
+        k = 1 if args.model == "linear" else args.max_duration
+
+        encoder = BiLSTMEncoder(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+        )
+        crf = UncertaintySemiMarkovCRFHead(
+            num_classes=NUM_PHONES,
+            max_duration=k,
+            hidden_dim=args.hidden_dim,
+        )
+        model = TIMITLightningModule(
+            encoder=encoder,
+            crf=crf,
+            lr=args.lr,
+            crf_lr_scale=args.crf_lr_scale,
+            penalty_weight=args.crf_reg,
+            scheduler="cosine",
+            max_epochs=args.epochs,
+            log_uncertainty_stats=True,
+        )
+
+        # CRITICAL: precision=32 required — streaming semi-CRF needs float64
+        # for the partition function. Mixed-precision produces NaN gradients.
+        trainer = L.Trainer(
+            max_epochs=args.epochs,
+            accelerator=args.accelerator,
+            devices=devices,
+            strategy=args.strategy,
+            precision=32,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+        )
+
+        num_params = sum(p.numel() for p in model.parameters())
+        logger.info(
+            f"Training TIMIT with Lightning: model={args.model} K={k}, "
+            f"devices={devices}, strategy={args.strategy}, params={num_params:,}"
+        )
+        trainer.fit(model, datamodule)
+
+        final_per = trainer.callback_metrics.get("val/per", "N/A")
+        final_loss = trainer.callback_metrics.get("val/loss", "N/A")
+        final_f1 = trainer.callback_metrics.get("val/boundary_f1", "N/A")
+        print("\n" + "=" * 60)
+        print("LIGHTNING TRAINING SUMMARY")
+        print("=" * 60)
+        print(f"  Model:         {args.model} (K={k})")
+        print(f"  Devices:       {devices} x {args.accelerator}")
+        print(f"  Strategy:      {args.strategy}")
+        print(f"  Epochs:        {args.epochs}")
+        print("-" * 60)
+        print(f"  Final val loss:        {final_loss}")
+        print(f"  Final val PER:         {final_per}")
+        print(f"  Final val Boundary F1: {final_f1}")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
