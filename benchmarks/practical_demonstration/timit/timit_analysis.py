@@ -151,19 +151,26 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
     print("Corr = correlation between predicted and reference mean durations")
 
 
-def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
+def compare_models(
+    data_dir: Path,
+    max_duration: int = 30,
+    include_pytorch_ref: bool = False,
+    **kwargs,
+):
     """
-    Compare CRF models in a 4-way comparison validating Triton implementations.
+    Compare CRF models for the paper 3-way table (or 4-way for Triton correctness).
 
     Models compared:
     1. pytorch-crf (optional): External linear CRF baseline
     2. K=1 Triton: Linear CRF via flash-semicrf streaming kernel
-    3. Semi-CRF PyTorch: K>1 with PyTorch streaming (reference baseline)
-    4. Semi-CRF Triton: K>1 with Triton streaming kernel (optimized)
+    3. Semi-CRF PyTorch: K>1 with PyTorch streaming (correctness reference, slow)
+    4. Semi-CRF Triton: K>1 with Triton streaming kernel (paper result)
 
-    Validates:
-    - linear_crf_triton ≈ pytorch_crf (Triton K=1 matches external linear CRF)
-    - semi_crf_triton ≈ semi_crf_pytorch (Triton K>1 matches reference semi-CRF)
+    Args:
+        include_pytorch_ref: If True, also train the K>1 PyTorch reference to
+            validate Triton correctness. Adds ~650 s/epoch on a single GPU.
+            For paper runs, leave False — Triton correctness is covered by
+            scripts/validate_correctness.py.
     """
     results = {}
 
@@ -182,28 +189,29 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
 
     # 2. flash-semicrf K=1 (linear CRF via Triton streaming)
     logger.info("=" * 60)
-    logger.info("Training LINEAR CRF (flash-semicrf K=1, PyTorch)")
+    logger.info("Training LINEAR CRF (flash-semicrf K=1, Triton)")
     logger.info("=" * 60)
     _, linear_metrics = train_model(
         data_dir, model_type="linear", backend="streaming", use_triton=True, **kwargs
     )
     results["linear_crf_triton"] = linear_metrics
 
-    # 3. Semi-CRF with PyTorch streaming (reference semi-CRF baseline)
-    logger.info("=" * 60)
-    logger.info(f"Training SEMI-CRF PYTORCH (K={max_duration}, streaming baseline)")
-    logger.info("=" * 60)
-    _, pytorch_metrics = train_model(
-        data_dir,
-        model_type="semicrf",
-        max_duration=max_duration,
-        backend="streaming",
-        use_triton=False,  # Pure PyTorch - validates Triton correctness
-        **kwargs,
-    )
-    results["semi_crf_pytorch"] = pytorch_metrics
+    # 3. Semi-CRF with PyTorch streaming (Triton correctness reference — optional)
+    if include_pytorch_ref:
+        logger.info("=" * 60)
+        logger.info(f"Training SEMI-CRF PYTORCH (K={max_duration}, correctness reference)")
+        logger.info("=" * 60)
+        _, pytorch_metrics = train_model(
+            data_dir,
+            model_type="semicrf",
+            max_duration=max_duration,
+            backend="streaming",
+            use_triton=False,
+            **kwargs,
+        )
+        results["semi_crf_pytorch"] = pytorch_metrics
 
-    # 4. Semi-CRF with Triton streaming (optimized memory)
+    # 4. Semi-CRF with Triton streaming (paper result)
     logger.info("=" * 60)
     logger.info(f"Training SEMI-CRF TRITON (K={max_duration}, streaming kernel)")
     logger.info("=" * 60)
@@ -221,11 +229,15 @@ def compare_models(data_dir: Path, max_duration: int = 30, **kwargs):
     corpus_stats = load_corpus_duration_stats(data_dir)
 
     # Print comparison
+    has_pytorch_ref = "semi_crf_pytorch" in results
     logger.info("\n" + "=" * 60)
-    logger.info("4-WAY COMPARISON: Linear CRF vs Semi-CRF (baseline vs PyTorch/Triton)")
+    if has_pytorch_ref:
+        logger.info("4-WAY COMPARISON: Linear CRF vs Semi-CRF (baseline vs PyTorch/Triton)")
+    else:
+        logger.info("3-WAY COMPARISON: pytorch-crf | K=1 Triton | K=30 Triton")
     logger.info("=" * 60)
 
-    # Print 4-way comparison table
+    # Print comparison table
     _print_four_way_comparison(results, has_pytorch_crf=HAS_TORCHCRF)
 
     # Duration analysis (with raw TIMIT stats)
@@ -285,125 +297,149 @@ def _print_corpus_comparison(results: dict, corpus_stats: dict):
 
 def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     """Print 4-way comparison table."""
-    # Header
-    if has_pytorch_crf:
+    l_metrics = results["linear_crf_triton"]
+    tr_metrics = results["semi_crf_triton"]
+    py_metrics = results.get("semi_crf_pytorch")  # optional correctness reference
+    p_metrics = results.get("pytorch_crf")
+
+    has_pytorch_ref = py_metrics is not None
+
+    # Header — column layout depends on which models are present
+    if has_pytorch_crf and has_pytorch_ref:
         print(
             f"\n{'Metric':<20} {'pytorch-crf':>12} {'K=1 Triton':>12} "
             f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi':>10}"
         )
         print("-" * 100)
-    else:
+    elif has_pytorch_crf:
+        print(
+            f"\n{'Metric':<20} {'pytorch-crf':>12} {'K=1 Triton':>12} "
+            f"{'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi vs K=1':>14}"
+        )
+        print("-" * 90)
+    elif has_pytorch_ref:
         print(
             f"\n{'Metric':<20} {'K=1 Triton':>12} "
             f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Semi':>10}"
         )
         print("-" * 80)
-
-    # Get metrics
-    l_metrics = results["linear_crf_triton"]
-    py_metrics = results["semi_crf_pytorch"]
-    tr_metrics = results["semi_crf_triton"]
-    p_metrics = results.get("pytorch_crf")
+    else:
+        print(f"\n{'Metric':<20} {'K=1 Triton':>12} {'Semi Triton':>12} {'Δ Semi vs K=1':>14}")
+        print("-" * 65)
 
     # Phone Error Rate (lower is better)
-    if has_pytorch_crf:
-        delta_linear = l_metrics.phone_error_rate - p_metrics.phone_error_rate
-        delta_semi = tr_metrics.phone_error_rate - py_metrics.phone_error_rate
-        print(
-            f"{'Phone Error Rate':<20} {p_metrics.phone_error_rate:>12.4f} "
-            f"{l_metrics.phone_error_rate:>12.4f} {py_metrics.phone_error_rate:>12.4f} "
-            f"{tr_metrics.phone_error_rate:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
-        )
-    else:
-        delta_semi = tr_metrics.phone_error_rate - py_metrics.phone_error_rate
-        print(
-            f"{'Phone Error Rate':<20} {l_metrics.phone_error_rate:>12.4f} "
-            f"{py_metrics.phone_error_rate:>12.4f} {tr_metrics.phone_error_rate:>12.4f} "
-            f"{delta_semi:>+10.4f}"
-        )
-
-    # F1 scores (higher is better)
-    for metric_name, display_name in [("boundary_f1", "Boundary F1"), ("segment_f1", "Segment F1")]:
+    for metric_name, display_name in [
+        ("phone_error_rate", "Phone Error Rate"),
+        ("boundary_f1", "Boundary F1"),
+        ("segment_f1", "Segment F1"),
+    ]:
         l_val = getattr(l_metrics, metric_name)
-        py_val = getattr(py_metrics, metric_name)
         tr_val = getattr(tr_metrics, metric_name)
+        py_val = getattr(py_metrics, metric_name) if py_metrics else None
+        p_val = getattr(p_metrics, metric_name) if p_metrics else None
 
-        if has_pytorch_crf:
-            p_val = getattr(p_metrics, metric_name)
+        if has_pytorch_crf and has_pytorch_ref:
             delta_linear = l_val - p_val
             delta_semi = tr_val - py_val
             print(
                 f"{display_name:<20} {p_val:>12.4f} {l_val:>12.4f} "
                 f"{py_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
             )
-        else:
+        elif has_pytorch_crf:
+            delta_linear = l_val - p_val
+            delta_semi_vs_k1 = tr_val - l_val
+            print(
+                f"{display_name:<20} {p_val:>12.4f} {l_val:>12.4f} "
+                f"{tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi_vs_k1:>+14.4f}"
+            )
+        elif has_pytorch_ref:
             delta_semi = tr_val - py_val
             print(
                 f"{display_name:<20} {l_val:>12.4f} "
                 f"{py_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
             )
+        else:
+            delta_semi_vs_k1 = tr_val - l_val
+            print(f"{display_name:<20} {l_val:>12.4f} {tr_val:>12.4f} {delta_semi_vs_k1:>+14.4f}")
 
     # Boundary F1 tolerances
     print("\nBoundary F1 at different tolerances:")
     for tol in [0, 1, 2]:
         l_val = l_metrics.boundary_f1_tolerances.get(tol, 0)
-        py_val = py_metrics.boundary_f1_tolerances.get(tol, 0)
         tr_val = tr_metrics.boundary_f1_tolerances.get(tol, 0)
+        py_val = py_metrics.boundary_f1_tolerances.get(tol, 0) if py_metrics else None
+        p_val = p_metrics.boundary_f1_tolerances.get(tol, 0) if p_metrics else None
 
-        if has_pytorch_crf:
-            p_val = p_metrics.boundary_f1_tolerances.get(tol, 0)
-            delta_linear = l_val - p_val
-            delta_semi = tr_val - py_val
+        if has_pytorch_crf and has_pytorch_ref:
             print(
-                f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} "
-                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi:>+10.4f}"
+                f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} " f"{py_val:>12.4f} {tr_val:>12.4f}"
             )
+        elif has_pytorch_crf:
+            print(f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} {tr_val:>12.4f}")
+        elif has_pytorch_ref:
+            print(f"  tol={tol:<2} {l_val:>12.4f} {py_val:>12.4f} {tr_val:>12.4f}")
         else:
-            delta_semi = tr_val - py_val
-            print(
-                f"  tol={tol:<2} {l_val:>12.4f} "
-                f"{py_val:>12.4f} {tr_val:>12.4f} {delta_semi:>+10.4f}"
-            )
+            print(f"  tol={tol:<2} {l_val:>12.4f} {tr_val:>12.4f}")
 
     # Timing comparison
     print("\nTiming (lower is better):")
     l_time = l_metrics.training_time_per_epoch
-    py_time = py_metrics.training_time_per_epoch
     tr_time = tr_metrics.training_time_per_epoch
 
-    if has_pytorch_crf:
+    if has_pytorch_crf and has_pytorch_ref:
         p_time = p_metrics.training_time_per_epoch
+        py_time = py_metrics.training_time_per_epoch
         speedup_linear = p_time / l_time if l_time > 0 else 0
         speedup_semi = py_time / tr_time if tr_time > 0 else 0
         print(
             f"{'Train (s/epoch)':<20} {p_time:>12.2f} {l_time:>12.2f} "
             f"{py_time:>12.2f} {tr_time:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
         )
-    else:
+    elif has_pytorch_crf:
+        p_time = p_metrics.training_time_per_epoch
+        speedup_linear = p_time / l_time if l_time > 0 else 0
+        print(
+            f"{'Train (s/epoch)':<20} {p_time:>12.2f} {l_time:>12.2f} "
+            f"{tr_time:>12.2f} {speedup_linear:>9.2f}x"
+        )
+    elif has_pytorch_ref:
+        py_time = py_metrics.training_time_per_epoch
         speedup_semi = py_time / tr_time if tr_time > 0 else 0
         print(
             f"{'Train (s/epoch)':<20} {l_time:>12.2f} "
             f"{py_time:>12.2f} {tr_time:>12.2f} {speedup_semi:>9.2f}x"
         )
+    else:
+        print(f"{'Train (s/epoch)':<20} {l_time:>12.2f} {tr_time:>12.2f}")
 
     l_infer = l_metrics.inference_time
-    py_infer = py_metrics.inference_time
     tr_infer = tr_metrics.inference_time
 
-    if has_pytorch_crf:
+    if has_pytorch_crf and has_pytorch_ref:
         p_infer = p_metrics.inference_time
+        py_infer = py_metrics.inference_time
         speedup_linear = p_infer / l_infer if l_infer > 0 else 0
         speedup_semi = py_infer / tr_infer if tr_infer > 0 else 0
         print(
             f"{'Inference (s)':<20} {p_infer:>12.2f} {l_infer:>12.2f} "
             f"{py_infer:>12.2f} {tr_infer:>12.2f} {speedup_linear:>9.2f}x {speedup_semi:>9.2f}x"
         )
-    else:
+    elif has_pytorch_crf:
+        p_infer = p_metrics.inference_time
+        speedup_linear = p_infer / l_infer if l_infer > 0 else 0
+        print(
+            f"{'Inference (s)':<20} {p_infer:>12.2f} {l_infer:>12.2f} "
+            f"{tr_infer:>12.2f} {speedup_linear:>9.2f}x"
+        )
+    elif has_pytorch_ref:
+        py_infer = py_metrics.inference_time
         speedup_semi = py_infer / tr_infer if tr_infer > 0 else 0
         print(
             f"{'Inference (s)':<20} {l_infer:>12.2f} "
             f"{py_infer:>12.2f} {tr_infer:>12.2f} {speedup_semi:>9.2f}x"
         )
+    else:
+        print(f"{'Inference (s)':<20} {l_infer:>12.2f} {tr_infer:>12.2f}")
 
     # Validation notes
     print("\n" + "=" * 60)
@@ -411,8 +447,11 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     print("=" * 60)
     if has_pytorch_crf:
         print("Linear CRF: K=1 Triton should match pytorch-crf accuracy (Δ Linear ≈ 0)")
-    print("Semi-CRF: Triton should match PyTorch baseline accuracy (Δ Semi ≈ 0)")
-    print("Timing: Triton speedup shown as multiplier (e.g., 2.0x = twice as fast)")
+    if has_pytorch_ref:
+        print("Semi-CRF: Triton should match PyTorch baseline accuracy (Δ Semi ≈ 0)")
+    print(
+        "Timing: speedup shown as multiplier vs the slower reference (e.g., 2.0x = twice as fast)"
+    )
 
 
 # =============================================================================

@@ -241,6 +241,13 @@ def main():
         default=None,
         help="Directory for duration distribution plots (requires matplotlib)",
     )
+    compare_parser.add_argument(
+        "--pytorch-ref",
+        action="store_true",
+        default=False,
+        help="Also train the K>1 PyTorch reference model to validate Triton correctness. "
+        "Adds ~650 s/epoch — omit for standard paper runs.",
+    )
 
     # Train with Lightning (optional — requires flash-semicrf[lightning])
     if HAS_LIGHTNING:
@@ -447,6 +454,7 @@ def main():
         results = compare_models(
             args.data_dir,
             max_duration=args.max_duration,
+            include_pytorch_ref=args.pytorch_ref,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             epochs=args.epochs,
