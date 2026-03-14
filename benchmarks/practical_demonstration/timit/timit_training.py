@@ -272,6 +272,7 @@ def train_model(
     crf_reg: float = 0.0,
     fixed_length: int | None = None,
     profile: bool = False,
+    precision: str = "float32",
 ) -> tuple[TIMITModel | TIMITModelPytorchCRF, TIMITMetrics]:
     """Train a model and return it with metrics.
 
@@ -333,6 +334,7 @@ def train_model(
             encoder=encoder,
             max_duration=k,
             hidden_dim=hidden_dim,
+            precision=precision,
         ).to(device)
     else:  # semicrf
         k = max_duration
@@ -340,6 +342,7 @@ def train_model(
             encoder=encoder,
             max_duration=k,
             hidden_dim=hidden_dim,
+            precision=precision,
         ).to(device)
 
     logger.info(

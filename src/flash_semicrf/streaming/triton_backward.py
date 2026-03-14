@@ -274,7 +274,7 @@ if HAS_TRITON:
         # Cast seq_len to int32 to match loop variable type from tl.range
         seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
         log_Z = tl.load(log_Z_ptr + batch_idx).to(tl.float64)
-        grad_out = tl.load(grad_output_ptr + batch_idx)
+        grad_out = tl.load(grad_output_ptr + batch_idx).to(COMPUTE_DTYPE)
 
         # Clamp indices to ensure address calculations stay within bounds
         # even for masked-out threads (indices C to C_PAD-1).
@@ -747,6 +747,12 @@ if HAS_TRITON:
                                 # Guard: If global_max was all NEG_INF, set scale to 0
                                 scale = tl.where(is_global_max_neginf, 0.0, scale)
 
+                                # Cast to COMPUTE_DTYPE for Pass 2 marginal/gradient computation.
+                                # log_scale was computed in float64 (critical precision), but the
+                                # resulting scale and global_max_safe are O(1) values safe for float32.
+                                scale = scale.to(COMPUTE_DTYPE)
+                                global_max_safe = global_max_safe.to(COMPUTE_DTYPE)
+
                                 # === PASS 2: Compute marginals and gradients using global statistics ===
                                 # === Tile loop over c_dst dimension ===
                                 # NOTE: Using tl.static_range to ensure consistent global_max/scale across all tiles
@@ -871,7 +877,9 @@ if HAS_TRITON:
                                     # scale is SCALAR, computed once in Pass 1: exp(global_max + log_norm - log_Z)
                                     # This ensures ALL tiles use the same scale factor
                                     marginal_tile = marginal_unnorm * scale
-                                    marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0)
+                                    marginal_tile = tl.where(tile_mask_2d, marginal_tile, 0.0).to(
+                                        COMPUTE_DTYPE
+                                    )
 
                                     # === Accumulate gradients from this tile ===
 
@@ -883,7 +891,7 @@ if HAS_TRITON:
                                     marginal_sum_src_tile = tl.sum(marginal_tile, axis=1)
                                     marginal_sum_src_tile = tl.where(
                                         c_dst_mask_tile, marginal_sum_src_tile, 0.0
-                                    )
+                                    ).to(COMPUTE_DTYPE)
                                     marginal_sum_src_tile_scaled = marginal_sum_src_tile * grad_out
 
                                     # grad_cum_scores[end_pos]: +marginal (varies by k, must use atomic)
@@ -911,9 +919,9 @@ if HAS_TRITON:
                                         ],  # Broadcast to [C_PAD, TILE_C]
                                         0.0,
                                     )
-                                    grad_cs_t_local -= tl.sum(
-                                        scatter_values, axis=1
-                                    )  # Sum to [C_PAD]
+                                    grad_cs_t_local -= tl.sum(scatter_values, axis=1).to(
+                                        COMPUTE_DTYPE
+                                    )  # Sum to [C_PAD]; cast needed: 0.0 literal in tl.where is f64
 
                                     # grad_transition: marginal_T_tile = (C_PAD, TILE_C)
                                     # Duration k uses index k-1 (same convention as forward pass)
@@ -951,9 +959,9 @@ if HAS_TRITON:
                                         ],  # Broadcast to [C_PAD, TILE_C]
                                         0.0,
                                     )
-                                    grad_db_k_local += tl.sum(
-                                        scatter_values_db, axis=1
-                                    )  # Sum to [C_PAD]
+                                    grad_db_k_local += tl.sum(scatter_values_db, axis=1).to(
+                                        COMPUTE_DTYPE
+                                    )  # Sum to [C_PAD]; cast needed: 0.0 literal in tl.where is f64
 
                                     # grad_proj_start[t] and grad_proj_end[end_pos-1]
                                     if HAS_BOUNDARIES:
