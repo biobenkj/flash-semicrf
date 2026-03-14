@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
-    """Print duration distribution analysis comparing models (4-way)."""
+    """Print duration distribution analysis comparing models."""
     print("\n" + "=" * 60)
     print("DURATION ANALYSIS (frames @ 10ms)")
     print("=" * 60)
@@ -39,21 +39,24 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
     print("Lower MAE = better duration modeling. Semi-CRF should excel here.")
     print("Semi PyTorch and Semi Triton should have similar MAE (validates Triton).\n")
 
-    # Get reference durations from semi_crf_triton (or pytorch, they should be same)
-    ref_model = "semi_crf_triton"
-    ref_stats = results[ref_model].duration_stats["per_phone"]
+    # Get reference durations from semi_crf_triton
+    ref_stats = results["semi_crf_triton"].duration_stats["per_phone"]
 
     # Select phones to display (most frequent + phonetically interesting)
     interesting_phones = ["aa", "iy", "eh", "ah", "p", "t", "k", "s", "sh", "n", "l", "sil"]
     display_phones = [p for p in interesting_phones if ref_stats[p]["ref_count"] > 50]
 
-    # Get stats from all models
+    # Get stats from available models
     l_stats = results["linear_crf_triton"].duration_stats["per_phone"]
-    py_stats = results["semi_crf_pytorch"].duration_stats["per_phone"]
     tr_stats = results["semi_crf_triton"].duration_stats["per_phone"]
+    py_model = results.get("semi_crf_pytorch")
+    py_stats = py_model.duration_stats["per_phone"] if py_model else None
     p_stats = results["pytorch_crf"].duration_stats["per_phone"] if has_pytorch_crf else None
 
-    if has_pytorch_crf:
+    has_pytorch_ref = py_stats is not None
+
+    if has_pytorch_crf and has_pytorch_ref:
+        # 4-column: p-crf | K=1 | Py | Tr
         print(
             f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
             f"{'MAE p':>6} {'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
@@ -71,7 +74,6 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             py_mae = py_stats[phone]["mae"]
             tr_mae = tr_stats[phone]["mae"]
 
-            # Highlight if semi-CRF is better than linear
             best_semi_mae = min(py_mae, tr_mae)
             s_marker = "*" if best_semi_mae < p_mae and best_semi_mae < l_mae else " "
 
@@ -81,11 +83,10 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
                 f"{p_mae:>6.2f} {l_mae:>7.2f} {py_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
             )
 
-        # Overall stats
         print("-" * 90)
         p_overall = results["pytorch_crf"].duration_stats["overall"]
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        py_overall = results["semi_crf_pytorch"].duration_stats["overall"]
+        py_overall = py_model.duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
@@ -102,7 +103,52 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             f"{py_overall['duration_correlation']:>7.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
-    else:
+
+    elif has_pytorch_crf:
+        # 3-column: p-crf | K=1 | Tr
+        print(
+            f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Tr':>6} │ "
+            f"{'MAE p':>6} {'MAE K1':>7} {'MAE Tr':>7}"
+        )
+        print("-" * 75)
+
+        for phone in display_phones:
+            ref_mean = ref_stats[phone]["ref_mean"]
+            p_mean = p_stats[phone]["pred_mean"]
+            l_mean = l_stats[phone]["pred_mean"]
+            tr_mean = tr_stats[phone]["pred_mean"]
+            p_mae = p_stats[phone]["mae"]
+            l_mae = l_stats[phone]["mae"]
+            tr_mae = tr_stats[phone]["mae"]
+
+            s_marker = "*" if tr_mae < p_mae and tr_mae < l_mae else " "
+
+            print(
+                f"{phone:<6} {ref_mean:>6.1f} {p_mean:>6.1f} {l_mean:>6.1f} "
+                f"{tr_mean:>6.1f} │ "
+                f"{p_mae:>6.2f} {l_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
+            )
+
+        print("-" * 75)
+        p_overall = results["pytorch_crf"].duration_stats["overall"]
+        l_overall = results["linear_crf_triton"].duration_stats["overall"]
+        tr_overall = results["semi_crf_triton"].duration_stats["overall"]
+
+        print(
+            f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
+            f"{p_overall['mean_absolute_error']:>6.2f} "
+            f"{l_overall['mean_absolute_error']:>7.2f} "
+            f"{tr_overall['mean_absolute_error']:>6.2f}"
+        )
+        print(
+            f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
+            f"{p_overall['duration_correlation']:>6.3f} "
+            f"{l_overall['duration_correlation']:>7.3f} "
+            f"{tr_overall['duration_correlation']:>6.3f}"
+        )
+
+    elif has_pytorch_ref:
+        # 3-column: K=1 | Py | Tr
         print(
             f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
             f"{'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
@@ -127,10 +173,9 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
                 f"{l_mae:>7.2f} {py_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
             )
 
-        # Overall stats
         print("-" * 70)
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        py_overall = results["semi_crf_pytorch"].duration_stats["overall"]
+        py_overall = py_model.duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
@@ -143,6 +188,41 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{l_overall['duration_correlation']:>7.3f} "
             f"{py_overall['duration_correlation']:>7.3f} "
+            f"{tr_overall['duration_correlation']:>6.3f}"
+        )
+
+    else:
+        # 2-column: K=1 | Tr (default paper run)
+        print(f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Tr':>6} │ " f"{'MAE K1':>7} {'MAE Tr':>7}")
+        print("-" * 55)
+
+        for phone in display_phones:
+            ref_mean = ref_stats[phone]["ref_mean"]
+            l_mean = l_stats[phone]["pred_mean"]
+            tr_mean = tr_stats[phone]["pred_mean"]
+            l_mae = l_stats[phone]["mae"]
+            tr_mae = tr_stats[phone]["mae"]
+
+            s_marker = "*" if tr_mae < l_mae else " "
+
+            print(
+                f"{phone:<6} {ref_mean:>6.1f} {l_mean:>6.1f} "
+                f"{tr_mean:>6.1f} │ "
+                f"{l_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
+            )
+
+        print("-" * 55)
+        l_overall = results["linear_crf_triton"].duration_stats["overall"]
+        tr_overall = results["semi_crf_triton"].duration_stats["overall"]
+
+        print(
+            f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} │ "
+            f"{l_overall['mean_absolute_error']:>7.2f} "
+            f"{tr_overall['mean_absolute_error']:>6.2f}"
+        )
+        print(
+            f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} │ "
+            f"{l_overall['duration_correlation']:>7.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
 
@@ -231,10 +311,14 @@ def compare_models(
     # Print comparison
     has_pytorch_ref = "semi_crf_pytorch" in results
     logger.info("\n" + "=" * 60)
-    if has_pytorch_ref:
-        logger.info("4-WAY COMPARISON: Linear CRF vs Semi-CRF (baseline vs PyTorch/Triton)")
+    if has_pytorch_ref and HAS_TORCHCRF:
+        logger.info("4-WAY COMPARISON: pytorch-crf | K=1 Triton | Semi PyTorch | Semi Triton")
+    elif has_pytorch_ref:
+        logger.info("3-WAY COMPARISON: K=1 Triton | Semi PyTorch | Semi Triton")
+    elif HAS_TORCHCRF:
+        logger.info("3-WAY COMPARISON: pytorch-crf | K=1 Triton | Semi Triton")
     else:
-        logger.info("3-WAY COMPARISON: pytorch-crf | K=1 Triton | K=30 Triton")
+        logger.info("2-WAY COMPARISON: K=1 Triton | Semi Triton")
     logger.info("=" * 60)
 
     # Print comparison table
