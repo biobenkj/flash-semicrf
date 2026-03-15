@@ -124,7 +124,9 @@ class TIMITModel(nn.Module):
 
     def decode(self, features: Tensor, lengths: Tensor, backend: str = "streaming"):
         hidden = self.encoder(features)
-        return self.crf.decode_with_traceback(hidden, lengths, backend=backend)
+        # dp_standard is only valid for the partition function; map to exact for Viterbi
+        decode_backend = "exact" if backend == "dp_standard" else backend
+        return self.crf.decode_with_traceback(hidden, lengths, backend=decode_backend)
 
 
 class TIMITModelPytorchCRF(nn.Module):
