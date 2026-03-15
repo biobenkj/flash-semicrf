@@ -225,11 +225,13 @@ if HAS_TRITON:
             proj_start_base = proj_start_ptr + batch_idx * stride_ps_b
             proj_end_base = proj_end_ptr + batch_idx * stride_ps_b
 
-        # Load transition matrix into registers: (C_PAD, C_PAD)
-        # For static transitions (C, C): load once here
-        # For duration-dependent (K, C, C): load inside k-loop
-        # transition[c_src, c_dst] -> we need transition.T for edge computation
-        # So we load transition_ptr[c_dst, c_src] effectively
+        # Static transition matrix: load once before the t-loop.
+        # Duration-dependent transitions (K, C, C) are loaded inside the k-loop.
+        #
+        # The tensor is stored with convention transition[c_src, c_dst], but the
+        # edge formula needs edge[c_dst, c_src] = segment_score[c_dst] + transition[c_src, c_dst].
+        # Loading with c_dst and c_src strides swapped produces the (C_PAD, C_PAD) matrix
+        # indexed as [c_dst, c_src], i.e., transition transposed. No explicit tl.trans needed.
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
                 transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
@@ -281,7 +283,12 @@ if HAS_TRITON:
                 k_valid = (k <= t) & (k <= K)
                 start_pos = t - k
 
-                # Ring index for alpha[start_pos]
+                # Ring slot for alpha[start_pos].
+                # The ring has K slots addressed by position % K. At each iteration t,
+                # alpha[t] is written to slot t % K. For k in [1, K], start_pos = t - k
+                # ranges over t-1, t-2, ..., t-K. These K consecutive integers have K
+                # distinct residues mod K, so each occupies a different slot and none
+                # has been overwritten by a later timestep. The slot is start_pos % K.
                 ring_k_idx = start_pos % K
 
                 # Load alpha_prev from live ring buffer
@@ -364,10 +371,10 @@ if HAS_TRITON:
                 scores = tl.where(c_mask_2d, scores, NEG_INF)
 
                 if not IS_MAX_SEMIRING:
-                    # Log semiring: logsumexp over c_src (axis=1) -> (C_PAD,)
-                    # Guard against all-NEG_INF case to prevent undefined arithmetic
-                    # Flash Attention pattern: no epsilon needed inside log
-                    # The NEG_INF guard handles the zero case
+                    # Log semiring: logsumexp over c_src (axis=1) -> score_for_k (C_PAD,).
+                    # The all-NEG_INF guard handles t < k (no valid start position):
+                    # max_scores would be NEG_INF, so exp(NEG_INF - 0) underflows to 0,
+                    # giving log(0) = nan. Return NEG_INF directly in that case.
                     max_scores = tl.max(scores, axis=1)
                     is_all_neginf = max_scores < (NEG_INF + 1.0)
                     max_scores_safe = tl.where(is_all_neginf, 0.0, max_scores)
@@ -377,13 +384,18 @@ if HAS_TRITON:
                     # Mask invalid durations and labels
                     score_for_k = tl.where(k_valid & c_mask, score_for_k, NEG_INF)
 
-                    # Online logsumexp: accumulate score_for_k into (m_alpha, l_alpha)
-                    # 2 exp + 0 log per k (vs pairwise: 2 exp + 1 log per k)
+                    # Online logsumexp: accumulate score_for_k into (m_alpha, l_alpha).
+                    # Representation: alpha[t] = m_alpha + log(l_alpha), where m_alpha is
+                    # the running max and l_alpha = sum(exp(x - m_alpha)) for each x seen.
+                    # Cost: 2 exp + 0 log per k, vs 2 exp + 1 log per k for pairwise logsumexp.
                     score_for_k = score_for_k.to(COMPUTE_DTYPE)
                     m_new = tl.maximum(m_alpha, score_for_k)
                     is_m_neginf = m_alpha < (NEG_INF + 1.0)
                     is_score_neginf = score_for_k < (NEG_INF + 1.0)
                     m_new_safe = tl.where(is_m_neginf & is_score_neginf, 0.0, m_new)
+                    # is_m_neginf means the accumulator is still empty (first valid k).
+                    # The standard update l_alpha * exp(m_alpha - m_new_safe) = 0 * exp(-inf - ...)
+                    # is mathematically 0 but can produce nan on some hardware. Start fresh.
                     l_alpha = tl.where(
                         is_m_neginf,
                         tl.exp(score_for_k - m_new_safe),
@@ -460,10 +472,11 @@ if HAS_TRITON:
                     alpha_for_norm = tl.where(active & c_mask, alpha_t, NEG_INF)
                     max_val = tl.max(alpha_for_norm)
 
-                    # Guard against all-NEG_INF case (inactive sequence or numerical issue)
-                    # WORKAROUND: The comparison `max_val < (NEG_INF + 1.0)` fails silently in Triton
-                    # for variable-length sequences due to unclear type/comparison issues.
-                    # Instead, use `active` directly to determine if we should apply shift.
+                    # Use `active` rather than `max_val < (NEG_INF + 1.0)` to determine shift.
+                    # For inactive sequences (t > seq_len) all alpha values are NEG_INF, so
+                    # max_val is NEG_INF, but the float comparison against the NEG_INF constant
+                    # produces incorrect results in Triton due to type ambiguity between the
+                    # int32 loop predicate and the float64 max_val. `active` is the correct gate.
                     shift = tl.where(active, max_val, 0.0)
 
                     # 2. Update cumulative normalization factor
@@ -550,10 +563,8 @@ if HAS_TRITON:
         final_alpha_masked = tl.where(c_mask, final_alpha, NEG_INF)
 
         if not IS_MAX_SEMIRING:
-            # Log semiring: logsumexp over labels + add back cumulative normalization
-            # Guard against all-NEG_INF case to prevent undefined arithmetic
-            # Flash Attention pattern: no epsilon needed inside log
-            # The NEG_INF guard handles the zero case
+            # Log semiring: logsumexp over labels, then restore the cumulative normalization.
+            # All-NEG_INF guard: if no valid path reached seq_len, log(sum(exp(-inf))) = log(0) = nan.
             max_val = tl.max(final_alpha_masked, axis=0)
             is_final_neginf = max_val < (NEG_INF + 1.0)
             max_val_safe = tl.where(is_final_neginf, 0.0, max_val)
@@ -561,8 +572,11 @@ if HAS_TRITON:
             sum_exp = tl.sum(exp_fa, axis=0)
             raw_partition = tl.where(is_final_neginf, NEG_INF, max_val + tl.log(sum_exp))
 
-            # Add back cumulative normalization to get true partition function
-            # final_alpha contains normalized values; accum_log_norm contains the total shift
+            # Restore cumulative normalization to get the true partition function.
+            # final_alpha holds normalized values; accum_log_norm is the total shift removed.
+            # raw_partition is in COMPUTE_DTYPE (possibly float32). Cast to float64 before
+            # adding accum_log_norm: at extreme T, accum_log_norm reaches ~250K, and adding
+            # it to a float32 value loses low-order mantissa bits.
             partition = (raw_partition.to(tl.float64) + accum_log_norm).to(tl.float64)
 
             # DEBUG: Print partition (log_Z) for T=100k diagnostic

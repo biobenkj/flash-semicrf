@@ -559,6 +559,10 @@ if HAS_TRITON:
                             end_pos = t + k
                             # Only process valid end positions
                             if end_pos <= seq_len and end_pos <= T:
+                                # Beta ring uses 2*K slots (double-buffered). The forward ring uses K
+                                # slots and wraps at t % K. If we used the same K slots here, beta[t]
+                                # and beta[t+K] would alias (both map to slot t % K = (t+K) % K = 0),
+                                # causing beta[t+K] to overwrite the slot before beta[t] is read.
                                 end_ring_idx = end_pos % (2 * K)
                                 # Duration k uses index k-1
                                 dur_idx = k - 1
@@ -579,15 +583,19 @@ if HAS_TRITON:
                                 # Clamp alpha_t once per k (reused across tiles)
                                 alpha_t_clamped = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
 
-                                # --- Pass 1: compute global max/sum across all c_dst tiles ---
-                                # global_max is a scalar (max over the full log_joint matrix).
-                                # Must use tl.static_range here: tl.range does not preserve
-                                # scalar loop-carried state (global_max, global_sum_exp) across
-                                # iterations, so each tile would use a different normalization.
+                                # --- Pass 1: compute global max across all c_dst tiles ---
+                                # global_max is a scalar max over the full (C_dst, C_src) log_joint
+                                # matrix. The scale in the marginal computation is then:
+                                #   scale = exp(global_max + log_norm_at_ckpt - log_Z)
+                                # which does not require the global sum — log_Z already serves
+                                # as the partition function. Only global_max is needed here.
+                                #
+                                # Must use tl.static_range: tl.range does not preserve scalar
+                                # loop-carried state (global_max) across iterations, so each
+                                # tile would use a different normalization value.
                                 # static_range unrolls at compile time: O(C_PAD/TILE_C) iters,
                                 # typically 2-8, which is acceptable.
                                 global_max = tl.full((), NEG_INF, dtype=tl.float64)
-                                global_sum_exp = tl.zeros((), dtype=tl.float64)
 
                                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
@@ -691,25 +699,9 @@ if HAS_TRITON:
                                         tile_mask_2d, log_joint_tile, NEG_INF
                                     )
 
-                                    # Compute tile max (reduce over ENTIRE tile to get scalar)
-                                    # This matches PyTorch: local_ref = log_joint.amax(dim=(-2, -1))
-                                    tile_max = tl.max(log_joint_masked)  # Scalar
-
-                                    # Update global max using Flash Attention online pattern
-                                    new_global_max = tl.maximum(global_max, tile_max)
-
-                                    # Rescale previous accumulator
-                                    rescale_factor = tl.exp(global_max - new_global_max)
-                                    global_sum_exp = global_sum_exp * rescale_factor
-
-                                    # Add current tile's contribution
-                                    # new_global_max is scalar, broadcasts automatically
-                                    tile_exp = tl.exp(log_joint_masked - new_global_max)
-                                    tile_sum_exp = tl.sum(tile_exp)  # Scalar (sum over entire tile)
-                                    global_sum_exp = global_sum_exp + tile_sum_exp
-
-                                    # Update global max
-                                    global_max = new_global_max
+                                    # Update global max (scalar, reduce over entire tile)
+                                    tile_max = tl.max(log_joint_masked)
+                                    global_max = tl.maximum(global_max, tile_max)
 
                                 # --- Scale computation (log_norm bridge) ---
                                 # The forward pass shifts alpha at each checkpoint boundary
@@ -883,7 +875,7 @@ if HAS_TRITON:
                                     ).to(COMPUTE_DTYPE)
                                     marginal_sum_src_tile_scaled = marginal_sum_src_tile * grad_out
 
-                                    # grad_cum_scores[end_pos]: +marginal (varies by k, must use atomic)
+                                    # grad_cum_scores[end_pos]: +marginal (end_pos varies by k, must use atomic)
                                     tl.atomic_add(
                                         grad_cs_base
                                         + end_pos * stride_gcs_t
@@ -891,13 +883,18 @@ if HAS_TRITON:
                                         marginal_sum_src_tile_scaled,
                                         mask=c_dst_mask_tile,
                                     )
-                                    # grad_cum_scores[t]: -marginal (same position for all k, accumulate locally)
-                                    # ATOMIC OPTIMIZATION: Scatter-sum pattern to accumulate across K*tiles iterations
-                                    #   1. Create [C_PAD, TILE_C] mask where indices match
-                                    #   2. Broadcast tile values [TILE_C] to masked positions
-                                    #   3. Sum along axis=1 to scatter into [C_PAD] accumulator
-                                    # Reduces K*tiles atomics -> 1 write (e.g., 1000*8=8000 -> 1 at K=1000, C=32)
-                                    # Final write happens after k-loop at line ~1024
+                                    # grad_cum_scores[t]: -marginal (t is fixed for all k and tiles,
+                                    # so we accumulate into grad_cs_t_local and do one atomic at the end).
+                                    #
+                                    # Problem: marginal_sum_src_tile_scaled is indexed by c_dst_tile
+                                    # (TILE_C positions), but grad_cs_t_local is indexed by c_idx (C_PAD).
+                                    # Triton has no scatter-assign, so we simulate it with a mask:
+                                    #   scatter_mask[i, j] = True iff c_idx[i] == c_dst_idx_tile[j]
+                                    # Broadcasting the TILE_C values into matching rows, then summing
+                                    # over the tile axis, effectively does:
+                                    #   grad_cs_t_local[c_dst_idx_tile[j]] -= values[j] for each j.
+                                    # The final atomic write is deferred to after the k-loop, reducing
+                                    # K*tiles atomics to 1 (e.g., 8000 -> 1 at K=1000, C=32, TILE_C=4).
                                     scatter_mask = (
                                         c_idx[:, None] == c_dst_idx_tile[None, :]
                                     )  # [C_PAD, TILE_C]
@@ -934,10 +931,9 @@ if HAS_TRITON:
                                         mask=tile_mask_T,
                                     )
 
-                                    # grad_duration_bias: (unscaled, accumulate locally across tiles)
-                                    # ATOMIC OPTIMIZATION: Same scatter-sum pattern as grad_cum_scores above
-                                    # Reduces tiles atomics -> 1 write per k (e.g., 8 tiles -> 1 at C=32, TILE_C=4)
-                                    # Final write happens after tile loop at line ~989
+                                    # grad_duration_bias: unscaled (launcher applies grad_output via einsum).
+                                    # Same scatter-sum pattern as grad_cum_scores[t] above.
+                                    # Defers atomic to after the tile loop (1 write per k instead of per tile).
                                     scatter_mask_db = (
                                         c_idx[:, None] == c_dst_idx_tile[None, :]
                                     )  # [C_PAD, TILE_C]
@@ -985,9 +981,11 @@ if HAS_TRITON:
 
                                     # Tile statistics: max and sum(exp) over c_dst dimension
                                     max_tile = tl.max(scores_for_beta_tile, axis=0)
-                                    # CRITICAL: Cast to float64 to match accumulator precision.
-                                    # Without this, mixed f32/f64 operations in the online logsumexp
-                                    # cause catastrophic errors (10^9+) with 2+ tiles.
+                                    # Cast to COMPUTE_DTYPE to match accumulator m_beta_k.
+                                    # tl.max returns the input dtype, but if scores_for_beta_tile
+                                    # is float32, mixing it with the float64 m_beta_k accumulator
+                                    # causes silent precision loss in the online update below,
+                                    # producing errors of ~10^9 with 2+ tiles (observed empirically).
                                     max_tile = max_tile.to(COMPUTE_DTYPE)
                                     # NEG_INF guard: if all inputs are NEG_INF, max would be NEG_INF
                                     # and scores - max = 0, giving exp(0) = 1 (wrong!). Detect and handle.
@@ -1002,12 +1000,15 @@ if HAS_TRITON:
                                     # Cast to match accumulator precision.
                                     sum_exp_tile = sum_exp_tile.to(COMPUTE_DTYPE)
 
-                                    # Online update: merge this tile's statistics with running accumulator
+                                    # Merge this tile's statistics into the running accumulator.
                                     m_new = tl.maximum(m_beta_k, max_tile)
                                     is_m_neginf = m_beta_k < (NEG_INF + 1.0)
                                     m_new_safe = tl.where(is_m_neginf & is_tile_neginf, 0.0, m_new)
 
-                                    # Rescale previous sum and add new tile's contribution
+                                    # is_m_neginf means the accumulator is still empty (first non-trivial
+                                    # tile). The standard update would compute l_beta_k * exp(m_beta_k -
+                                    # m_new_safe) = 0 * exp(-inf - ...), which is 0 mathematically but
+                                    # can evaluate to nan on some hardware. Short-circuit to start fresh.
                                     l_beta_k = tl.where(
                                         is_m_neginf,
                                         sum_exp_tile * tl.exp(max_tile - m_new_safe),
@@ -1016,9 +1017,9 @@ if HAS_TRITON:
                                     )
                                     m_beta_k = m_new
 
-                                # === After all c_dst tiles: finalize beta_k ===
-                                # Flash Attention pattern: no epsilon needed inside log
-                                # The NEG_INF guard (is_beta_k_neginf) handles the zero case
+                                # --- After all tiles: finalize beta_k via online logsumexp ---
+                                # When l_beta_k == 0 (all inputs were NEG_INF), log(0) would produce
+                                # -inf or nan. The guard short-circuits to NEG_INF directly.
                                 is_beta_k_neginf = m_beta_k < (NEG_INF + 1.0)
                                 beta_k = tl.where(
                                     is_beta_k_neginf,
