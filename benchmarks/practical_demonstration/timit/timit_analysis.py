@@ -37,7 +37,7 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
     print("=" * 60)
     print("\nThis shows how well each model captures phoneme duration patterns.")
     print("Lower MAE = better duration modeling. Semi-CRF should excel here.")
-    print("Semi PyTorch and Semi Triton should have similar MAE (validates Triton).\n")
+    print("Semi DP-Std and Semi Triton should have similar MAE (validates Triton).\n")
 
     # Get reference durations from semi_crf_triton
     ref_stats = results["semi_crf_triton"].duration_stats["per_phone"]
@@ -49,17 +49,17 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
     # Get stats from available models
     l_stats = results["linear_crf_triton"].duration_stats["per_phone"]
     tr_stats = results["semi_crf_triton"].duration_stats["per_phone"]
-    py_model = results.get("semi_crf_pytorch")
-    py_stats = py_model.duration_stats["per_phone"] if py_model else None
+    std_model = results.get("semi_crf_dp_standard")
+    py_stats = std_model.duration_stats["per_phone"] if std_model else None
     p_stats = results["pytorch_crf"].duration_stats["per_phone"] if has_pytorch_crf else None
 
-    has_pytorch_ref = py_stats is not None
+    has_dp_standard_ref = py_stats is not None
 
-    if has_pytorch_crf and has_pytorch_ref:
-        # 4-column: p-crf | K=1 | Py | Tr
+    if has_pytorch_crf and has_dp_standard_ref:
+        # 4-column: p-crf | K=1 | Std | Tr
         print(
-            f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
-            f"{'MAE p':>6} {'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
+            f"{'Phone':<6} {'Ref':>6} {'p-crf':>6} {'K=1':>6} {'Std':>6} {'Tr':>6} │ "
+            f"{'MAE p':>6} {'MAE K1':>7} {'MAE Std':>8} {'MAE Tr':>7}"
         )
         print("-" * 90)
 
@@ -86,21 +86,21 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
         print("-" * 90)
         p_overall = results["pytorch_crf"].duration_stats["overall"]
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        py_overall = py_model.duration_stats["overall"]
+        std_overall = std_model.duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
             f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{p_overall['mean_absolute_error']:>6.2f} "
             f"{l_overall['mean_absolute_error']:>7.2f} "
-            f"{py_overall['mean_absolute_error']:>7.2f} "
+            f"{std_overall['mean_absolute_error']:>8.2f} "
             f"{tr_overall['mean_absolute_error']:>6.2f}"
         )
         print(
             f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{p_overall['duration_correlation']:>6.3f} "
             f"{l_overall['duration_correlation']:>7.3f} "
-            f"{py_overall['duration_correlation']:>7.3f} "
+            f"{std_overall['duration_correlation']:>8.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
 
@@ -147,13 +147,13 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
 
-    elif has_pytorch_ref:
-        # 3-column: K=1 | Py | Tr
+    elif has_dp_standard_ref:
+        # 3-column: K=1 | Std | Tr
         print(
-            f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Py':>6} {'Tr':>6} │ "
-            f"{'MAE K1':>7} {'MAE Py':>7} {'MAE Tr':>7}"
+            f"{'Phone':<6} {'Ref':>6} {'K=1':>6} {'Std':>6} {'Tr':>6} │ "
+            f"{'MAE K1':>7} {'MAE Std':>8} {'MAE Tr':>7}"
         )
-        print("-" * 70)
+        print("-" * 72)
 
         for phone in display_phones:
             ref_mean = ref_stats[phone]["ref_mean"]
@@ -170,24 +170,24 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
             print(
                 f"{phone:<6} {ref_mean:>6.1f} {l_mean:>6.1f} "
                 f"{py_mean:>6.1f} {tr_mean:>6.1f} │ "
-                f"{l_mae:>7.2f} {py_mae:>7.2f} {tr_mae:>6.2f}{s_marker}"
+                f"{l_mae:>7.2f} {py_mae:>8.2f} {tr_mae:>6.2f}{s_marker}"
             )
 
-        print("-" * 70)
+        print("-" * 72)
         l_overall = results["linear_crf_triton"].duration_stats["overall"]
-        py_overall = py_model.duration_stats["overall"]
+        std_overall = std_model.duration_stats["overall"]
         tr_overall = results["semi_crf_triton"].duration_stats["overall"]
 
         print(
             f"{'MAE':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{l_overall['mean_absolute_error']:>7.2f} "
-            f"{py_overall['mean_absolute_error']:>7.2f} "
+            f"{std_overall['mean_absolute_error']:>8.2f} "
             f"{tr_overall['mean_absolute_error']:>6.2f}"
         )
         print(
             f"{'Corr':<6} {'-':>6} {'-':>6} {'-':>6} {'-':>6} │ "
             f"{l_overall['duration_correlation']:>7.3f} "
-            f"{py_overall['duration_correlation']:>7.3f} "
+            f"{std_overall['duration_correlation']:>8.3f} "
             f"{tr_overall['duration_correlation']:>6.3f}"
         )
 
@@ -227,28 +227,28 @@ def _print_duration_analysis(results: dict, has_pytorch_crf: bool = False):
         )
 
     print("\n* = Semi-CRF has lowest MAE for this phone")
-    print("Py = Semi-CRF PyTorch (baseline), Tr = Semi-CRF Triton (optimized)")
+    print("Std = Semi-CRF DP-standard (torch-struct baseline), Tr = Semi-CRF Triton (optimized)")
     print("Corr = correlation between predicted and reference mean durations")
 
 
 def compare_models(
     data_dir: Path,
     max_duration: int = 30,
-    include_pytorch_ref: bool = False,
+    include_dp_standard_ref: bool = False,
     **kwargs,
 ):
     """
-    Compare CRF models for the paper 3-way table (or 4-way for Triton correctness).
+    Compare CRF models for the paper 3-way table (or 4-way for algorithm comparison).
 
     Models compared:
     1. pytorch-crf (optional): External linear CRF baseline
     2. K=1 Triton: Linear CRF via flash-semicrf streaming kernel
-    3. Semi-CRF PyTorch: K>1 with PyTorch streaming (correctness reference, slow)
+    3. Semi-CRF DP-standard: K>1 with torch-struct linear scan (algorithmic baseline)
     4. Semi-CRF Triton: K>1 with Triton streaming kernel (paper result)
 
     Args:
-        include_pytorch_ref: If True, also train the K>1 PyTorch reference to
-            validate Triton correctness. Adds ~650 s/epoch on a single GPU.
+        include_dp_standard_ref: If True, also train the K>1 DP-standard reference
+            (torch-struct linear scan) to compare against the Triton kernel.
             For paper runs, leave False — Triton correctness is covered by
             scripts/validate_correctness.py.
     """
@@ -276,20 +276,19 @@ def compare_models(
     )
     results["linear_crf_triton"] = linear_metrics
 
-    # 3. Semi-CRF with PyTorch streaming (Triton correctness reference — optional)
-    if include_pytorch_ref:
+    # 3. Semi-CRF with DP-standard (torch-struct linear scan — optional algorithmic baseline)
+    if include_dp_standard_ref:
         logger.info("=" * 60)
-        logger.info(f"Training SEMI-CRF PYTORCH (K={max_duration}, correctness reference)")
+        logger.info(f"Training SEMI-CRF DP-STANDARD (K={max_duration}, torch-struct linear scan)")
         logger.info("=" * 60)
-        _, pytorch_metrics = train_model(
+        _, dp_standard_metrics = train_model(
             data_dir,
             model_type="semicrf",
             max_duration=max_duration,
-            backend="streaming",
-            use_triton=False,
+            backend="dp_standard",
             **kwargs,
         )
-        results["semi_crf_pytorch"] = pytorch_metrics
+        results["semi_crf_dp_standard"] = dp_standard_metrics
 
     # 4. Semi-CRF with Triton streaming (paper result)
     logger.info("=" * 60)
@@ -309,12 +308,12 @@ def compare_models(
     corpus_stats = load_corpus_duration_stats(data_dir)
 
     # Print comparison
-    has_pytorch_ref = "semi_crf_pytorch" in results
+    has_dp_standard_ref = "semi_crf_dp_standard" in results
     logger.info("\n" + "=" * 60)
-    if has_pytorch_ref and HAS_TORCHCRF:
-        logger.info("4-WAY COMPARISON: pytorch-crf | K=1 Triton | Semi PyTorch | Semi Triton")
-    elif has_pytorch_ref:
-        logger.info("3-WAY COMPARISON: K=1 Triton | Semi PyTorch | Semi Triton")
+    if has_dp_standard_ref and HAS_TORCHCRF:
+        logger.info("4-WAY COMPARISON: pytorch-crf | K=1 Triton | Semi DP-Std | Semi Triton")
+    elif has_dp_standard_ref:
+        logger.info("3-WAY COMPARISON: K=1 Triton | Semi DP-Std | Semi Triton")
     elif HAS_TORCHCRF:
         logger.info("3-WAY COMPARISON: pytorch-crf | K=1 Triton | Semi Triton")
     else:
@@ -383,16 +382,16 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     """Print 4-way comparison table."""
     l_metrics = results["linear_crf_triton"]
     tr_metrics = results["semi_crf_triton"]
-    py_metrics = results.get("semi_crf_pytorch")  # optional correctness reference
+    py_metrics = results.get("semi_crf_dp_standard")  # optional algorithmic baseline
     p_metrics = results.get("pytorch_crf")
 
-    has_pytorch_ref = py_metrics is not None
+    has_dp_standard_ref = py_metrics is not None
 
     # Header — column layout depends on which models are present
-    if has_pytorch_crf and has_pytorch_ref:
+    if has_pytorch_crf and has_dp_standard_ref:
         print(
             f"\n{'Metric':<20} {'pytorch-crf':>12} {'K=1 Triton':>12} "
-            f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi':>10}"
+            f"{'Semi DP-Std':>12} {'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi':>10}"
         )
         print("-" * 100)
     elif has_pytorch_crf:
@@ -401,10 +400,10 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
             f"{'Semi Triton':>12} {'Δ Linear':>10} {'Δ Semi vs K=1':>14}"
         )
         print("-" * 90)
-    elif has_pytorch_ref:
+    elif has_dp_standard_ref:
         print(
             f"\n{'Metric':<20} {'K=1 Triton':>12} "
-            f"{'Semi PyTorch':>12} {'Semi Triton':>12} {'Δ Semi':>10}"
+            f"{'Semi DP-Std':>12} {'Semi Triton':>12} {'Δ Semi':>10}"
         )
         print("-" * 80)
     else:
@@ -422,7 +421,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
         py_val = getattr(py_metrics, metric_name) if py_metrics else None
         p_val = getattr(p_metrics, metric_name) if p_metrics else None
 
-        if has_pytorch_crf and has_pytorch_ref:
+        if has_pytorch_crf and has_dp_standard_ref:
             delta_linear = l_val - p_val
             delta_semi = tr_val - py_val
             print(
@@ -436,7 +435,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
                 f"{display_name:<20} {p_val:>12.4f} {l_val:>12.4f} "
                 f"{tr_val:>12.4f} {delta_linear:>+10.4f} {delta_semi_vs_k1:>+14.4f}"
             )
-        elif has_pytorch_ref:
+        elif has_dp_standard_ref:
             delta_semi = tr_val - py_val
             print(
                 f"{display_name:<20} {l_val:>12.4f} "
@@ -454,13 +453,13 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
         py_val = py_metrics.boundary_f1_tolerances.get(tol, 0) if py_metrics else None
         p_val = p_metrics.boundary_f1_tolerances.get(tol, 0) if p_metrics else None
 
-        if has_pytorch_crf and has_pytorch_ref:
+        if has_pytorch_crf and has_dp_standard_ref:
             print(
                 f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} " f"{py_val:>12.4f} {tr_val:>12.4f}"
             )
         elif has_pytorch_crf:
             print(f"  tol={tol:<2} {p_val:>12.4f} {l_val:>12.4f} {tr_val:>12.4f}")
-        elif has_pytorch_ref:
+        elif has_dp_standard_ref:
             print(f"  tol={tol:<2} {l_val:>12.4f} {py_val:>12.4f} {tr_val:>12.4f}")
         else:
             print(f"  tol={tol:<2} {l_val:>12.4f} {tr_val:>12.4f}")
@@ -470,7 +469,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     l_time = l_metrics.training_time_per_epoch
     tr_time = tr_metrics.training_time_per_epoch
 
-    if has_pytorch_crf and has_pytorch_ref:
+    if has_pytorch_crf and has_dp_standard_ref:
         p_time = p_metrics.training_time_per_epoch
         py_time = py_metrics.training_time_per_epoch
         speedup_linear = p_time / l_time if l_time > 0 else 0
@@ -486,7 +485,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
             f"{'Train (s/epoch)':<20} {p_time:>12.2f} {l_time:>12.2f} "
             f"{tr_time:>12.2f} {speedup_linear:>9.2f}x"
         )
-    elif has_pytorch_ref:
+    elif has_dp_standard_ref:
         py_time = py_metrics.training_time_per_epoch
         speedup_semi = py_time / tr_time if tr_time > 0 else 0
         print(
@@ -499,7 +498,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     l_infer = l_metrics.inference_time
     tr_infer = tr_metrics.inference_time
 
-    if has_pytorch_crf and has_pytorch_ref:
+    if has_pytorch_crf and has_dp_standard_ref:
         p_infer = p_metrics.inference_time
         py_infer = py_metrics.inference_time
         speedup_linear = p_infer / l_infer if l_infer > 0 else 0
@@ -515,7 +514,7 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
             f"{'Inference (s)':<20} {p_infer:>12.2f} {l_infer:>12.2f} "
             f"{tr_infer:>12.2f} {speedup_linear:>9.2f}x"
         )
-    elif has_pytorch_ref:
+    elif has_dp_standard_ref:
         py_infer = py_metrics.inference_time
         speedup_semi = py_infer / tr_infer if tr_infer > 0 else 0
         print(
@@ -531,8 +530,8 @@ def _print_four_way_comparison(results: dict, has_pytorch_crf: bool = False):
     print("=" * 60)
     if has_pytorch_crf:
         print("Linear CRF: K=1 Triton should match pytorch-crf accuracy (Δ Linear ≈ 0)")
-    if has_pytorch_ref:
-        print("Semi-CRF: Triton should match PyTorch baseline accuracy (Δ Semi ≈ 0)")
+    if has_dp_standard_ref:
+        print("Semi-CRF: Triton should match DP-standard accuracy (Δ Semi ≈ 0)")
     print(
         "Timing: speedup shown as multiplier vs the slower reference (e.g., 2.0x = twice as fast)"
     )

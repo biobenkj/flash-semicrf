@@ -249,11 +249,11 @@ def main():
         help="Directory for duration distribution plots (requires matplotlib)",
     )
     compare_parser.add_argument(
-        "--pytorch-ref",
+        "--dp-standard-ref",
         action="store_true",
         default=False,
-        help="Also train the K>1 PyTorch reference model to validate Triton correctness. "
-        "Adds ~650 s/epoch — omit for standard paper runs.",
+        help="Also train the K>1 DP-standard reference (torch-struct linear scan) "
+        "to compare algorithms and validate Triton correctness.",
     )
     compare_parser.add_argument(
         "--precision",
@@ -476,7 +476,7 @@ def main():
         results = compare_models(
             args.data_dir,
             max_duration=args.max_duration,
-            include_pytorch_ref=args.pytorch_ref,
+            include_dp_standard_ref=args.dp_standard_ref,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             epochs=args.epochs,
@@ -498,10 +498,10 @@ def main():
                     "batch_size": args.batch_size,
                 },
                 "linear_crf_triton": results["linear_crf_triton"].to_dict(),
-                "semi_crf_pytorch": results["semi_crf_pytorch"].to_dict(),
                 "semi_crf_triton": results["semi_crf_triton"].to_dict(),
             }
-            # Include pytorch-crf results if available
+            if "semi_crf_dp_standard" in results:
+                output["semi_crf_dp_standard"] = results["semi_crf_dp_standard"].to_dict()
             if "pytorch_crf" in results:
                 output["pytorch_crf"] = results["pytorch_crf"].to_dict()
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
