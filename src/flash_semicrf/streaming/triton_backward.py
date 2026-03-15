@@ -5,8 +5,8 @@ function that allocates buffers and dispatches the kernel.
 
 The backward pass uses the forward-backward algorithm with checkpointing:
 
-1. **Phase 1**: Recompute alpha values from saved ring buffer checkpoints
-2. **Phase 2**: Compute beta backward while accumulating gradients
+1. Recompute alpha values from saved ring buffer checkpoints.
+2. Compute beta backward while accumulating gradients.
 
 Gradients are computed via marginal probabilities:
 
@@ -27,14 +27,10 @@ Gradients are computed via marginal probabilities:
     specialized implementations. Do not call this kernel directly with K<3.
 
 .. note::
-    **Memory Consistency Note**: The alpha recomputation path uses a memory barrier
-    (``tl.debug_barrier()`` at line ~366) to ensure checkpoint values are visible
-    across all warps before backward pass computation. This prevents race conditions
-    where segment 1 (processed first) overwrites values that segment 0 needs to read.
-    All tests pass with rtol=0.01, confirming correct synchronization.
-
-Functions:
-    launch_streaming_triton_backward: Main entry point for launching backward kernel.
+    The alpha recomputation path uses ``tl.debug_barrier()`` to ensure checkpoint
+    values are visible across all warps before the backward pass. This prevents
+    race conditions where segment 1 (processed first) overwrites values that
+    segment 0 still needs. All tests pass with rtol=0.01.
 """
 
 import torch
@@ -155,99 +151,62 @@ if HAS_TRITON:
     ):
         r"""Streaming Semi-CRF backward kernel with loop tiling and online logsumexp.
 
-        This kernel computes gradients for the Semi-CRF partition function using
-        the forward-backward algorithm with memory-efficient streaming checkpoints.
+        Computes gradients for the Semi-CRF partition function using the
+        forward-backward algorithm with memory-efficient streaming checkpoints.
+        One program per batch element (``grid = (batch_size,)``).
 
-        Algorithm
-        ---------
         For each checkpoint segment (processed in reverse order):
 
-        **Phase 1 - Alpha Recomputation:**
-            Load ring buffer checkpoint for segment start, then recompute
-            alpha values forward through the segment using the recurrence:
+        Phase 1 loads the ring buffer checkpoint for the segment start, then
+        recomputes alpha values forward through the segment:
 
-            .. math::
-                \alpha[t, c] = \text{logsumexp}_k \left(
-                    \alpha[t-k, :] + \text{edge}[t-k \to t, :, c]
-                \right)
+        .. math::
+            \alpha[t, c] = \text{logsumexp}_k \left(
+                \alpha[t-k, :] + \text{edge}[t-k \to t, :, c]
+            \right)
 
-        **Phase 2 - Beta Backward with Gradient Accumulation:**
-            Process positions in reverse (t = seg_end-1 down to seg_start).
-            For each position, compute marginal probabilities and accumulate
-            gradients while updating beta via:
+        Phase 2 processes positions in reverse (t = seg_end-1 down to seg_start),
+        computing marginal probabilities and accumulating gradients while updating
+        beta:
 
-            .. math::
-                \beta[t, c] = \text{logsumexp}_k \left(
-                    \text{edge}[t \to t+k, c, :] + \beta[t+k, :]
-                \right)
+        .. math::
+            \beta[t, c] = \text{logsumexp}_k \left(
+                \text{edge}[t \to t+k, c, :] + \beta[t+k, :]
+            \right)
 
-        Numerical Stability
-        -------------------
-        - **Float64 for critical scalars**: ``log_Z``, ``accum_log_norm``, and
-          ``log_scale`` remain float64 regardless of ``USE_FLOAT32`` because they
-          involve O(T)-magnitude values whose subtraction requires full precision.
+        .. note::
 
-        - **Float32 for bulk compute** (when ``USE_FLOAT32=True``): Alpha/beta
-          accumulators, gradient workspaces, and per-position quantities use float32.
-          Per-segment workspace isolation bounds atomic add count, keeping float32
-          accumulation error negligible.
+            **Numerical stability.** ``log_Z``, ``accum_log_norm``, and ``log_scale``
+            remain float64 regardless of ``USE_FLOAT32`` because they involve
+            O(T)-magnitude values. When ``USE_FLOAT32=True``, alpha/beta accumulators
+            and gradient workspaces use float32; per-segment workspace isolation bounds
+            the atomic add count, keeping accumulation error negligible. Log-marginals
+            are clamped to [-700, 700] before ``exp()`` to prevent float64 overflow.
+            Alpha, beta, and edge values are clamped to [-1e6, 1e6] before marginal
+            computation.
 
-        - **NEG_INF guards**: When all logsumexp inputs are NEG_INF (-1e9),
-          the subtraction `scores - max` yields 0 instead of staying at NEG_INF.
-          Guards detect this case (max < NEG_INF + 1) and return NEG_INF directly.
+        .. note::
 
-        - **Log-marginal clamping**: Before exp(), log-marginals are clamped to
-          [-700, 700] to prevent float64 overflow (exp(710) ≈ inf).
+            **Loop tiling for register pressure.** The marginal computation requires
+            a :math:`(C_\text{PAD} \times C_\text{PAD})` matrix. At ``C_PAD=64`` this
+            demands ~384 registers/thread, causing spilling. The kernel processes
+            ``C_PAD`` in tiles of ``TILE_C`` (typically 16 or 32), loading a
+            ``(TILE_C, C_PAD)`` tile per iteration with online logsumexp for the beta
+            update. This reduces peak register demand to ~120/thread.
 
-        - **Input clamping**: Alpha, beta, and edge values clamped to [-1e6, 1e6]
-          before marginal computation to prevent extreme intermediate values.
+        .. warning::
 
-        Loop Tiling (Register Pressure Reduction)
-        -----------------------------------------
-        The marginal computation requires a (C_PAD * C_PAD) matrix, which at
-        C_PAD=64 demands ~384 registers/thread. With num_warps=4+, this exceeds
-        available registers and causes spilling to slow local memory.
+            Multi-config autotuning is unsafe for this kernel. Triton's
+            ``pre_hook``/``reset_to_zero`` runs only during benchmarking, not after
+            config selection (Triton issue #7181). The final run then accumulates on
+            uncleared buffers from the last benchmarked config, producing errors of
+            ~10^23. Only one config is registered (num_warps=4, TILE_C=16, optimal
+            for L40/L40S). Adding additional configs will corrupt results.
 
-        **Solution**: Process C_PAD in tiles of TILE_C (typically 16 or 32):
-            - Load (TILE_C * C_PAD) tile of marginal matrix
-            - Accumulate gradients from tile
-            - Use online logsumexp for beta update across tiles (Flash Attention pattern)
-
-        This reduces peak register demand to ~120/thread, enabling num_warps=4-8.
-
-        Memory Access Patterns
-        ----------------------
-        - **Transition matrix**: Loaded once per (t, k) pair, broadcast over c_src
-        - **Cumulative scores**: Coalesced reads via c_idx stride
-        - **Gradients**: Float64 workspace with atomic_add per (t, k, tile)
-
-        Gradient Scaling Semantics
-        --------------------------
-        - **Per-batch parameters** (cum_scores): Scaled by grad_output[batch_idx]
-          inside kernel
-        - **Shared parameters** (transition, duration_bias): Accumulated unscaled,
-          then reduced via einsum after kernel: ``grad = einsum("bij, b -> ij", ws, grad_out)``
-
-        Performance Notes
-        -----------------
-        - **Single-config autotune only**: Multi-config autotuning is NOT safe for
-          backward kernels with atomic operations. Triton's pre_hook/reset_to_zero
-          only runs during benchmarking, NOT after selecting the best config
-          (see Triton issue #7181). This causes the final run to accumulate on
-          garbage data from the last benchmarked config, producing errors of ~10^23.
-
-        - **Do NOT add more configs**: If you're tempted to add TILE_C=32 or
-          different num_warps configs, DON'T. The first kernel call will produce
-          wrong results due to buffer corruption during autotuning.
-
-        - **L40/L40S optimal**: Fixed at num_warps=4, TILE_C=16
-
-        - **One program per batch element**: grid = (batch_size,)
-
-        See Also
-        --------
-        - Flash Attention: Online softmax pattern for memory-efficient attention
-        - Mamba SSM: Loop tiling for register-pressure reduction in state space models
+        Gradient scaling: ``grad_cum_scores`` is scaled by ``grad_output[batch_idx]``
+        inside the kernel. ``grad_transition`` and ``grad_duration_bias`` are
+        accumulated unscaled, then reduced by the launcher via
+        ``einsum("bij, b -> ij", workspace, grad_output)``.
         """
         # Must match NEG_INF in constants.py
         NEG_INF: tl.constexpr = -1e9
@@ -261,6 +220,10 @@ if HAS_TRITON:
         batch_idx = tl.program_id(0)
         if batch_idx >= batch_size:
             return
+
+        # =====================================================================
+        # PREAMBLE: indices, base pointers, static transition matrix
+        # =====================================================================
 
         # Label indices
         c_idx = tl.arange(0, C_PAD)
@@ -299,9 +262,9 @@ if HAS_TRITON:
             grad_ps_base = grad_proj_start_ptr + batch_idx * stride_gps_b
             grad_pe_base = grad_proj_end_ptr + batch_idx * stride_gps_b
 
-        # Load transition matrix into registers (only for static transitions)
-        # Duration-dependent transitions are loaded inside the k-loops
-        # Use clamped indices to avoid OOB pointer calculation for masked-out threads
+        # Load transition matrix into registers (only for static transitions).
+        # Duration-dependent transitions are loaded inside the k-loops.
+        # Use clamped indices to avoid OOB pointer calculation for masked-out threads.
         if not HAS_DURATION_TRANSITIONS:
             transition_block = tl.load(
                 transition_ptr + c_dst_idx_safe * stride_tr_dst + c_src_idx_safe * stride_tr_src,
@@ -309,10 +272,17 @@ if HAS_TRITON:
                 other=0.0,
             )  # (C_PAD, C_PAD) - this is transition.T
 
-        # Initialize beta ring buffer at final positions
+        # =====================================================================
+        # BETA RING BUFFER INITIALIZATION
+        # The beta ring uses 2*K slots (double-buffered) to avoid aliasing.
+        # Only the slot corresponding to t=seq_len is set to 0.0 (boundary
+        # condition: beta[seq_len, :] = 0 in log-space). All other slots are
+        # NEG_INF so that segments extending past the sequence end contribute
+        # nothing to the backward pass.
+        # =====================================================================
         final_pos = seq_len
         final_ring_idx = final_pos % (2 * K)
-        # Note: Use tl.range (not static_range) to avoid compile-time explosion for large K
+        # Use tl.range (not static_range) to avoid compile-time explosion for large K.
         for k_init in tl.range(0, 2 * K):
             is_final = k_init == final_ring_idx
             init_val = tl.where(is_final & c_mask, 0.0, NEG_INF)
@@ -322,8 +292,10 @@ if HAS_TRITON:
                 mask=c_mask,
             )
 
-        # Process segments in reverse order
-        # Note: Use tl.range to avoid compile-time unrolling for large NUM_CKPTS
+        # =====================================================================
+        # OUTER SEGMENT LOOP: process checkpoint segments in reverse order
+        # =====================================================================
+        # Use tl.range to avoid compile-time unrolling for large NUM_CKPTS.
         for ckpt_idx_loop in tl.range(0, NUM_CKPTS):
             ckpt_idx = NUM_CKPTS - 1 - ckpt_idx_loop
             seg_start = ckpt_idx * CHECKPOINT_INTERVAL
@@ -338,25 +310,36 @@ if HAS_TRITON:
                 log_norm_ckpt_ptr + batch_idx * stride_lnc_b + ckpt_idx * stride_lnc_n
             ).to(tl.float64)
 
-            # Compute segment-specific workspace base pointers for deterministic accumulation.
-            # Each segment writes to its own workspace slice, eliminating cross-segment atomics.
+            # Segment-specific workspace slices for deterministic gradient accumulation.
+            # Each segment writes to its own slice, eliminating cross-segment atomic contention.
             grad_tr_ws_seg = grad_tr_ws_base + ckpt_idx * stride_gtw_seg
             grad_db_ws_seg = grad_db_ws_base + ckpt_idx * stride_gdbw_seg
-            # CRITICAL: Alpha buffer also needs segment isolation to prevent race conditions.
-            # Without this, segment 1 (processed first) writes alpha[27] to position 0,
-            # then segment 0 reads stale values instead of the checkpoint.
+            # Alpha buffer also needs segment isolation to prevent race conditions.
+            # Without it, segment 1 (processed first in backward) writes alpha[27]
+            # to position 0, then segment 0 reads stale values instead of the checkpoint.
             alpha_buf_seg = alpha_buf_base + ckpt_idx * stride_ab_seg
 
-            # Log normalization checkpoint loaded here for this segment
-            # Used in Pass 2 (line ~710) to bridge normalized alpha and full-scale log_Z
+            # log_norm_at_ckpt is used in Phase 2 Pass 1 to bridge the normalized
+            # alpha values (shifted at checkpoint boundaries) and the full-scale log_Z.
 
             # Only process segments within sequence length
             if seg_start < seq_len:
-                # === Phase 1: Recompute alpha for this segment ===
-                # Load ring buffer state from checkpoint
-                # Then recompute forward through the segment
+                # =============================================================
+                # PHASE 1: Recompute alpha for this segment
+                #
+                # The forward pass saves ring buffer checkpoints but not full
+                # alpha arrays (that would be O(T*K*C) memory). Here we restore
+                # alpha[seg_start] from the checkpoint, then replay the forward
+                # recurrence through the segment to rebuild alpha[seg_start+1 ...
+                # seg_end]. These values are needed in Phase 2 to compute
+                # marginals: P(segment) = exp(alpha[t] + edge + beta[t+k] - log_Z).
+                # =============================================================
 
-                # Initialize alpha from checkpoint (stores ring buffer state at seg_start)
+                # --- Phase 1, step 1: Restore alpha[seg_start] from checkpoint ---
+                # The checkpoint stores the full ring buffer state at seg_start.
+                # Ring slot (seg_start % K) holds the alpha we need for position
+                # seg_start; the other K-1 slots are prior positions used as
+                # history during the forward recompute below.
                 for k_slot in tl.range(0, K):
                     alpha_val = tl.load(
                         ring_ckpt_base
@@ -366,10 +349,7 @@ if HAS_TRITON:
                         mask=c_mask,
                         other=NEG_INF,
                     )
-
-                    # Checkpoint contains ring buffer state at seg_start: alpha[seg_start-K+1...seg_start]
-                    # stored at ring indices (seg_start-K+1) % K ... seg_start % K
-                    # We restore the value at index seg_start % K to buffer position 0 as initial state
+                    # Buffer position 0 maps to absolute time seg_start.
                     if k_slot == seg_start % K:
                         tl.store(
                             alpha_buf_seg + 0 * stride_ab_t + c_idx * stride_ab_c,
@@ -377,14 +357,19 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
-                # CRITICAL: Memory barrier ensures alpha buffer writes are visible across all warps.
-                # Without this, race condition: segment 1 (processed first in reverse order) writes
-                # alpha values that segment 0 needs to read, but segment 0 may see stale buffer data.
-                # Fixed bug: batch=1 test was failing due to missing barrier causing 10-400% errors.
+                # Memory barrier: ensure alpha buffer writes are visible to all
+                # warps before the forward recompute reads from them.
+                # Without this, segment 1 (processed first in reverse) may write
+                # values that segment 0 sees as stale.
+                # This was responsible for 10-400% gradient errors in batch=1 tests.
                 tl.debug_barrier()
 
-                # Recompute alpha values from seg_start+1 to seg_end
-                # Note: Use tl.range to avoid compile-time unrolling for large SEGMENT_SIZE
+                # --- Phase 1, step 2: Forward recompute alpha[seg_start+1 ... seg_end] ---
+                # Replay the forward recurrence within the segment.
+                # For each t, alpha_prev comes from one of two places:
+                #   local_start >= 0: alpha buffer (within this segment)
+                #   local_start < 0:  ring buffer checkpoint (prior segment)
+                # Use tl.range to avoid compile-time unrolling for large SEGMENT_SIZE.
                 for local_t in tl.range(1, SEGMENT_SIZE):
                     t = seg_start + local_t
                     # Only process if within segment and sequence bounds
@@ -398,7 +383,7 @@ if HAS_TRITON:
                             start_pos = t - k
                             # Only process valid start positions
                             if start_pos >= 0:
-                                # Get alpha_prev - either from buffer or checkpoint
+                                # --- Alpha lookup: segment buffer or prior checkpoint ---
                                 local_start = start_pos - seg_start
 
                                 if local_start >= 0 and local_start < SEGMENT_SIZE:
@@ -531,8 +516,18 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
-                # === Phase 2: Compute beta backward and gradients ===
-                # Note: Use tl.range to avoid compile-time unrolling for large CHECKPOINT_INTERVAL
+                # =============================================================
+                # PHASE 2: Beta backward pass and gradient accumulation
+                #
+                # Process positions t = seg_end-1 down to seg_start in reverse.
+                # For each t, iterate over all valid k durations to:
+                #   1. Compute marginals P(segment[t, t+k]) using the two-pass
+                #      tiled algorithm (Pass 1: global max; Pass 2: marginals).
+                #   2. Accumulate gradients for cum_scores, transition,
+                #      duration_bias, and boundary projections.
+                #   3. Update beta[t] via online logsumexp over k and c_dst.
+                # Use tl.range to avoid compile-time unrolling for large CHECKPOINT_INTERVAL.
+                # =============================================================
                 for t_offset in tl.range(0, CHECKPOINT_INTERVAL):
                     t = seg_end - 1 - t_offset
                     # Only process valid positions
@@ -550,13 +545,10 @@ if HAS_TRITON:
                         m_new_beta = tl.full([C_PAD], NEG_INF, dtype=COMPUTE_DTYPE)
                         l_new_beta = tl.zeros([C_PAD], dtype=COMPUTE_DTYPE)
 
-                        # === TILED BACKWARD COMPUTATION ===
-                        # Process c_dst dimension in tiles of TILE_C to reduce register pressure.
-                        # This enables higher num_warps (4-8) without register spilling.
-                        #
-                        # Pattern: Instead of computing full (C_PAD, C_PAD) marginal matrix,
-                        # compute (TILE_C, C_PAD) tiles and accumulate gradients per-tile.
-                        # For beta update, use online logsumexp across tiles (Flash Attention pattern).
+                        # --- Tiled backward: process c_dst in tiles of TILE_C ---
+                        # Avoids materializing the full (C_PAD, C_PAD) marginal matrix.
+                        # Gradient accumulation and beta update run tile by tile.
+                        # See kernel docstring for why TILE_C is needed for register pressure.
 
                         # === Gradient accumulators (atomic optimization) ===
                         # Accumulate grad_cum_scores[t] across all k and tiles, write once
@@ -587,17 +579,16 @@ if HAS_TRITON:
                                 # Clamp alpha_t once per k (reused across tiles)
                                 alpha_t_clamped = tl.minimum(tl.maximum(alpha_t, -1e6), 1e6)
 
-                                # === PASS 1: Compute global statistics across all tiles ===
-                                # Initialize global accumulators for marginal computation
-                                # global_max is a SCALAR (max over entire log_joint matrix, not per column)
+                                # --- Pass 1: compute global max/sum across all c_dst tiles ---
+                                # global_max is a scalar (max over the full log_joint matrix).
+                                # Must use tl.static_range here: tl.range does not preserve
+                                # scalar loop-carried state (global_max, global_sum_exp) across
+                                # iterations, so each tile would use a different normalization.
+                                # static_range unrolls at compile time: O(C_PAD/TILE_C) iters,
+                                # typically 2-8, which is acceptable.
                                 global_max = tl.full((), NEG_INF, dtype=tl.float64)
                                 global_sum_exp = tl.zeros((), dtype=tl.float64)
 
-                                # Loop over tiles to accumulate global max and sum using online algorithm
-                                # NOTE: Using tl.static_range (compile-time unrolling) to ensure correct scalar accumulation.
-                                # tl.range (runtime loop) doesn't preserve scalar state (global_max, global_sum_exp)
-                                # across iterations, causing different tiles to use different normalization values.
-                                # Compile time: O(C_PAD/TILE_C) iterations, typically 2-8 (acceptable).
                                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
@@ -720,17 +711,15 @@ if HAS_TRITON:
                                     # Update global max
                                     global_max = new_global_max
 
-                                # Compute global scale factor (once for all tiles)
-                                # Guard against all-NEG_INF case
+                                # --- Scale computation (log_norm bridge) ---
+                                # The forward pass shifts alpha at each checkpoint boundary
+                                # (alpha[t] -= log_norm[t]) to keep values near 0 at extreme T.
+                                # log_norm_at_ckpt holds the cumulative shift up to seg_start.
+                                # To compute correct marginals exp(alpha + edge + beta - log_Z),
+                                # we add log_norm_at_ckpt back before comparing to log_Z.
                                 is_global_max_neginf = global_max < (NEG_INF + 1.0)
                                 global_max_safe = tl.where(is_global_max_neginf, 0.0, global_max)
 
-                                # CRITICAL: Bridge normalized alpha and full-scale log_Z via log normalization
-                                #   Forward pass applies incremental normalization: alpha[t] -= log_norm[t]
-                                #   This keeps alpha ~0 at extreme T (e.g., alpha=-125k -> 0 at T=50k midpoint)
-                                #   log_norm_at_ckpt accumulated all shifts up to seg_start (~125k at midpoint)
-                                #   Must add back to compute correct marginal: exp(alpha + edge + beta - log_Z)
-                                #   where log_Z is at full scale (~250k at T=100k)
                                 log_scale = (
                                     global_max_safe.to(tl.float64) + log_norm_at_ckpt - log_Z
                                 )
@@ -753,9 +742,9 @@ if HAS_TRITON:
                                 scale = scale.to(COMPUTE_DTYPE)
                                 global_max_safe = global_max_safe.to(COMPUTE_DTYPE)
 
-                                # === PASS 2: Compute marginals and gradients using global statistics ===
-                                # === Tile loop over c_dst dimension ===
-                                # NOTE: Using tl.static_range to ensure consistent global_max/scale across all tiles
+                                # --- Pass 2: marginals and gradient accumulation ---
+                                # global_max_safe and scale are scalars fixed from Pass 1,
+                                # ensuring all tiles use the same normalization.
                                 for c_dst_tile_start in tl.static_range(0, C_PAD, TILE_C):
                                     # Tile indices
                                     c_dst_tile = tl.arange(0, TILE_C)
@@ -1073,23 +1062,27 @@ if HAS_TRITON:
                                 )
                                 m_new_beta = m_new
 
-                        # Finalize online logsumexp: new_beta = m + log(l)
+                        # --- Post-k: finalize beta[t], write grad_cum_scores[t], store to ring ---
+
+                        # Finalize online logsumexp for new_beta.
+                        # Guard: tl.log(l_new_beta) is only safe when l_new_beta > 0.
                         is_beta_neginf = m_new_beta < (NEG_INF + 1.0)
-                        # Guard: tl.log(l_new_beta) only safe when l_new_beta > 0 (see alpha finalize)
                         new_beta = tl.where(
                             is_beta_neginf, NEG_INF, m_new_beta + tl.log(l_new_beta)
                         )
                         new_beta = tl.where(c_mask, new_beta, NEG_INF)
 
-                        # === After all k iterations: write accumulated grad_cum_scores[t] ===
-                        # Single write instead of K*tiles atomics (20-50* reduction at K=1000)
+                        # Write accumulated grad_cum_scores[t]: single atomic instead of
+                        # K*tiles atomics (e.g., 8000 -> 1 at K=1000, C=32).
                         tl.atomic_add(
                             grad_cs_base + t * stride_gcs_t + c_idx * stride_gcs_c,
                             grad_cs_t_local,
                             mask=c_mask,
                         )
 
-                        # Store beta[t] to ring buffer
+                        # Store beta[t] to the ring buffer.
+                        # The ring uses 2*K slots (double-buffered) so that beta[t]
+                        # and beta[t+K] never alias, even when t % K == (t+K) % K.
                         t_ring_idx = t % (2 * K)
                         tl.store(
                             beta_ring_base + t_ring_idx * stride_br_k + c_idx * stride_br_c,
@@ -1097,12 +1090,12 @@ if HAS_TRITON:
                             mask=c_mask,
                         )
 
-                        # CRITICAL: Memory barrier ensures beta store is visible before next t iteration.
-                        # Without this, the second tile (c=4-7) at t-1 may see stale NEG_INF values
-                        # from ring buffer initialization instead of the values just stored at t.
-                        # Debug analysis showed: tile_start=0 gets correct values, tile_start=4 gets NEG_INF.
+                        # Memory barrier: beta[t] must be visible before t-1 reads it.
+                        # Without this, a tile at t-1 may read stale NEG_INF from
+                        # ring initialization rather than the value just stored here.
                         tl.debug_barrier()
-            # CRITICAL: Sync all warps before starting next segment
+
+            # Sync all warps before beginning the next segment.
             tl.debug_barrier()
 
     def _compute_tile_c(C: int) -> int:
@@ -1622,17 +1615,11 @@ if HAS_TRITON:
 
         Returns:
             Tensor: Boundary marginal probabilities of shape :math:`(\text{batch}, T)`.
-                Each value represents the probability that a segment starts
-                at that position.
-
-        See Also:
-            :func:`launch_streaming_triton_backward`: Full backward pass with gradients.
-            :func:`~flash_semicrf.streaming.semi_crf_streaming_marginals_pytorch`:
-                PyTorch reference implementation (CPU compatible).
+                Each value is the probability that a segment starts at that position.
 
         .. note::
-            Requires CUDA and Triton. For CPU computation, use the PyTorch reference
-            implementation listed above.
+            Requires CUDA and Triton. For CPU-compatible computation, use
+            :func:`~flash_semicrf.streaming.semi_crf_streaming_marginals_pytorch`.
 
         Example::
 
