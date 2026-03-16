@@ -79,6 +79,7 @@ class TIMITModel(nn.Module):
         hidden_dim: int = 256,
         duration_distribution: str = "learned",
         precision: str = "float32",
+        use_sequence_boundaries: bool = False,
     ):
         super().__init__()
         self.encoder = encoder
@@ -93,6 +94,7 @@ class TIMITModel(nn.Module):
             hidden_dim=hidden_dim,
             duration_distribution=duration_distribution,
             precision=precision,
+            use_sequence_boundaries=use_sequence_boundaries,
         )
 
     def forward(self, features: Tensor, lengths: Tensor) -> dict:

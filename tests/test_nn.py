@@ -942,3 +942,257 @@ class TestTracebackSingleRegression:
         assert len(result.segments) == 2
         for segs in result.segments:
             assert len(segs) > 0
+
+
+class TestSequenceBoundaries:
+    """Tests for use_sequence_boundaries=True in SemiMarkovCRFHead."""
+
+    def test_loss_finite(self):
+        """compute_loss with use_sequence_boundaries=True produces finite loss
+        and pi_start/pi_end receive non-zero gradients."""
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_sequence_boundaries=True
+        )
+        # Set non-zero values so gradients are meaningful
+        with torch.no_grad():
+            crf.pi_start.fill_(0.1)
+            crf.pi_end.fill_(-0.1)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss = crf.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        assert torch.isfinite(loss), f"Expected finite loss, got {loss}"
+
+        loss.backward()
+        assert crf.pi_start.grad is not None
+        assert crf.pi_end.grad is not None
+        assert crf.pi_start.grad.abs().sum() > 0
+        assert crf.pi_end.grad.abs().sum() > 0
+
+    def test_hidden_dim_none_ok(self):
+        """use_sequence_boundaries=True works without hidden_dim (standalone params)."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, use_sequence_boundaries=True)
+        assert crf.pi_start is not None
+        assert crf.pi_end is not None
+        assert crf.pi_start.shape == (4,)
+        assert crf.pi_end.shape == (4,)
+
+    def test_zero_equals_no_boundary(self):
+        """Sequence boundary model with zeroed pi matches no-boundary model loss."""
+        torch.manual_seed(7)
+        crf_base = SemiMarkovCRFHead(num_classes=4, max_duration=8, hidden_dim=16)
+        crf_seq = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_sequence_boundaries=True
+        )
+
+        # Copy all shared parameters
+        with torch.no_grad():
+            crf_seq.transition.copy_(crf_base.transition)
+            crf_seq.duration_dist.load_state_dict(crf_base.duration_dist.state_dict())
+            crf_seq.projection.weight.copy_(crf_base.projection.weight)
+            crf_seq.projection.bias.copy_(crf_base.projection.bias)
+            # pi_start and pi_end are already zero-initialized
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss_base = crf_base.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        loss_seq = crf_seq.compute_loss(hidden_states, lengths, labels, use_triton=False)
+
+        torch.testing.assert_close(loss_base, loss_seq, rtol=1e-5, atol=1e-5)
+
+    def test_non_streaming_backend_raises(self):
+        """Boundary guard raises ValueError for non-streaming backends."""
+        torch.manual_seed(0)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_sequence_boundaries=True
+        )
+        hidden_states = torch.randn(2, 10, 16)
+        lengths = torch.full((2,), 10)
+
+        for bad_backend in ("exact", "binary_tree_sharded", "dp_standard"):
+            with pytest.raises(ValueError, match="[Bb]oundary"):
+                crf(hidden_states, lengths, backend=bad_backend, use_triton=False)
+
+    def test_decode_with_traceback(self):
+        """Sum of segment scores matches Viterbi score from decode_with_traceback."""
+        torch.manual_seed(99)
+        crf = SemiMarkovCRFHead(
+            num_classes=4, max_duration=8, hidden_dim=16, use_sequence_boundaries=True
+        )
+        with torch.no_grad():
+            crf.pi_start.fill_(0.5)
+            crf.pi_end.fill_(-0.3)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+
+        result = crf.decode_with_traceback(hidden_states, lengths, use_triton=False)
+
+        for b in range(2):
+            segments = result.segments[b]
+            assert len(segments) > 0
+            seg_score_sum = sum(seg.score for seg in segments)
+            viterbi_score = result.scores[b].item()
+            assert (
+                abs(seg_score_sum - viterbi_score) < 1e-4
+            ), f"Batch {b}: seg_score_sum={seg_score_sum:.6f} != viterbi_score={viterbi_score:.6f}"
+
+    def test_extra_repr(self):
+        """extra_repr includes 'use_sequence_boundaries=True' when enabled."""
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, use_sequence_boundaries=True)
+        assert "use_sequence_boundaries=True" in crf.extra_repr()
+
+        crf_no = SemiMarkovCRFHead(num_classes=4, max_duration=8)
+        assert "use_sequence_boundaries" not in crf_no.extra_repr()
+
+    def test_parameter_penalty(self):
+        """parameter_penalty includes pi_start and pi_end norms."""
+        torch.manual_seed(0)
+        crf = SemiMarkovCRFHead(num_classes=4, max_duration=8, use_sequence_boundaries=True)
+        with torch.no_grad():
+            crf.pi_start.fill_(1.0)
+            crf.pi_end.fill_(2.0)
+
+        penalty = crf.parameter_penalty()
+        # penalty should include transition + duration + pi_start + pi_end
+        expected = (
+            crf.transition.norm(p=2).pow(2)
+            + crf.duration_bias.norm(p=2).pow(2)
+            + crf.pi_start.norm(p=2).pow(2)
+            + crf.pi_end.norm(p=2).pow(2)
+        )
+        torch.testing.assert_close(penalty, expected)
+
+    def test_variable_lengths(self):
+        """pi_end is applied at per-sequence final position, not global T-1."""
+        torch.manual_seed(42)
+        C = 4
+        crf = SemiMarkovCRFHead(
+            num_classes=C, max_duration=5, hidden_dim=16, use_sequence_boundaries=True
+        )
+        with torch.no_grad():
+            crf.pi_end.fill_(10.0)  # Large value to make effect detectable
+
+        hidden_states = torch.randn(2, 20, 16)
+        # Different lengths: sequences end at different positions
+        lengths = torch.tensor([15, 20])
+        labels = torch.zeros(2, 20, dtype=torch.long)
+
+        # Should not error — pi_end must handle variable lengths
+        loss = crf.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        assert torch.isfinite(loss), f"Expected finite loss, got {loss}"
+
+    def test_grad_finite_difference(self):
+        """Finite-difference gradient check on pi_start and pi_end."""
+        torch.manual_seed(13)
+        crf = SemiMarkovCRFHead(
+            num_classes=3, max_duration=4, hidden_dim=8, use_sequence_boundaries=True
+        )
+        crf = crf.double()
+        hidden_states = torch.randn(1, 6, 8, dtype=torch.float64, requires_grad=True)
+        lengths = torch.tensor([6])
+        labels = torch.randint(0, 3, (1, 6))
+
+        def loss_fn(hs):
+            return crf.compute_loss(hs, lengths, labels, use_triton=False)
+
+        torch.autograd.gradcheck(loss_fn, (hidden_states,), eps=1e-5, atol=1e-3, rtol=1e-3)
+
+
+class TestBothBoundaryModes:
+    """Tests for use_boundary_projections=True AND use_sequence_boundaries=True."""
+
+    def test_both_modes_loss_finite(self):
+        """Both flags True: finite loss, all boundary params get gradients."""
+        torch.manual_seed(42)
+        crf = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            use_boundary_projections=True,
+            use_sequence_boundaries=True,
+        )
+        with torch.no_grad():
+            crf.pi_start.fill_(0.2)
+            crf.pi_end.fill_(-0.2)
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss = crf.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        assert torch.isfinite(loss), f"Expected finite loss, got {loss}"
+
+        loss.backward()
+        # Projection layers get gradients
+        assert crf.proj_start_layer.weight.grad.abs().sum() > 0
+        assert crf.proj_end_layer.weight.grad.abs().sum() > 0
+        # Scalar vectors get gradients
+        assert crf.pi_start.grad.abs().sum() > 0
+        assert crf.pi_end.grad.abs().sum() > 0
+
+    def test_both_modes_additive(self):
+        """Zeroed pi matches projection-only loss (pi adds nothing when zero)."""
+        torch.manual_seed(7)
+        crf_proj = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            use_boundary_projections=True,
+        )
+        crf_both = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            use_boundary_projections=True,
+            use_sequence_boundaries=True,
+        )
+
+        # Copy all shared parameters
+        with torch.no_grad():
+            crf_both.transition.copy_(crf_proj.transition)
+            crf_both.duration_dist.load_state_dict(crf_proj.duration_dist.state_dict())
+            crf_both.projection.weight.copy_(crf_proj.projection.weight)
+            crf_both.projection.bias.copy_(crf_proj.projection.bias)
+            crf_both.proj_start_layer.weight.copy_(crf_proj.proj_start_layer.weight)
+            crf_both.proj_end_layer.weight.copy_(crf_proj.proj_end_layer.weight)
+            # pi_start and pi_end already zero
+
+        hidden_states = torch.randn(2, 20, 16)
+        lengths = torch.full((2,), 20)
+        labels = torch.randint(0, 4, (2, 20))
+
+        loss_proj = crf_proj.compute_loss(hidden_states, lengths, labels, use_triton=False)
+        loss_both = crf_both.compute_loss(hidden_states, lengths, labels, use_triton=False)
+
+        torch.testing.assert_close(loss_proj, loss_both, rtol=1e-5, atol=1e-5)
+
+    def test_both_modes_parameter_penalty(self):
+        """parameter_penalty includes all boundary terms when both modes active."""
+        torch.manual_seed(0)
+        crf = SemiMarkovCRFHead(
+            num_classes=4,
+            max_duration=8,
+            hidden_dim=16,
+            use_boundary_projections=True,
+            use_sequence_boundaries=True,
+        )
+        with torch.no_grad():
+            crf.pi_start.fill_(1.0)
+            crf.pi_end.fill_(2.0)
+
+        penalty = crf.parameter_penalty()
+        expected = (
+            crf.transition.norm(p=2).pow(2)
+            + crf.duration_bias.norm(p=2).pow(2)
+            + crf.proj_start_layer.weight.norm(p=2).pow(2)
+            + crf.proj_end_layer.weight.norm(p=2).pow(2)
+            + crf.pi_start.norm(p=2).pow(2)
+            + crf.pi_end.norm(p=2).pow(2)
+        )
+        torch.testing.assert_close(penalty, expected)

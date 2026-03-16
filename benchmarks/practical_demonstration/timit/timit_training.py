@@ -273,6 +273,7 @@ def train_model(
     fixed_length: int | None = None,
     profile: bool = False,
     precision: str = "float32",
+    use_sequence_boundaries: bool = False,
 ) -> tuple[TIMITModel | TIMITModelPytorchCRF, TIMITMetrics]:
     """Train a model and return it with metrics.
 
@@ -280,6 +281,8 @@ def train_model(
         crf_reg: L2 regularization coefficient for CRF parameters (Semi-Markov only).
         fixed_length: If provided, force all sequences to this length (for debugging).
         profile: If True, log per-phase GPU timing breakdown each epoch.
+        use_sequence_boundaries: If True, add scalar start/end transition vectors
+            (pytorch-crf equivalent). Only applies to flash-semicrf models, not pytorch-crf.
     """
     device = torch.device(device)
 
@@ -335,6 +338,7 @@ def train_model(
             max_duration=k,
             hidden_dim=hidden_dim,
             precision=precision,
+            use_sequence_boundaries=use_sequence_boundaries,
         ).to(device)
     else:  # semicrf
         k = max_duration
@@ -343,10 +347,12 @@ def train_model(
             max_duration=k,
             hidden_dim=hidden_dim,
             precision=precision,
+            use_sequence_boundaries=use_sequence_boundaries,
         ).to(device)
 
+    seq_bounds_str = ", seq_boundaries=True" if use_sequence_boundaries else ""
     logger.info(
-        f"Model: {model_type}, K={k}, params={sum(p.numel() for p in model.parameters()):,}"
+        f"Model: {model_type}, K={k}{seq_bounds_str}, params={sum(p.numel() for p in model.parameters()):,}"
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)

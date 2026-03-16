@@ -75,6 +75,17 @@ class SemiMarkovCRFHead(nn.Module):
         num_warps (int, optional): Number of warps per block for Triton kernels.
             Higher values increase parallelism but also register pressure.
             Recommended range: 2-8. Default: ``4``
+        use_boundary_projections (bool, optional): If ``True``, creates per-position
+            boundary projection layers that project encoder hidden states to
+            segment-start and segment-end scores at every position. Requires
+            ``hidden_dim`` to be set. Default: ``False``
+        use_sequence_boundaries (bool, optional): If ``True``, adds learnable scalar
+            start/end transition vectors :attr:`pi_start` and :attr:`pi_end` of shape
+            :math:`(C,)`. These are added at sequence position 0 and the final position
+            (per-sequence ``lengths[b] - 1``) respectively. Equivalent to pytorch-crf's
+            ``start_transitions`` and ``end_transitions``. Does NOT require ``hidden_dim``.
+            Orthogonal to ``use_boundary_projections`` — both can be enabled simultaneously.
+            Default: ``False``
 
     Attributes:
         transition (Parameter): Label transition scores of shape :math:`(C, C)`.
@@ -82,6 +93,10 @@ class SemiMarkovCRFHead(nn.Module):
             score for transitioning FROM label ``i`` TO label ``j``.
         duration_dist (DurationDistribution): Duration distribution module.
         projection (Linear or None): Optional projection from encoder hidden dim.
+        pi_start (Parameter or None): Scalar start transition vector of shape
+            :math:`(C,)`, or ``None`` if ``use_sequence_boundaries=False``.
+        pi_end (Parameter or None): Scalar end transition vector of shape
+            :math:`(C,)`, or ``None`` if ``use_sequence_boundaries=False``.
 
     Properties:
         duration_bias: Returns the current duration bias tensor of shape :math:`(K, C)`.
@@ -133,6 +148,7 @@ class SemiMarkovCRFHead(nn.Module):
         edge_memory_threshold: float = 8e9,
         num_warps: int = 4,
         use_boundary_projections: bool = False,
+        use_sequence_boundaries: bool = False,
         precision: str = "float64",
     ):
         super().__init__()
@@ -172,6 +188,16 @@ class SemiMarkovCRFHead(nn.Module):
         else:
             self.proj_start_layer = None
             self.proj_end_layer = None
+
+        # Optional scalar sequence-boundary transitions: learned vectors pi_start (C,)
+        # and pi_end (C,) added at positions 0 and T-1 respectively. Equivalent to
+        # pytorch-crf's start_transitions/end_transitions. Does NOT require hidden_dim.
+        if use_sequence_boundaries:
+            self.pi_start = nn.Parameter(torch.zeros(num_classes))
+            self.pi_end = nn.Parameter(torch.zeros(num_classes))
+        else:
+            self.pi_start = None
+            self.pi_end = None
 
     @property
     def duration_bias(self) -> Tensor:
@@ -214,14 +240,15 @@ class SemiMarkovCRFHead(nn.Module):
         return "streaming", use_triton
 
     def _validate_backend_for_boundaries(self, backend: str) -> None:
-        """Raise if boundary projections are enabled with a non-streaming backend.
+        """Raise if boundary features are enabled with a non-streaming backend.
 
         Non-streaming backends (exact, binary_tree_sharded, dp_standard) compute
         the partition function without boundary terms. If _score_gold includes
         boundaries but the partition does not, NLL = log Z - score(y*) is
         incorrectly normalized.
         """
-        if self.proj_start_layer is not None and backend not in ("auto", "streaming"):
+        has_boundaries = self.proj_start_layer is not None or self.pi_start is not None
+        if has_boundaries and backend not in ("auto", "streaming"):
             raise ValueError(
                 f"Boundary projections require streaming backend, got backend={backend!r}. "
                 f"Non-streaming backends do not include boundary terms in the partition "
@@ -244,6 +271,60 @@ class SemiMarkovCRFHead(nn.Module):
             self.proj_start_layer(hidden_states).double(),  # (batch, T, C)
             self.proj_end_layer(hidden_states).double(),  # (batch, T, C)
         )
+
+    def _apply_sequence_boundaries(
+        self,
+        proj_start: Optional[Tensor],
+        proj_end: Optional[Tensor],
+        lengths: Tensor,
+        T: int,
+        device: torch.device,
+    ) -> tuple[Optional[Tensor], Optional[Tensor]]:
+        """Fold scalar sequence-boundary vectors into boundary projection tensors.
+
+        When ``use_sequence_boundaries=True``, adds :attr:`pi_start` at position 0
+        and :attr:`pi_end` at each sequence's final position (``lengths[b] - 1``).
+
+        If boundary projections are already present (from ``use_boundary_projections``),
+        the scalar vectors are added on top. If not, zero tensors are allocated and
+        the scalars are placed at the edge positions.
+
+        Args:
+            proj_start: Existing start projections ``(batch, T, C)`` or ``None``.
+            proj_end: Existing end projections ``(batch, T, C)`` or ``None``.
+            lengths: Sequence lengths ``(batch,)``.
+            T: Maximum sequence length (time dimension).
+            device: Device for tensor allocation.
+
+        Returns:
+            Tuple of ``(proj_start, proj_end)``, each ``(batch, T, C)`` in float64,
+            or ``(None, None)`` if neither boundary feature is active.
+        """
+        if self.pi_start is None:
+            return proj_start, proj_end
+
+        batch = lengths.shape[0]
+        C = self.num_classes
+        pi_start = self.pi_start.double()
+        pi_end = self.pi_end.double()
+
+        if proj_start is not None:
+            # Clone to avoid in-place modification of autograd graph tensors
+            proj_start = proj_start.clone()
+            proj_end = proj_end.clone()
+        else:
+            proj_start = torch.zeros(batch, T, C, dtype=torch.float64, device=device)
+            proj_end = torch.zeros(batch, T, C, dtype=torch.float64, device=device)
+
+        # Add pi_start at position 0 (broadcast across batch)
+        proj_start[:, 0, :] = proj_start[:, 0, :] + pi_start
+
+        # Add pi_end at per-sequence final position
+        b_idx = torch.arange(batch, device=device)
+        end_positions = (lengths - 1).long()
+        proj_end[b_idx, end_positions, :] = proj_end[b_idx, end_positions, :] + pi_end
+
+        return proj_start, proj_end
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
         """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
@@ -478,6 +559,9 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
+        proj_start, proj_end = self._apply_sequence_boundaries(
+            proj_start, proj_end, lengths, T, scores.device
+        )
 
         if backend_type == "streaming":
             # Compute partition function via streaming algorithm
@@ -595,6 +679,10 @@ class SemiMarkovCRFHead(nn.Module):
             penalty = penalty + self.proj_start_layer.weight.norm(p=p).pow(p)
             penalty = penalty + self.proj_end_layer.weight.norm(p=p).pow(p)
 
+        if self.pi_start is not None:
+            penalty = penalty + self.pi_start.norm(p=p).pow(p)
+            penalty = penalty + self.pi_end.norm(p=p).pow(p)
+
         return penalty
 
     def _score_gold(
@@ -683,6 +771,9 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
+        proj_start, proj_end = self._apply_sequence_boundaries(
+            proj_start, proj_end, lengths, T, scores.device
+        )
 
         if backend_type == "streaming":
             # Use max semiring for Viterbi
@@ -771,6 +862,9 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections once (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
+        proj_start, proj_end = self._apply_sequence_boundaries(
+            proj_start, proj_end, lengths, T, hidden_states.device
+        )
 
         # Check which sequences need traceback
         needs_traceback = lengths <= max_traceback_length
@@ -1090,4 +1184,6 @@ class SemiMarkovCRFHead(nn.Module):
         parts.append(f"duration_dist={self.duration_dist.__class__.__name__}")
         if self.proj_start_layer is not None:
             parts.append("use_boundary_projections=True")
+        if self.pi_start is not None:
+            parts.append("use_sequence_boundaries=True")
         return ", ".join(parts)

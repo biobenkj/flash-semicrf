@@ -215,6 +215,13 @@ def main():
         help="Kernel compute precision. float32 is ~2-4x faster on L40S with negligible "
         "accuracy loss at TIMIT scale (T<800). Use float64 for T>10K or exact marginals.",
     )
+    train_parser.add_argument(
+        "--sequence-boundaries",
+        action="store_true",
+        help="Add learnable start/end transition vectors (2C parameters). "
+        "Equivalent to pytorch-crf's start_transitions/end_transitions. "
+        "Only applies to flash-semicrf models (linear, semicrf), not pytorch-crf.",
+    )
 
     # Compare
     compare_parser = subparsers.add_parser(
@@ -261,6 +268,13 @@ def main():
         default="float32",
         help="Kernel compute precision. float32 is ~2-4x faster on L40S with negligible "
         "accuracy loss at TIMIT scale (T<800). Use float64 for T>10K or exact marginals.",
+    )
+    compare_parser.add_argument(
+        "--sequence-boundaries",
+        action="store_true",
+        help="Add learnable start/end transition vectors (2C parameters) to "
+        "flash-semicrf models. Equivalent to pytorch-crf's start_transitions/"
+        "end_transitions. Enables controlled comparison of the parameterization gap.",
     )
 
     # Train with Lightning (optional — requires flash-semicrf[lightning])
@@ -332,6 +346,12 @@ def main():
             default="float32",
             help="Kernel compute precision. float32 is ~2-4x faster on L40S with negligible "
             "accuracy loss at TIMIT scale (T<800). Use float64 for T>10K or exact marginals.",
+        )
+        lightning_parser.add_argument(
+            "--sequence-boundaries",
+            action="store_true",
+            help="Add learnable start/end transition vectors (2C parameters). "
+            "Equivalent to pytorch-crf's start_transitions/end_transitions.",
         )
 
         # analyze-uncertainty subcommand
@@ -445,6 +465,7 @@ def main():
             fixed_length=args.fixed_length,
             profile=args.profile,
             precision=args.precision,
+            use_sequence_boundaries=args.sequence_boundaries,
         )
         # Print training summary with throughput
         k = 1 if args.model in ("pytorch-crf", "linear") else args.max_duration
@@ -452,7 +473,8 @@ def main():
         print("\n" + "=" * 60)
         print("TRAINING SUMMARY")
         print("=" * 60)
-        print(f"  Model: {args.model} (K={k}, {triton_str})")
+        seq_bounds_str = " +seq_boundaries" if args.sequence_boundaries else ""
+        print(f"  Model: {args.model} (K={k}, {triton_str}{seq_bounds_str})")
         print(f"  Backend: {args.backend}")
         print(f"  Batch size: {metrics.batch_size}")
         print(f"  Dataset: {metrics.num_train_utterances} utterances")
@@ -483,6 +505,7 @@ def main():
             batch_size=args.batch_size,
             log_every=args.log_every,
             precision=args.precision,
+            use_sequence_boundaries=args.sequence_boundaries,
         )
         if args.output_json:
             from datetime import datetime
@@ -561,6 +584,7 @@ def main():
             max_duration=k,
             hidden_dim=args.hidden_dim,
             precision=args.precision,
+            use_sequence_boundaries=args.sequence_boundaries,
         )
         model = TIMITLightningModule(
             encoder=encoder,
