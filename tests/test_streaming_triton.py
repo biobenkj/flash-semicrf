@@ -113,6 +113,37 @@ class TestTritonStreamingKernel:
             partition_triton, partition_pytorch, rtol=1e-4, atol=1e-4, check_dtype=False
         )
 
+    def test_triton_matches_pytorch_power_of_2_C(self):
+        """Verify Triton kernel handles power-of-2 C values (EVEN_C=True path).
+
+        These configs exercise the EVEN_C code path where C == C_PAD.  Uses the
+        same dtype (float64) and config as the dedicated TestEvenCPath tests so
+        that any pre-existing issues are caught here first, independently of the
+        EVEN_C optimisation.
+        """
+        for C in [4, 8, 16, 32, 64]:
+            batch, T, K = 2, 40, 5
+            cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+                batch, T, K, C, device="cuda", dtype=torch.float64
+            )
+
+            partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+                cum_scores, transition, duration_bias, lengths, K
+            )
+
+            partition_triton, _, _, _ = launch_streaming_triton_kernel(
+                cum_scores, transition, duration_bias, lengths, K
+            )
+
+            torch.testing.assert_close(
+                partition_triton,
+                partition_pytorch,
+                rtol=1e-4,
+                atol=1e-4,
+                check_dtype=False,
+                msg=f"power-of-2 forward C={C} failed",
+            )
+
     def test_triton_matches_pytorch_non_power_of_2_C(self):
         """Verify Triton kernel handles non-power-of-2 C values."""
         for C in [3, 5, 7, 11, 13, 17]:
@@ -2471,7 +2502,15 @@ class TestEvenCPath:
         )
         grad_cs_triton, grad_tr_triton, grad_db_triton = grads_triton[:3]
 
-        # PyTorch reference backward
+        # PyTorch reference backward.
+        # semi_crf_streaming_backward_pytorch returns per-batch *unscaled* gradients:
+        #   grad_transition: (batch, C, C)  — one per batch element, not yet reduced
+        #   grad_duration_bias: (batch, K, C) — same
+        # launch_streaming_triton_backward applies the same scaling + reduction the
+        # autograd wrapper does, so we must mirror that here before comparing:
+        #   grad_cum_scores *= grad_output[b] (per-batch scale)
+        #   grad_transition = einsum("bij,b->ij", ..., grad_output)  → (C, C)
+        #   grad_duration_bias = einsum("bkc,b->kc", ..., grad_output)  → (K, C)
         log_Z_py, ring_ckpts_py, ckpt_interval_py, log_norm_ckpts_py = (
             semi_crf_streaming_forward_pytorch(cum_scores, transition, duration_bias, lengths, K)
         )
@@ -2486,7 +2525,11 @@ class TestEvenCPath:
             log_norm_ckpts_py,
             ckpt_interval_py,
         )
-        grad_cs_pytorch, grad_tr_pytorch, grad_db_pytorch = grads_pytorch[:3]
+        grad_cs_pytorch_raw, grad_tr_pytorch_raw, grad_db_pytorch_raw = grads_pytorch[:3]
+
+        grad_cs_pytorch = grad_cs_pytorch_raw * grad_output.view(batch, 1, 1)
+        grad_tr_pytorch = torch.einsum("bij,b->ij", grad_tr_pytorch_raw, grad_output)
+        grad_db_pytorch = torch.einsum("bkc,b->kc", grad_db_pytorch_raw, grad_output)
 
         torch.testing.assert_close(
             grad_cs_triton,
@@ -2551,3 +2594,212 @@ class TestEvenCPath:
         # that EVEN_C=True doesn't produce NaN/Inf or silently wrong values.
         assert torch.isfinite(part31).all(), "EVEN_C=False produced non-finite partition"
         assert torch.isfinite(part32).all(), "EVEN_C=True produced non-finite partition"
+
+
+# =============================================================================
+# Backward Phase 1 barrier regression tests
+# =============================================================================
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+class TestBackwardPhaseBarriers:
+    """Regression tests for tl.debug_barrier() calls in the backward kernel Phase 1.
+
+    Two barriers protect against a cross-warp race at C_PAD = NVIDIA warp size (32):
+
+    **Phase 1 inner loop barrier** (after alpha_buf_seg[local_t] store):
+        alpha_buf_seg[local_t] is written by 4 warps (8 elements each).
+        local_t+1 loads the same slot via ``alpha_prev[None, :] + edge_block``
+        (a C_PAD-element broadcast requiring all warps' data). Without the
+        barrier, warp 0 at local_t+1 can read stale values not yet committed
+        by warp 3 from local_t.
+
+    **Phase 1 -> Phase 2 barrier** (between the two loops):
+        Phase 1 fills alpha_buf_seg[0..SEGMENT_SIZE-1]; Phase 2 immediately
+        loads each row as ``alpha_t_clamped[None, :] + edge_tile``.  Without
+        the barrier the Phase 2 broadcast can race against Phase 1 stores.
+
+    Both races manifest at C_PAD=32 (= NVIDIA warp size) with num_warps=4.
+    Removing either barrier causes the corresponding test to produce gradients
+    that differ from the PyTorch reference by more than 1e-3.
+    """
+
+    def _reference_backward(self, cum_scores, transition, duration_bias, lengths, K):
+        """Run Triton forward + backward and return scaled, reduced gradients."""
+        from flash_semicrf.streaming import semi_crf_streaming_backward_pytorch
+
+        batch = cum_scores.shape[0]
+        grad_output = torch.ones(batch, device="cuda", dtype=torch.float64)
+
+        log_Z, ring_ckpts, ckpt_interval, log_norm_ckpts = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+        grads_triton = launch_streaming_triton_backward(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            log_Z,
+            ring_ckpts,
+            log_norm_ckpts,
+            ckpt_interval,
+            grad_output,
+        )
+
+        log_Z_py, ring_ckpts_py, ckpt_interval_py, log_norm_ckpts_py = (
+            semi_crf_streaming_forward_pytorch(cum_scores, transition, duration_bias, lengths, K)
+        )
+        grads_pytorch = semi_crf_streaming_backward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            log_Z_py,
+            ring_ckpts_py,
+            log_norm_ckpts_py,
+            ckpt_interval_py,
+        )
+        grad_cs_raw, grad_tr_raw, grad_db_raw = grads_pytorch[:3]
+        grad_cs_ref = grad_cs_raw * grad_output.view(batch, 1, 1)
+        grad_tr_ref = torch.einsum("bij,b->ij", grad_tr_raw, grad_output)
+        grad_db_ref = torch.einsum("bkc,b->kc", grad_db_raw, grad_output)
+
+        return grads_triton[:3], (grad_cs_ref, grad_tr_ref, grad_db_ref)
+
+    def test_phase1_inner_loop_barrier(self):
+        """Phase 1 inner loop barrier: large K forces long alpha_buf recompute chains.
+
+        K=12 gives SEGMENT_SIZE = checkpoint_interval + 12 ≈ 50.  The Phase 1
+        local_t loop runs ~49 iterations; for local_t >= 13, alpha_prev is read
+        from alpha_buf_seg (not from the checkpoint).  That creates 36+ iterations
+        where each store must be visible to the next load.
+
+        Removing the ``tl.debug_barrier()`` after
+        ``tl.store(alpha_buf_seg + local_t * stride_ab_t + ...)``
+        causes grad_cum_scores to diverge from the PyTorch reference at C=32.
+        """
+        C, K, T, batch = 32, 12, 100, 2
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda", dtype=torch.float64
+        )
+
+        (grad_cs, grad_tr, grad_db), (ref_cs, ref_tr, ref_db) = self._reference_backward(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        torch.testing.assert_close(
+            grad_cs,
+            ref_cs,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1 inner loop barrier: grad_cum_scores mismatch at C=32, K=12",
+        )
+        torch.testing.assert_close(
+            grad_tr,
+            ref_tr,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1 inner loop barrier: grad_transition mismatch at C=32, K=12",
+        )
+        torch.testing.assert_close(
+            grad_db,
+            ref_db,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1 inner loop barrier: grad_duration_bias mismatch at C=32, K=12",
+        )
+
+    def test_phase1_to_phase2_barrier(self):
+        """Phase 1 -> Phase 2 barrier: many checkpoints force many transitions.
+
+        T=100, K=5 produces ~8 checkpoint segments.  At each segment, Phase 1
+        fills alpha_buf_seg[0..SEGMENT_SIZE-1] (~19 rows); Phase 2 immediately
+        reads each row for ``alpha_t_clamped[None, :] + edge_tile``.  With 8
+        segments there are 8 Phase 1 -> Phase 2 transitions where the broadcast
+        race can occur.
+
+        Removing the ``tl.debug_barrier()`` before the Phase 2 loop causes
+        grad_cum_scores to diverge from the PyTorch reference at C=32.
+        """
+        C, K, T, batch = 32, 5, 100, 2
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda", dtype=torch.float64
+        )
+
+        (grad_cs, grad_tr, grad_db), (ref_cs, ref_tr, ref_db) = self._reference_backward(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        torch.testing.assert_close(
+            grad_cs,
+            ref_cs,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1->Phase 2 barrier: grad_cum_scores mismatch at C=32",
+        )
+        torch.testing.assert_close(
+            grad_tr,
+            ref_tr,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1->Phase 2 barrier: grad_transition mismatch at C=32",
+        )
+        torch.testing.assert_close(
+            grad_db,
+            ref_db,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Phase 1->Phase 2 barrier: grad_duration_bias mismatch at C=32",
+        )
+
+    def test_both_barriers_variable_lengths(self):
+        """Both barriers: variable-length batch exercises active/inactive masking.
+
+        Short sequences end mid-segment, which changes which segments have
+        active Phase 1 recompute work.  This stresses both barriers because
+        different batch elements hit different local_t loop depths and different
+        Phase 1->Phase 2 transition points.
+        """
+        C, K, T, batch = 32, 8, 80, 4
+        cum_scores, transition, duration_bias, _ = create_streaming_inputs(
+            batch, T, K, C, device="cuda", dtype=torch.float64
+        )
+        # Variable lengths: some sequences end mid-segment, stressing masking
+        lengths = torch.tensor([T, T - 15, T - 30, T - 45], dtype=torch.long, device="cuda")
+
+        (grad_cs, grad_tr, grad_db), (ref_cs, ref_tr, ref_db) = self._reference_backward(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        torch.testing.assert_close(
+            grad_cs,
+            ref_cs,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Variable-length barrier test: grad_cum_scores mismatch at C=32",
+        )
+        torch.testing.assert_close(
+            grad_tr,
+            ref_tr,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Variable-length barrier test: grad_transition mismatch at C=32",
+        )
+        torch.testing.assert_close(
+            grad_db,
+            ref_db,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg="Variable-length barrier test: grad_duration_bias mismatch at C=32",
+        )

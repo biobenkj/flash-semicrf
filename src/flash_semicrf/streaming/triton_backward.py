@@ -526,6 +526,19 @@ if HAS_TRITON:
                             alpha_t,
                             mask=c_mask,
                         )
+                        # Memory barrier: same race as the forward ring buffer (see
+                        # triton_forward.py comment). The next local_t iteration loads
+                        # alpha_buf_seg[local_t] via alpha_prev[None, :] + edge_block,
+                        # which is a C_PAD-element broadcast. Without the barrier, a warp
+                        # entering local_t+1 can read stale values from another warp's
+                        # store at local_t when C_PAD = warp_size (32).
+                        tl.debug_barrier()
+
+                # Memory barrier: ensure all Phase 1 alpha_buf_seg writes are visible
+                # before Phase 2 reads them. Phase 2 loads alpha_t from alpha_buf_seg
+                # and uses it in alpha_t_clamped[None, :] + edge_tile (C_PAD broadcast),
+                # creating the same cross-warp race as the forward ring buffer.
+                tl.debug_barrier()
 
                 # =============================================================
                 # PHASE 2: Beta backward pass and gradient accumulation

@@ -464,6 +464,18 @@ if HAS_TRITON:
                 mask=active & c_mask,
             )
 
+            # Memory barrier: ensure all warps have committed their ring buffer writes
+            # before any warp begins the next t-iteration's ring loads.
+            # Without this, at C_PAD = NVIDIA warp size (32) with num_warps > 1,
+            # the ring buffer write is split across warps (8 elements each at num_warps=4).
+            # A warp starting t+1 can then load stale values from the previous iteration
+            # before the other warps have finished their stores for t.
+            # Confirmed race: C=32 produced wrong partitions; all other C values passed
+            # because C < 32 fits in 1 warp (no cross-warp issue) and C > 32 has enough
+            # implicit pipeline stall from the additional instructions between store and load.
+            # The backward kernel has an identical barrier after its beta ring store.
+            tl.debug_barrier()
+
             # === Save checkpoint at interval boundaries ===
             # Checkpoint i stores the ring buffer state at position i * CHECKPOINT_INTERVAL
             should_checkpoint = (t % CHECKPOINT_INTERVAL) == 0
