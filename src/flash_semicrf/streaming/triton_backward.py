@@ -146,6 +146,7 @@ if HAS_TRITON:
         stride_lnc_n,
         # Autotuned parameter (must be at end for @triton.autotune)
         TILE_C: tl.constexpr,
+        EVEN_C: tl.constexpr,  # True when C is already a power of 2 (C == C_PAD)
         # Mixed precision support
         USE_FLOAT32: tl.constexpr = False,  # Use float32 for bulk compute
     ):
@@ -227,24 +228,34 @@ if HAS_TRITON:
 
         # Label indices
         c_idx = tl.arange(0, C_PAD)
-        c_mask = c_idx < C
 
         c_dst_idx = tl.arange(0, C_PAD)[:, None]  # (C_PAD, 1)
         c_src_idx = tl.arange(0, C_PAD)[None, :]  # (1, C_PAD)
-        c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
+
+        if EVEN_C:
+            # C is already a power of 2: C == C_PAD, so every index in [0, C_PAD)
+            # is valid. Define trivially-True masks so the compiler folds away all
+            # downstream mask operations, and skip the min-clamping.
+            c_mask = c_idx < C_PAD  # arange(0, C_PAD) < C_PAD — always True
+            c_mask_2d = (c_dst_idx < C_PAD) & (c_src_idx < C_PAD)  # ditto
+            c_idx_safe = c_idx
+            c_dst_idx_safe = c_dst_idx
+            c_src_idx_safe = c_src_idx
+        else:
+            c_mask = c_idx < C
+            c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
+            # Clamp indices to ensure address calculations stay within bounds
+            # even for masked-out threads (indices C to C_PAD-1).
+            # This prevents OOB pointer calculation which is undefined behavior.
+            c_idx_safe = tl.minimum(c_idx, C - 1)
+            c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+            c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
 
         # Load batch-specific values
         # Cast seq_len to int32 to match loop variable type from tl.range
         seq_len = tl.load(lengths_ptr + batch_idx).to(tl.int32)
         log_Z = tl.load(log_Z_ptr + batch_idx).to(tl.float64)
         grad_out = tl.load(grad_output_ptr + batch_idx).to(COMPUTE_DTYPE)
-
-        # Clamp indices to ensure address calculations stay within bounds
-        # even for masked-out threads (indices C to C_PAD-1).
-        # This prevents OOB pointer calculation which is undefined behavior.
-        c_idx_safe = tl.minimum(c_idx, C - 1)
-        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
-        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
 
         # Base pointers
         cum_scores_base = cum_scores_ptr + batch_idx * stride_cs_b
@@ -1284,6 +1295,7 @@ if HAS_TRITON:
 
         num_checkpoints = ring_checkpoints.shape[1]
         C_PAD = _next_power_of_2(C)
+        even_c = C == C_PAD
 
         # Compute segment size for alpha buffer
         segment_size = checkpoint_interval + K
@@ -1508,6 +1520,7 @@ if HAS_TRITON:
                 stride_lnc_b,
                 stride_lnc_n,
                 TILE_C=tile_c,
+                EVEN_C=even_c,
                 USE_FLOAT32=use_float32,
                 num_warps=num_warps,
             )

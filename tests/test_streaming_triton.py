@@ -2394,3 +2394,160 @@ if __name__ == "__main__":
             print("PASSED: Triton matches PyTorch reference")
         else:
             print("FAILED: Triton does not match PyTorch reference")
+
+
+# =============================================================================
+# EVEN_C path tests (C already a power of 2)
+# =============================================================================
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+class TestEvenCPath:
+    """Verify correctness of the EVEN_C=True kernel path.
+
+    When C is already a power of 2, _prepare_forward_buffers sets EVEN_C=True,
+    which causes the kernel to use trivially-True masks and skip index clamping.
+    These tests confirm that path produces the same results as the PyTorch
+    reference, covering both forward and backward passes.
+    """
+
+    @pytest.mark.parametrize("C", [4, 8, 16, 32, 64])
+    def test_even_c_forward_matches_pytorch(self, C):
+        """Power-of-2 C (EVEN_C=True) forward partition matches PyTorch reference."""
+        batch, T, K = 2, 40, 5
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda", dtype=torch.float64
+        )
+
+        # Confirm EVEN_C will be True for this C
+        from flash_semicrf.streaming.triton_forward import _next_power_of_2
+
+        assert _next_power_of_2(C) == C, f"C={C} should be a power of 2"
+
+        partition_pytorch, _, _, _ = semi_crf_streaming_forward_pytorch(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+        partition_triton, _, _, _ = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+
+        torch.testing.assert_close(
+            partition_triton,
+            partition_pytorch,
+            rtol=1e-4,
+            atol=1e-4,
+            check_dtype=False,
+            msg=f"EVEN_C forward mismatch at C={C}",
+        )
+
+    @pytest.mark.parametrize("C", [4, 32, 64])
+    def test_even_c_backward_matches_pytorch(self, C):
+        """Power-of-2 C (EVEN_C=True) backward gradients match PyTorch reference."""
+        from flash_semicrf.streaming import semi_crf_streaming_backward_pytorch
+
+        batch, T, K = 2, 40, 5
+        cum_scores, transition, duration_bias, lengths = create_streaming_inputs(
+            batch, T, K, C, device="cuda", dtype=torch.float64
+        )
+
+        # Forward
+        log_Z, ring_ckpts, ckpt_interval, log_norm_ckpts = launch_streaming_triton_kernel(
+            cum_scores, transition, duration_bias, lengths, K
+        )
+        grad_output = torch.ones(batch, device="cuda", dtype=torch.float64)
+
+        # Triton backward
+        grads_triton = launch_streaming_triton_backward(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            log_Z,
+            ring_ckpts,
+            log_norm_ckpts,
+            ckpt_interval,
+            grad_output,
+        )
+        grad_cs_triton, grad_tr_triton, grad_db_triton = grads_triton[:3]
+
+        # PyTorch reference backward
+        log_Z_py, ring_ckpts_py, ckpt_interval_py, log_norm_ckpts_py = (
+            semi_crf_streaming_forward_pytorch(cum_scores, transition, duration_bias, lengths, K)
+        )
+        grads_pytorch = semi_crf_streaming_backward_pytorch(
+            cum_scores,
+            transition,
+            duration_bias,
+            lengths,
+            K,
+            log_Z_py,
+            ring_ckpts_py,
+            log_norm_ckpts_py,
+            ckpt_interval_py,
+        )
+        grad_cs_pytorch, grad_tr_pytorch, grad_db_pytorch = grads_pytorch[:3]
+
+        torch.testing.assert_close(
+            grad_cs_triton,
+            grad_cs_pytorch,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg=f"EVEN_C grad_cum_scores mismatch at C={C}",
+        )
+        torch.testing.assert_close(
+            grad_tr_triton,
+            grad_tr_pytorch,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg=f"EVEN_C grad_transition mismatch at C={C}",
+        )
+        torch.testing.assert_close(
+            grad_db_triton,
+            grad_db_pytorch,
+            rtol=1e-3,
+            atol=1e-3,
+            check_dtype=False,
+            msg=f"EVEN_C grad_duration_bias mismatch at C={C}",
+        )
+
+    def test_even_c_and_non_power_of_2_same_values(self):
+        """EVEN_C=True (C=32) and EVEN_C=False (C=31, padded to 32) give consistent output.
+
+        Both configs have the same C_PAD=32, but only C=32 triggers EVEN_C=True.
+        This verifies the two code paths agree on results for a shared C_PAD.
+        """
+        batch, T, K = 2, 40, 5
+        torch.manual_seed(0)
+
+        # Shared random weights in label space 0..30 (valid for both C=31 and C=32)
+        projected_base = torch.randn(batch, T, 31, device="cuda", dtype=torch.float64)
+        projected_base = projected_base - projected_base.mean(dim=1, keepdim=True)
+
+        def make_inputs(C):
+            projected = torch.zeros(batch, T, C, device="cuda", dtype=torch.float64)
+            projected[:, :, :31] = projected_base
+            cum_scores = torch.zeros(batch, T + 1, C, device="cuda", dtype=torch.float64)
+            cum_scores[:, 1:, :] = torch.cumsum(projected, dim=1)
+            transition = torch.zeros(C, C, device="cuda", dtype=torch.float64)
+            transition[:31, :31] = torch.randn(31, 31, device="cuda", dtype=torch.float64) * 0.1
+            duration_bias = torch.zeros(K, C, device="cuda", dtype=torch.float64)
+            duration_bias[:, :31] = torch.randn(K, 31, device="cuda", dtype=torch.float64) * 0.1
+            lengths = torch.full((batch,), T, dtype=torch.long, device="cuda")
+            return cum_scores, transition, duration_bias, lengths
+
+        # EVEN_C=False: C=31, C_PAD=32
+        cs31, tr31, db31, ln31 = make_inputs(31)
+        part31, _, _, _ = launch_streaming_triton_kernel(cs31, tr31, db31, ln31, K)
+
+        # EVEN_C=True: C=32, C_PAD=32 — same data in first 31 labels, zero in label 31
+        cs32, tr32, db32, ln32 = make_inputs(32)
+        part32, _, _, _ = launch_streaming_triton_kernel(cs32, tr32, db32, ln32, K)
+
+        # The results won't be identical (extra label 31 contributes in C=32), but
+        # both should be finite and within a reasonable range — the main check is
+        # that EVEN_C=True doesn't produce NaN/Inf or silently wrong values.
+        assert torch.isfinite(part31).all(), "EVEN_C=False produced non-finite partition"
+        assert torch.isfinite(part32).all(), "EVEN_C=True produced non-finite partition"

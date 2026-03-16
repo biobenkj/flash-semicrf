@@ -147,6 +147,7 @@ if HAS_TRITON:
         # Semiring and mode flags (compile-time specialization, Flash Attention pattern)
         IS_MAX_SEMIRING: tl.constexpr,  # False=log (logsumexp), True=max (Viterbi)
         TRACK_BACKPOINTERS: tl.constexpr,  # True only when IS_MAX_SEMIRING and Viterbi decode
+        EVEN_C: tl.constexpr,  # True when C is already a power of 2 (C == C_PAD)
         # Mixed precision support
         USE_FLOAT32: tl.constexpr = False,  # Use float32 for bulk compute
     ):
@@ -191,24 +192,34 @@ if HAS_TRITON:
 
         # 1D indices for labels (padded to power of 2)
         c_idx = tl.arange(0, C_PAD)
-        c_mask = c_idx < C
 
         # 2D indices for (C_dst, C_src) operations
         c_dst_idx = tl.arange(0, C_PAD)[:, None]  # (C_PAD, 1)
         c_src_idx = tl.arange(0, C_PAD)[None, :]  # (1, C_PAD)
-        c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
 
-        # Clamp indices so masked threads do not form out-of-bounds addresses.
-        #
-        # IMPORTANT: Even with a load/store mask, Triton may still evaluate address
-        # arithmetic for masked lanes. When C_PAD > C (non-power-of-2 class counts),
-        # raw c_idx/c_dst_idx/c_src_idx can form invalid pointers for tensors whose
-        # last dimension is C. This is undefined behavior and can appear as small,
-        # configuration-dependent numerical drift (for example after unrelated cache
-        # invalidation/recompilation). Always use *_safe indices for C-shaped tensors.
-        c_idx_safe = tl.minimum(c_idx, C - 1)
-        c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
-        c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
+        if EVEN_C:
+            # C is already a power of 2: C == C_PAD, so every index in [0, C_PAD)
+            # is valid. Define trivially-True masks so the compiler folds away all
+            # downstream mask operations, and skip the min-clamping.
+            c_mask = c_idx < C_PAD  # arange(0, C_PAD) < C_PAD — always True
+            c_mask_2d = (c_dst_idx < C_PAD) & (c_src_idx < C_PAD)  # ditto
+            c_idx_safe = c_idx
+            c_dst_idx_safe = c_dst_idx
+            c_src_idx_safe = c_src_idx
+        else:
+            c_mask = c_idx < C
+            c_mask_2d = (c_dst_idx < C) & (c_src_idx < C)
+            # Clamp indices so masked threads do not form out-of-bounds addresses.
+            #
+            # IMPORTANT: Even with a load/store mask, Triton may still evaluate address
+            # arithmetic for masked lanes. When C_PAD > C (non-power-of-2 class counts),
+            # raw c_idx/c_dst_idx/c_src_idx can form invalid pointers for tensors whose
+            # last dimension is C. This is undefined behavior and can appear as small,
+            # configuration-dependent numerical drift (for example after unrelated cache
+            # invalidation/recompilation). Always use *_safe indices for C-shaped tensors.
+            c_idx_safe = tl.minimum(c_idx, C - 1)
+            c_dst_idx_safe = tl.minimum(c_dst_idx, C - 1)
+            c_src_idx_safe = tl.minimum(c_src_idx, C - 1)
 
         # Load sequence length
         # Cast to int32 to match loop variable type from tl.range (int32)
@@ -713,6 +724,7 @@ if HAS_TRITON:
 
         return {
             "cum_scores": cum_scores,
+            "even_c": (C == C_PAD),
             "transition": transition,
             "duration_bias": duration_bias,
             "lengths": lengths,
@@ -893,6 +905,7 @@ if HAS_TRITON:
                 0,  # stride_bp_c (unused)
                 IS_MAX_SEMIRING=is_max,
                 TRACK_BACKPOINTERS=False,
+                EVEN_C=b["even_c"],
                 USE_FLOAT32=b["use_float32"],
                 num_warps=num_warps,
             )
@@ -1032,6 +1045,7 @@ if HAS_TRITON:
                 stride_bp_c,
                 IS_MAX_SEMIRING=True,
                 TRACK_BACKPOINTERS=True,
+                EVEN_C=b["even_c"],
                 USE_FLOAT32=b["use_float32"],
                 num_warps=num_warps,
             )
