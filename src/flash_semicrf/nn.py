@@ -276,55 +276,63 @@ class SemiMarkovCRFHead(nn.Module):
         self,
         proj_start: Optional[Tensor],
         proj_end: Optional[Tensor],
+        cum_scores: Tensor,
         lengths: Tensor,
-        T: int,
         device: torch.device,
-    ) -> tuple[Optional[Tensor], Optional[Tensor]]:
-        """Fold scalar sequence-boundary vectors into boundary projection tensors.
+    ) -> tuple[Optional[Tensor], Optional[Tensor], Tensor]:
+        """Fold scalar sequence-boundary vectors into the model.
 
-        When ``use_sequence_boundaries=True``, adds :attr:`pi_start` at position 0
-        and :attr:`pi_end` at each sequence's final position (``lengths[b] - 1``).
+        When full boundary projections are active (``proj_start is not None``),
+        adds :attr:`pi_start` and :attr:`pi_end` to positions 0 and ``lengths[b]-1``
+        of the projection tensors. This triggers ``HAS_BOUNDARIES`` in the kernel
+        (needed anyway for the full projections).
 
-        If boundary projections are already present (from ``use_boundary_projections``),
-        the scalar vectors are added on top. If not, zero tensors are allocated and
-        the scalars are placed at the edge positions.
+        When only scalar boundaries are active (``proj_start is None``), folds
+        :attr:`pi_start` and :attr:`pi_end` directly into ``cum_scores`` via
+        prefix-sum arithmetic, avoiding the boundary code path in the kernel
+        entirely (zero overhead)::
+
+            cum_scores[:, 0, :] -= pi_start   # content at t=0 gains +pi_start
+            cum_scores[b, L, :] += pi_end     # content at t+k=L gains +pi_end
 
         Args:
             proj_start: Existing start projections ``(batch, T, C)`` or ``None``.
             proj_end: Existing end projections ``(batch, T, C)`` or ``None``.
+            cum_scores: Cumulative scores ``(batch, T+1, C)``.
             lengths: Sequence lengths ``(batch,)``.
-            T: Maximum sequence length (time dimension).
             device: Device for tensor allocation.
 
         Returns:
-            Tuple of ``(proj_start, proj_end)``, each ``(batch, T, C)`` in float64,
-            or ``(None, None)`` if neither boundary feature is active.
+            Tuple of ``(proj_start, proj_end, cum_scores)`` — potentially modified.
+            When scalar-only, proj_start/proj_end remain ``None`` and cum_scores
+            is modified instead.
         """
         if self.pi_start is None:
-            return proj_start, proj_end
+            return proj_start, proj_end, cum_scores
 
-        batch = lengths.shape[0]
-        C = self.num_classes
         pi_start = self.pi_start.double()
         pi_end = self.pi_end.double()
 
         if proj_start is not None:
-            # Clone to avoid in-place modification of autograd graph tensors
+            # Both modes: add to existing projection tensors.
+            # Clone to avoid in-place modification of autograd graph tensors.
             proj_start = proj_start.clone()
             proj_end = proj_end.clone()
+            proj_start[:, 0, :] = proj_start[:, 0, :] + pi_start
+            b_idx = torch.arange(lengths.shape[0], device=device)
+            end_positions = (lengths - 1).long()
+            proj_end[b_idx, end_positions, :] = proj_end[b_idx, end_positions, :] + pi_end
         else:
-            proj_start = torch.zeros(batch, T, C, dtype=torch.float64, device=device)
-            proj_end = torch.zeros(batch, T, C, dtype=torch.float64, device=device)
+            # Scalar-only: fold into cum_scores to avoid HAS_BOUNDARIES overhead.
+            # Subtracting pi_start from cum_scores[:, 0, :] makes content_score
+            # (= cum[end] - cum[start]) include +pi_start for segments starting at 0.
+            # Adding pi_end to cum_scores[b, L, :] adds it for segments ending at L-1.
+            cum_scores = cum_scores.clone()
+            cum_scores[:, 0, :] = cum_scores[:, 0, :] - pi_start
+            b_idx = torch.arange(lengths.shape[0], device=device)
+            cum_scores[b_idx, lengths.long(), :] = cum_scores[b_idx, lengths.long(), :] + pi_end
 
-        # Add pi_start at position 0 (broadcast across batch)
-        proj_start[:, 0, :] = proj_start[:, 0, :] + pi_start
-
-        # Add pi_end at per-sequence final position
-        b_idx = torch.arange(batch, device=device)
-        end_positions = (lengths - 1).long()
-        proj_end[b_idx, end_positions, :] = proj_end[b_idx, end_positions, :] + pi_end
-
-        return proj_start, proj_end
+        return proj_start, proj_end, cum_scores
 
     def _build_edge_tensor(self, scores: Tensor, lengths: Tensor) -> Tensor:
         """Build edge potentials of shape (batch, T, K, C, C). O(TKC²) memory."""
@@ -559,8 +567,8 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
-        proj_start, proj_end = self._apply_sequence_boundaries(
-            proj_start, proj_end, lengths, T, scores.device
+        proj_start, proj_end, cum_scores = self._apply_sequence_boundaries(
+            proj_start, proj_end, cum_scores, lengths, scores.device
         )
 
         if backend_type == "streaming":
@@ -771,8 +779,8 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
-        proj_start, proj_end = self._apply_sequence_boundaries(
-            proj_start, proj_end, lengths, T, scores.device
+        proj_start, proj_end, cum_scores = self._apply_sequence_boundaries(
+            proj_start, proj_end, cum_scores, lengths, scores.device
         )
 
         if backend_type == "streaming":
@@ -862,8 +870,8 @@ class SemiMarkovCRFHead(nn.Module):
 
         # Compute boundary projections once (None, None if not enabled)
         proj_start, proj_end = self._compute_boundary_projections(hidden_states)
-        proj_start, proj_end = self._apply_sequence_boundaries(
-            proj_start, proj_end, lengths, T, hidden_states.device
+        proj_start, proj_end, cum_scores = self._apply_sequence_boundaries(
+            proj_start, proj_end, cum_scores, lengths, hidden_states.device
         )
 
         # Check which sequences need traceback
