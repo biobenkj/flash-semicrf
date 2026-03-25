@@ -9,7 +9,7 @@ computed on-the-fly from cumulative scores via prefix-sum decomposition:
 
 .. math::
     \text{edge}[c_{\text{dst}}, c_{\text{src}}] =
-    (\text{cum\_scores}[t+k, c_{\text{dst}}] - \text{cum\_scores}[t, c_{\text{dst}}])
+    (\text{cum\_scores}[t, c_{\text{dst}}] - \text{cum\_scores}[t-k, c_{\text{dst}}])
     + \text{duration\_bias}[k, c_{\text{dst}}]
     + \text{transition}[c_{\text{src}}, c_{\text{dst}}]
 
@@ -161,7 +161,7 @@ if HAS_TRITON:
 
         .. math::
             \text{edge}[c_\text{dst}, c_\text{src}] =
-            (\text{cum\_scores}[t+k, c_\text{dst}] - \text{cum\_scores}[t, c_\text{dst}])
+            (\text{cum\_scores}[t, c_\text{dst}] - \text{cum\_scores}[t-k, c_\text{dst}])
             + \text{duration\_bias}[k, c_\text{dst}]
             + \text{transition}[c_\text{src}, c_\text{dst}]
 

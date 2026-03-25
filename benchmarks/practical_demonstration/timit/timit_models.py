@@ -97,6 +97,10 @@ class TIMITModel(nn.Module):
             use_sequence_boundaries=use_sequence_boundaries,
         )
 
+    def _encode(self, inputs: Tensor) -> Tensor:
+        """Encode inputs to hidden states (compatible with run_uncertainty_inference)."""
+        return self.encoder(inputs)
+
     def forward(self, features: Tensor, lengths: Tensor) -> dict:
         hidden = self.encoder(features)
         return self.crf(hidden, lengths)

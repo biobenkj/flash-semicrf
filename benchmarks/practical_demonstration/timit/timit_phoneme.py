@@ -125,8 +125,10 @@ if HAS_LIGHTNING:
 
     try:
         import lightning.pytorch as L
+        from lightning.pytorch.callbacks import ModelCheckpoint
     except ImportError:
         import pytorch_lightning as L  # type: ignore[no-redef]
+        from pytorch_lightning.callbacks import ModelCheckpoint  # type: ignore[no-redef]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -275,6 +277,30 @@ def main():
         help="Add learnable start/end transition vectors (2C parameters) to "
         "flash-semicrf models. Equivalent to pytorch-crf's start_transitions/"
         "end_transitions. Enables controlled comparison of the parameterization gap.",
+    )
+    compare_parser.add_argument(
+        "--uncertainty-analysis",
+        type=Path,
+        default=None,
+        help="Run uncertainty analysis (semi-CRF vs linear CRF calibration) after "
+        "comparison and write output PNGs to this directory. Uses trained models "
+        "in-memory — no Lightning checkpoints required.",
+    )
+    compare_parser.add_argument(
+        "--uncertainty-num-utterances",
+        type=int,
+        default=8,
+        help="Number of utterances to visualize in uncertainty analysis (default: 8).",
+    )
+    compare_parser.add_argument(
+        "--uncertainty-selection",
+        choices=["confident-error", "entropy", "semi-advantage", "random"],
+        default="confident-error",
+        help="Utterance selection strategy for uncertainty analysis: "
+        "confident-error (rank-product of linear PER and semi entropy), "
+        "entropy (highest semi entropy), "
+        "semi-advantage (largest linear_per − semi_per), "
+        "random (seeded shuffle).",
     )
 
     # Train with Lightning (optional — requires flash-semicrf[lightning])
@@ -499,6 +525,9 @@ def main():
             args.data_dir,
             max_duration=args.max_duration,
             include_dp_standard_ref=args.dp_standard_ref,
+            uncertainty_analysis=args.uncertainty_analysis,
+            uncertainty_num_utterances=args.uncertainty_num_utterances,
+            uncertainty_selection=args.uncertainty_selection,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             epochs=args.epochs,
@@ -597,6 +626,15 @@ def main():
             log_uncertainty_stats=True,
         )
 
+        # Save best checkpoint by val/per so analyze-uncertainty gets the best model
+        ckpt_callback = ModelCheckpoint(
+            monitor="val/per",
+            mode="min",
+            save_top_k=1,
+            filename=f"best-{args.model}-K{k}",
+            save_last=True,
+        )
+
         # Use Lightning precision=32 (standard float32 tensors throughout).
         # The SemiCRF kernel precision is controlled separately via args.precision.
         trainer = L.Trainer(
@@ -608,6 +646,7 @@ def main():
             precision=32,
             enable_progress_bar=True,
             log_every_n_steps=10,
+            callbacks=[ckpt_callback],
         )
 
         num_params = sum(p.numel() for p in model.parameters())
@@ -621,6 +660,7 @@ def main():
         final_per = trainer.callback_metrics.get("val/per", "N/A")
         final_loss = trainer.callback_metrics.get("val/loss", "N/A")
         final_f1 = trainer.callback_metrics.get("val/boundary_f1", "N/A")
+        best_ckpt = ckpt_callback.best_model_path
         print("\n" + "=" * 60)
         print("LIGHTNING TRAINING SUMMARY")
         print("=" * 60)
@@ -632,6 +672,8 @@ def main():
         print(f"  Final val loss:        {final_loss}")
         print(f"  Final val PER:         {final_per}")
         print(f"  Final val Boundary F1: {final_f1}")
+        print("-" * 60)
+        print(f"  Best checkpoint:       {best_ckpt}")
         print("=" * 60)
 
     elif args.command == "analyze-uncertainty":

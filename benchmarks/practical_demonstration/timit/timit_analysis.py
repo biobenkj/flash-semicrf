@@ -235,6 +235,9 @@ def compare_models(
     data_dir: Path,
     max_duration: int = 30,
     include_dp_standard_ref: bool = False,
+    uncertainty_analysis: Path | None = None,
+    uncertainty_num_utterances: int = 8,
+    uncertainty_selection: str = "confident-error",
     **kwargs,
 ):
     """
@@ -251,16 +254,25 @@ def compare_models(
             (torch-struct linear scan) to compare against the Triton kernel.
             For paper runs, leave False — Triton correctness is covered by
             scripts/validate_correctness.py.
+        uncertainty_analysis: If not None, run uncertainty analysis after comparison
+            and write outputs to this directory.  Uses the trained K=1 (linear) and
+            K>1 (semi-CRF Triton) models in-memory — no checkpoints required.
+        uncertainty_num_utterances: Number of utterances to visualize (default 8).
+        uncertainty_selection: Utterance selection strategy for uncertainty plots.
     """
     results = {}
+    models = {}
 
     # 1. pytorch-crf baseline (optional - skip if not installed)
     if HAS_TORCHCRF:
         logger.info("=" * 60)
         logger.info("Training PYTORCH-CRF (external library baseline)")
         logger.info("=" * 60)
-        _, pytorch_crf_metrics = train_model(data_dir, model_type="pytorch-crf", **kwargs)
+        pytorch_crf_model, pytorch_crf_metrics = train_model(
+            data_dir, model_type="pytorch-crf", **kwargs
+        )
         results["pytorch_crf"] = pytorch_crf_metrics
+        models["pytorch_crf"] = pytorch_crf_model
     else:
         logger.warning("=" * 60)
         logger.warning("pytorch-crf not installed, skipping baseline comparison")
@@ -271,17 +283,18 @@ def compare_models(
     logger.info("=" * 60)
     logger.info("Training LINEAR CRF (flash-semicrf K=1, Triton)")
     logger.info("=" * 60)
-    _, linear_metrics = train_model(
+    linear_model, linear_metrics = train_model(
         data_dir, model_type="linear", backend="streaming", use_triton=True, **kwargs
     )
     results["linear_crf_triton"] = linear_metrics
+    models["linear_crf_triton"] = linear_model
 
     # 3. Semi-CRF with DP-standard (torch-struct linear scan — optional algorithmic baseline)
     if include_dp_standard_ref:
         logger.info("=" * 60)
         logger.info(f"Training SEMI-CRF DP-STANDARD (K={max_duration}, torch-struct linear scan)")
         logger.info("=" * 60)
-        _, dp_standard_metrics = train_model(
+        dp_standard_model, dp_standard_metrics = train_model(
             data_dir,
             model_type="semicrf",
             max_duration=max_duration,
@@ -289,12 +302,13 @@ def compare_models(
             **kwargs,
         )
         results["semi_crf_dp_standard"] = dp_standard_metrics
+        models["semi_crf_dp_standard"] = dp_standard_model
 
     # 4. Semi-CRF with Triton streaming (paper result)
     logger.info("=" * 60)
     logger.info(f"Training SEMI-CRF TRITON (K={max_duration}, streaming kernel)")
     logger.info("=" * 60)
-    _, triton_metrics = train_model(
+    triton_model, triton_metrics = train_model(
         data_dir,
         model_type="semicrf",
         max_duration=max_duration,
@@ -303,6 +317,7 @@ def compare_models(
         **kwargs,
     )
     results["semi_crf_triton"] = triton_metrics
+    models["semi_crf_triton"] = triton_model
 
     # Load corpus duration statistics for comparison with raw TIMIT
     corpus_stats = load_corpus_duration_stats(data_dir)
@@ -329,6 +344,33 @@ def compare_models(
     # Print corpus comparison if stats available
     if corpus_stats:
         _print_corpus_comparison(results, corpus_stats)
+
+    # Uncertainty analysis (uses in-memory models — no checkpoint round-trip)
+    if uncertainty_analysis is not None:
+        logger.info("\n" + "=" * 60)
+        logger.info("UNCERTAINTY ANALYSIS (semi-CRF vs linear CRF)")
+        logger.info("=" * 60)
+
+        # Load eval dataset with same normalization as training
+        train_dataset = TIMITDataset(data_dir / "train.jsonl", normalize=True)
+        eval_dataset = TIMITDataset(
+            data_dir / "test.jsonl",
+            normalize=True,
+            mean=train_dataset.mean,
+            std=train_dataset.std,
+        )
+
+        device = next(models["semi_crf_triton"].parameters()).device
+        _run_uncertainty_analysis(
+            models["semi_crf_triton"],
+            models["linear_crf_triton"],
+            eval_dataset,
+            device,
+            uncertainty_analysis,
+            batch_size=kwargs.get("batch_size", 32),
+            num_utterances=uncertainty_num_utterances,
+            selection=uncertainty_selection,
+        )
 
     return results
 
@@ -1228,63 +1270,37 @@ def _load_ckpt_model(ckpt_path, max_duration, device, hidden_dim=256, num_layers
     return model
 
 
-def run_analyze_uncertainty(args):
-    """Orchestration for the analyze-uncertainty subcommand."""
-    from pathlib import Path as _Path
+def _run_uncertainty_analysis(
+    semi_model,
+    linear_model,
+    eval_dataset,
+    device: torch.device,
+    out_dir: Path,
+    *,
+    batch_size: int = 32,
+    num_utterances: int = 8,
+    selection: str = "confident-error",
+    max_heatmap_labels: int = MAX_HEATMAP_LABELS,
+):
+    """Core uncertainty analysis: inference, metrics, plots, and summary.
 
-    if not HAS_LIGHTNING:
-        print(
-            "PyTorch Lightning is required for this command. "
-            "Install with: pip install flash-semicrf[lightning]"
-        )
-        return
-
-    device = torch.device(args.device)
-    out_dir = _Path(args.output_dir)
+    Shared by ``run_analyze_uncertainty`` (checkpoint path) and
+    ``compare_models`` (in-memory models).  Both ``semi_model`` and
+    ``linear_model`` must expose ``._encode(inputs)`` and ``.crf`` with
+    ``compute_boundary_marginals``, ``compute_position_marginals``,
+    ``compute_entropy_streaming``, and ``decode_with_traceback``.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- Load datasets (use train stats for normalization) ----
-    print("Loading datasets...")
-    train_dataset = TIMITDataset(
-        args.data_dir / "train.jsonl",
-        normalize=True,
-    )
-    jsonl_file = "test.jsonl"  # both val and test map to TIMIT test split
-    eval_dataset = TIMITDataset(
-        args.data_dir / jsonl_file,
-        normalize=True,
-        mean=train_dataset.mean,
-        std=train_dataset.std,
-    )
-
-    # ---- Load models ----
-    print(f"Loading semi-CRF checkpoint: {args.semi_crf_checkpoint}")
-    semi_model = _load_ckpt_model(
-        args.semi_crf_checkpoint,
-        max_duration=args.semi_max_duration,
-        device=device,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-    )
-
-    print(f"Loading linear CRF checkpoint: {args.linear_crf_checkpoint}")
-    linear_model = _load_ckpt_model(
-        args.linear_crf_checkpoint,
-        max_duration=1,
-        device=device,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-    )
-
     # ---- Run inference on both models ----
-    print(f"Running semi-CRF inference on {len(eval_dataset)} utterances...")
+    print(f"Running semi-CRF uncertainty inference on {len(eval_dataset)} utterances...")
     semi_results = run_uncertainty_inference(
-        semi_model, eval_dataset, device, batch_size=args.batch_size
+        semi_model, eval_dataset, device, batch_size=batch_size
     )
 
-    print(f"Running linear CRF inference on {len(eval_dataset)} utterances...")
+    print(f"Running linear CRF uncertainty inference on {len(eval_dataset)} utterances...")
     linear_results = run_uncertainty_inference(
-        linear_model, eval_dataset, device, batch_size=args.batch_size
+        linear_model, eval_dataset, device, batch_size=batch_size
     )
 
     # ---- Aggregate confidence-at-errors ----
@@ -1329,9 +1345,9 @@ def run_analyze_uncertainty(args):
     }
 
     # ---- Select utterances ----
-    indices = select_utterances(semi_results, linear_results, args.selection, args.num_utterances)
+    indices = select_utterances(semi_results, linear_results, selection, num_utterances)
     print(
-        f"Selected {len(indices)} utterances via '{args.selection}' strategy: " f"indices {indices}"
+        f"Selected {len(indices)} utterances via '{selection}' strategy: " f"indices {indices}"
     )
 
     # ---- Per-utterance figures ----
@@ -1346,10 +1362,10 @@ def run_analyze_uncertainty(args):
 
         print(f"  [{rank + 1}/{len(indices)}] {sr['utterance_id']} → {stem}.png")
         plot_per_utterance_uncertainty(
-            sr, lr, PHONES_39, main_path, max_heatmap_labels=args.max_heatmap_labels
+            sr, lr, PHONES_39, main_path, max_heatmap_labels=max_heatmap_labels
         )
         plot_per_utterance_uncertainty_supplement(
-            sr, lr, PHONES_39, sup_path, max_heatmap_labels=args.max_heatmap_labels
+            sr, lr, PHONES_39, sup_path, max_heatmap_labels=max_heatmap_labels
         )
 
     # ---- Summary figures ----
@@ -1390,3 +1406,61 @@ def run_analyze_uncertainty(args):
     )
     print("=" * 60)
     print(f"Output written to: {out_dir}/")
+
+
+def run_analyze_uncertainty(args):
+    """Orchestration for the analyze-uncertainty subcommand (checkpoint path)."""
+    if not HAS_LIGHTNING:
+        print(
+            "PyTorch Lightning is required for this command. "
+            "Install with: pip install flash-semicrf[lightning]"
+        )
+        return
+
+    device = torch.device(args.device)
+    out_dir = Path(args.output_dir)
+
+    # ---- Load datasets (use train stats for normalization) ----
+    print("Loading datasets...")
+    train_dataset = TIMITDataset(
+        args.data_dir / "train.jsonl",
+        normalize=True,
+    )
+    jsonl_file = "test.jsonl"  # both val and test map to TIMIT test split
+    eval_dataset = TIMITDataset(
+        args.data_dir / jsonl_file,
+        normalize=True,
+        mean=train_dataset.mean,
+        std=train_dataset.std,
+    )
+
+    # ---- Load models ----
+    print(f"Loading semi-CRF checkpoint: {args.semi_crf_checkpoint}")
+    semi_model = _load_ckpt_model(
+        args.semi_crf_checkpoint,
+        max_duration=args.semi_max_duration,
+        device=device,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+    )
+
+    print(f"Loading linear CRF checkpoint: {args.linear_crf_checkpoint}")
+    linear_model = _load_ckpt_model(
+        args.linear_crf_checkpoint,
+        max_duration=1,
+        device=device,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+    )
+
+    _run_uncertainty_analysis(
+        semi_model,
+        linear_model,
+        eval_dataset,
+        device,
+        out_dir,
+        batch_size=args.batch_size,
+        num_utterances=args.num_utterances,
+        selection=args.selection,
+        max_heatmap_labels=args.max_heatmap_labels,
+    )
