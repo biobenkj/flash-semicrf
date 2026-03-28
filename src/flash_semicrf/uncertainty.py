@@ -336,11 +336,11 @@ class UncertaintyMixin:
             # Backward to get per-position, per-label gradients
             partition.sum().backward()
 
-        # Gradient magnitude per position per class
+        # d(log Z)/d(score[t,c]) reflects the influence of label c at position t.
+        # Centering means gradients can be negative, so use softmax to convert
+        # to a proper distribution over classes at each position.
         grad = scores_for_grad.grad  # (batch, T, C)
-
-        # Convert to probabilities via softmax over classes
-        position_marginals = torch.softmax(grad.abs(), dim=-1)
+        position_marginals = torch.softmax(grad, dim=-1)
 
         return position_marginals
 

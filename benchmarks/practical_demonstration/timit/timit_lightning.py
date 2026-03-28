@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
@@ -157,15 +158,16 @@ if HAS_LIGHTNING:
             """NLL loss + Viterbi decode for PER/F1 accumulation (single encoder pass)."""
             # Single encoder pass shared by loss computation and Viterbi decode.
             hidden = self._encode(batch["inputs"])
+            bsz = hidden.shape[0]
             loss = self.crf.compute_loss(hidden, batch["lengths"], batch["labels"])
-            self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=bsz)
             if self._has_uncertainty and self.hparams.log_uncertainty_stats:
                 entropy = self.crf.compute_entropy_streaming(hidden, batch["lengths"])
                 self.log(
-                    "val/entropy_mean", entropy.mean(), on_step=False, on_epoch=True, sync_dist=True
+                    "val/entropy_mean", entropy.mean(), on_step=False, on_epoch=True, sync_dist=True, batch_size=bsz,
                 )
                 self.log(
-                    "val/entropy_max", entropy.max(), on_step=False, on_epoch=True, sync_dist=True
+                    "val/entropy_max", entropy.max(), on_step=False, on_epoch=True, sync_dist=True, batch_size=bsz,
                 )
                 # Per-position label entropy: informative for K=1 where boundary
                 # entropy is trivially uniform (every frame is a boundary).
@@ -176,7 +178,7 @@ if HAS_LIGHTNING:
                 mask = torch.arange(pos_ent.shape[1], device=pos_ent.device).unsqueeze(0) < batch["lengths"].unsqueeze(1)
                 pos_ent_mean = (pos_ent * mask).sum() / mask.sum()
                 self.log(
-                    "val/position_entropy_mean", pos_ent_mean, on_step=False, on_epoch=True, sync_dist=True
+                    "val/position_entropy_mean", pos_ent_mean, on_step=False, on_epoch=True, sync_dist=True, batch_size=bsz,
                 )
 
             result = self.crf.decode_with_traceback(hidden, batch["lengths"])

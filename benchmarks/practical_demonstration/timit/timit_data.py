@@ -223,7 +223,32 @@ PHONES_39 = [
 
 PHONE_TO_IDX = {p: i for i, p in enumerate(PHONES_39)}
 NUM_PHONES = len(PHONES_39)
-MAX_HEATMAP_LABELS = 12  # max phone classes shown in posterior heatmaps
+MAX_HEATMAP_LABELS = 39  # show all phone classes in posterior heatmaps
+
+# Colorblind-friendly categorical palette generated with glasbey.create_block_palette.
+# Phones grouped by manner of articulation so phonetically related sounds share
+# a hue band:  vowels (warm reds/oranges), diphthongs (blues), stops (greens),
+# affricates (pinks), fricatives (grays/tans), nasals (teals), liquids (purples),
+# glides (browns), silence (magenta).
+PHONE_COLORS_HEX = {
+    "aa": "#590000", "ae": "#750028", "ah": "#96000c",
+    "aw": "#00009e", "ay": "#1839e3",
+    "b": "#102804", "ch": "#db45db",
+    "d": "#004500", "dh": "#282428", "dx": "#b6f735",
+    "eh": "#b62d08", "er": "#db3d39", "ey": "#317dfb",
+    "f": "#393d49", "g": "#006900", "hh": "#595159",
+    "ih": "#db590c", "iy": "#f3823d", "jh": "#ffa6ff",
+    "k": "#318604", "l": "#410075",
+    "m": "#00796d", "n": "#1cc6aa", "ng": "#65f7ba",
+    "ow": "#69aaf3", "oy": "#aedff7",
+    "p": "#61ae18", "r": "#860cce",
+    "s": "#71696d", "sh": "#8e827d", "sil": "#9e0871",
+    "t": "#8aca20", "th": "#a69679",
+    "uh": "#fba249", "uw": "#fbc661",
+    "v": "#c2b29a", "w": "#492000", "y": "#926100", "z": "#e7d2a6",
+}
+# Index-based lookup for plotting: phone_colors[label_idx] -> hex string
+PHONE_COLORS = {i: PHONE_COLORS_HEX[p] for i, p in enumerate(PHONES_39)}
 
 # Typical phone durations (in frames at 10ms)
 # Useful for understanding expected semi-CRF behavior

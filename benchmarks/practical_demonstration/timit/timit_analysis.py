@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .timit_data import MAX_HEATMAP_LABELS, NUM_PHONES, PHONES_39, TIMITDataset
+from .timit_data import MAX_HEATMAP_LABELS, NUM_PHONES, PHONE_COLORS, PHONES_39, TIMITDataset
 from .timit_lightning import HAS_LIGHTNING, timit_collate_for_lightning
 from .timit_metrics import (
     compute_phone_error_rate,
@@ -865,16 +865,19 @@ def plot_per_utterance_uncertainty(
     semi_pm = semi_result["position_marginals"][:, keep]
     linear_pm = linear_result["position_marginals"][:, keep]
 
-    cmap20 = plt.get_cmap("tab20")
-    phone_colors = {i: cmap20(i % 20) for i in range(len(phone_map))}
+    # Data-driven colorscale: use the max across both models so they share the same range
+    vmax = max(semi_pm.max(), linear_pm.max(), 0.01)
+
+    phone_colors = PHONE_COLORS
     ref_segs = labels_to_segments(ref_labels)  # SegmentAnnotation (exclusive end)
 
     fig, axes = plt.subplots(
         4,
         1,
-        figsize=(14, 8),
-        gridspec_kw={"height_ratios": [0.6, 1.4, 1.4, 0.8]},
+        figsize=(14, 12),
+        gridspec_kw={"height_ratios": [0.4, 2.0, 2.0, 0.6]},
         sharex=True,
+        layout="constrained",
     )
 
     # --- Panel 1: Ground truth ---
@@ -909,10 +912,10 @@ def plot_per_utterance_uncertainty(
         interpolation="nearest",
         extent=[0, T, -0.5, len(keep) - 0.5],
         vmin=0,
-        vmax=1,
+        vmax=vmax,
     )
     ax.set_yticks(range(len(keep)))
-    ax.set_yticklabels(keep_names, fontsize=7)
+    ax.set_yticklabels(keep_names, fontsize=5)
     ax.set_ylabel("Semi-CRF p(c|t)", fontsize=9)
 
     # --- Panel 3: Linear CRF label posterior heatmap (same colorscale) ---
@@ -924,10 +927,10 @@ def plot_per_utterance_uncertainty(
         interpolation="nearest",
         extent=[0, T, -0.5, len(keep) - 0.5],
         vmin=0,
-        vmax=1,
+        vmax=vmax,
     )
     ax.set_yticks(range(len(keep)))
-    ax.set_yticklabels(keep_names, fontsize=7)
+    ax.set_yticklabels(keep_names, fontsize=5)
     ax.set_ylabel("Linear CRF p(c|t)", fontsize=9)
 
     # --- Panel 4: Boundary marginals overlay ---
@@ -958,8 +961,7 @@ def plot_per_utterance_uncertainty(
         fontsize=10,
     )
     fig.colorbar(im, ax=axes[1:3], shrink=0.6, label="p(c|t)")
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1006,17 +1008,20 @@ def plot_per_utterance_uncertainty_supplement(
     semi_pm = semi_result["position_marginals"][:, keep]
     linear_pm = linear_result["position_marginals"][:, keep]
 
-    cmap20 = plt.get_cmap("tab20")
-    phone_colors = {i: cmap20(i % 20) for i in range(len(phone_map))}
+    # Data-driven colorscale
+    vmax = max(semi_pm.max(), linear_pm.max(), 0.01)
+
+    phone_colors = PHONE_COLORS
     ref_segs = labels_to_segments(ref_labels)
 
-    height_ratios = [0.5, 0.5, 1.4, 0.5, 1.4, 0.7, 0.7]
+    height_ratios = [0.4, 0.4, 2.0, 0.4, 2.0, 0.6, 0.6]
     fig, axes = plt.subplots(
         7,
         1,
-        figsize=(14, 16),
+        figsize=(14, 20),
         gridspec_kw={"height_ratios": height_ratios},
         sharex=True,
+        layout="constrained",
     )
 
     _draw_phone_blocks(axes[0], ref_segs, T, phone_colors, phone_map)
@@ -1035,10 +1040,10 @@ def plot_per_utterance_uncertainty_supplement(
         interpolation="nearest",
         extent=[0, T, -0.5, len(keep) - 0.5],
         vmin=0,
-        vmax=1,
+        vmax=vmax,
     )
     axes[2].set_yticks(range(len(keep)))
-    axes[2].set_yticklabels(keep_names, fontsize=7)
+    axes[2].set_yticklabels(keep_names, fontsize=5)
     axes[2].set_ylabel("Semi-CRF p(c|t)", fontsize=9)
 
     linear_vit_segs = labels_to_segments(linear_result["pred_labels"])
@@ -1054,10 +1059,10 @@ def plot_per_utterance_uncertainty_supplement(
         interpolation="nearest",
         extent=[0, T, -0.5, len(keep) - 0.5],
         vmin=0,
-        vmax=1,
+        vmax=vmax,
     )
     axes[4].set_yticks(range(len(keep)))
-    axes[4].set_yticklabels(keep_names, fontsize=7)
+    axes[4].set_yticklabels(keep_names, fontsize=5)
     axes[4].set_ylabel("Linear CRF p(c|t)", fontsize=9)
 
     axes[5].plot(frames, semi_result["boundary_marginals"], color="steelblue", lw=1.2)
@@ -1084,8 +1089,7 @@ def plot_per_utterance_uncertainty_supplement(
         fontsize=10,
     )
     fig.colorbar(im, ax=axes[2:5], shrink=0.5, label="p(c|t)")
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1145,7 +1149,7 @@ def plot_entropy_vs_per_scatter(semi_results, linear_results, out_path):
     ax.set_title("Entropy vs. PER: Semi-CRF signals its own uncertainty", fontsize=11)
     ax.legend(fontsize=10)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1204,8 +1208,16 @@ def plot_calibration_summary(
     colors = ["steelblue", "steelblue", "orange", "orange"]
     alphas = [0.55, 0.90, 0.55, 0.90]
     bars = ax2.bar(bar_labels, values, color=colors)
-    for bar, alpha in zip(bars, alphas, strict=True):
+    for bar, alpha, val in zip(bars, alphas, values, strict=True):
         bar.set_alpha(alpha)
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.01,
+            f"{val:.4f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
 
     semi_gap = semi_conf_agg["confidence_gap"]
     linear_gap = linear_conf_agg["confidence_gap"]
@@ -1235,7 +1247,7 @@ def plot_calibration_summary(
     ax2.tick_params(axis="x", labelsize=8)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1259,9 +1271,13 @@ def _load_ckpt_model(ckpt_path, max_duration, device, hidden_dim=256, num_layers
         )
     input_dim = state_dict[proj_key].shape[1]
 
+    # Infer use_sequence_boundaries from checkpoint keys
+    use_seq_bounds = "crf.pi_start" in state_dict
+
     encoder = BiLSTMEncoder(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
     crf = UncertaintySemiMarkovCRFHead(
-        num_classes=NUM_PHONES, max_duration=max_duration, hidden_dim=hidden_dim
+        num_classes=NUM_PHONES, max_duration=max_duration, hidden_dim=hidden_dim,
+        use_sequence_boundaries=use_seq_bounds,
     )
     model = TIMITLightningModule(encoder=encoder, crf=crf, scheduler="none")
     model.load_state_dict(state_dict)
