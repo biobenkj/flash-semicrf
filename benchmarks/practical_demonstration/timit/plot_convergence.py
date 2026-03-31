@@ -15,8 +15,8 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import pandas as pd
+import matplotlib.pyplot as plt  # noqa: E402 — must follow matplotlib.use()
+import pandas as pd  # noqa: E402
 
 
 def load_val_metrics(csv_path: str | Path) -> pd.DataFrame:
@@ -47,8 +47,11 @@ def plot_convergence(
     ]
 
     # Drop panels not present in both CSVs
-    panels = [(col, title, lower) for col, title, lower in panels
-              if col in k1.columns and col in k30.columns]
+    panels = [
+        (col, title, lower)
+        for col, title, lower in panels
+        if col in k1.columns and col in k30.columns
+    ]
 
     nrows = 2
     ncols = (len(panels) + 1) // 2
@@ -92,7 +95,9 @@ def main():
     parser = argparse.ArgumentParser(description="Plot K=1 vs K=30 training convergence")
     parser.add_argument("--k1-csv", type=Path, required=True, help="K=1 Lightning metrics CSV")
     parser.add_argument("--k30-csv", type=Path, required=True, help="K=30 Lightning metrics CSV")
-    parser.add_argument("--output", type=Path, default=Path("convergence.png"), help="Output PNG path")
+    parser.add_argument(
+        "--output", type=Path, default=Path("convergence.png"), help="Output PNG path"
+    )
     args = parser.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1276,7 +1276,9 @@ def _load_ckpt_model(ckpt_path, max_duration, device, hidden_dim=256, num_layers
 
     encoder = BiLSTMEncoder(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
     crf = UncertaintySemiMarkovCRFHead(
-        num_classes=NUM_PHONES, max_duration=max_duration, hidden_dim=hidden_dim,
+        num_classes=NUM_PHONES,
+        max_duration=max_duration,
+        hidden_dim=hidden_dim,
         use_sequence_boundaries=use_seq_bounds,
     )
     model = TIMITLightningModule(encoder=encoder, crf=crf, scheduler="none")
@@ -1362,9 +1364,7 @@ def _run_uncertainty_analysis(
 
     # ---- Select utterances ----
     indices = select_utterances(semi_results, linear_results, selection, num_utterances)
-    print(
-        f"Selected {len(indices)} utterances via '{selection}' strategy: " f"indices {indices}"
-    )
+    print(f"Selected {len(indices)} utterances via '{selection}' strategy: " f"indices {indices}")
 
     # ---- Per-utterance figures ----
     for rank, idx in enumerate(indices):
