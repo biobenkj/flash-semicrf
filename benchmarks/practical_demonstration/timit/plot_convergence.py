@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402 — must follow matplotlib.use()
 import pandas as pd  # noqa: E402
